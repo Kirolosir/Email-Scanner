@@ -1,0 +1,137 @@
+{
+  "version": 1,
+  "account": "coach@example.edu",
+  "timezone": "America/New_York",
+  "taxonomy": [
+    {
+      "slug": "recruit_intro",
+      "display": "Recruit Introduction",
+      "description": "A prospective student-athlete introducing themselves and expressing interest.",
+      "examples": ["Introduction and recruiting profile", "Interested in the program"],
+      "label": "Recruiting/Triage/Recruit Introduction",
+      "expected_sender": "recruit",
+      "drafting": {
+        "mode": "generic",
+        "guidance": "Thank the recruit for reaching out. Acknowledge only details actually present and avoid making an evaluation or recruiting promise."
+      }
+    },
+    {
+      "slug": "recruit_update",
+      "display": "Recruit Update",
+      "description": "A recruit sharing a schedule, academic, athletic, or recruiting update.",
+      "examples": ["Updated fall schedule", "Academic and club update"],
+      "label": "Recruiting/Triage/Recruit Update",
+      "expected_sender": "recruit",
+      "drafting": {
+        "mode": "generic",
+        "guidance": "Acknowledge the update without promising attendance, evaluation, or follow-up by a particular date."
+      }
+    },
+    {
+      "slug": "video_update",
+      "display": "Video Update",
+      "description": "A recruit sharing highlight film or a new video link.",
+      "examples": ["New highlights", "Game film update"],
+      "label": "Recruiting/Triage/Video Update",
+      "expected_sender": "recruit",
+      "drafting": {
+        "mode": "generic",
+        "guidance": "Thank the sender for the film without claiming it has already been watched or evaluated."
+      }
+    },
+    {
+      "slug": "parent",
+      "display": "Parent or Guardian",
+      "description": "A parent or guardian writing about a prospective student-athlete.",
+      "examples": ["Writing on behalf of my son", "Question from a parent"],
+      "label": "Recruiting/Triage/Parent",
+      "expected_sender": "parent",
+      "drafting": {
+        "mode": "generic",
+        "guidance": "Be courteous and neutral. Do not disclose private recruiting information or make commitments about the student."
+      }
+    },
+    {
+      "slug": "other_coach",
+      "display": "Other Coach",
+      "description": "A club, high-school, or college coach contacting the account owner.",
+      "examples": ["Club coach introduction", "Coach recommending a player"],
+      "label": "Recruiting/Triage/Other Coach",
+      "expected_sender": "coach",
+      "drafting": {
+        "mode": "generic",
+        "guidance": "Acknowledge the coach professionally without making recruiting or scheduling commitments."
+      }
+    },
+    {
+      "slug": "camp_inquiry",
+      "display": "Camp Inquiry",
+      "description": "A person asking about a clinic, camp, registration, timing, or logistics.",
+      "examples": ["Clinic registration question", "Camp schedule question"],
+      "label": "Recruiting/Triage/Camp Inquiry",
+      "expected_sender": "other",
+      "drafting": {
+        "mode": "generic",
+        "guidance": "Answer only from facts contained in the email or owner guidance. If details are missing, say the owner will confirm rather than inventing them."
+      }
+    },
+    {
+      "slug": "administrative",
+      "display": "Administrative",
+      "description": "Legitimate human administrative, operational, or institutional correspondence.",
+      "examples": ["Scheduling administration", "Department request"],
+      "label": "Recruiting/Triage/Administrative",
+      "expected_sender": "administrative",
+      "drafting": {
+        "mode": "generic",
+        "guidance": "Draft only a neutral acknowledgement when the message is from a human. Automated and bulk messages are suppressed before drafting."
+      }
+    },
+    {
+      "slug": "other",
+      "display": "Other Human Email",
+      "description": "A legitimate human message that does not fit another reviewed category.",
+      "examples": ["General question", "Uncategorized personal message"],
+      "label": "Recruiting/Triage/Other",
+      "expected_sender": "other",
+      "drafting": {
+        "mode": "generic",
+        "guidance": "Write a brief acknowledgement without inventing an answer. The owner will edit or discard it."
+      }
+    }
+  ],
+  "protected_labels": [
+    {
+      "label": "2027B",
+      "requires_recipient_approval": true
+    }
+  ],
+  "evidence_gated_labels": [
+    {
+      "label": "2027B",
+      "pattern_set": "grad_year",
+      "classifier_field": "grad_year",
+      "expected_value": "2027",
+      "require_sender_type": ["recruit"],
+      "require_categories": ["recruit_intro", "recruit_update", "video_update"],
+      "min_confidence": "high"
+    }
+  ],
+  "system_labels": {
+    "needs_review": "Recruiting/Triage/Needs Review",
+    "processed": "Recruiting/Triage/Processed"
+  },
+  "ai_drafting": {
+    "display_name": "Coach Name",
+    "role": "Coach",
+    "organization": "Program Name",
+    "signature": "Coach Name\nCoach\nProgram Name",
+    "default_guidance": "Do not make admissions, roster, scholarship, evaluation, or scheduling promises. Every draft will be reviewed and edited before it is sent manually.",
+    "max_words": 180
+  },
+  "paths": {
+    "state_dir": "triage-state/coach-example",
+    "draft_log_dir": "draft-logs/coach-example",
+    "template_dir": "templates"
+  }
+}
