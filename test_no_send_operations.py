@@ -23,6 +23,7 @@ PRODUCTION = [
     ROOT / "broker_client.py",
     ROOT / "broker_crypto.py",
     ROOT / "broker_wsgi.py",
+    ROOT / "approve_account.py",
     ROOT / "taxonomy.py",
     ROOT / "drafting.py",
     ROOT / "migrate_account.py",

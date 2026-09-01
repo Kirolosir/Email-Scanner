@@ -31,6 +31,7 @@ PROFILE_MODULE = "account_profile.py"
 
 PIPELINE_MODULES = [
     "campaign.py",
+    "approve_account.py",
     "broker_client.py",
     "broker_crypto.py",
     "broker_wsgi.py",
@@ -175,3 +176,35 @@ def test_profile_module_is_the_one_place_literals_live():
             f"{expected!r} is missing from {PROFILE_MODULE}; the profile is "
             "no longer the source of truth"
         )
+
+
+@pytest.mark.parametrize("filename", PIPELINE_MODULES)
+def test_no_domain_value_is_embedded_inside_a_longer_string(filename):
+    """The whole-string check above misses a category name buried in prose.
+
+    A dead classification prompt in gemini_client.py carried the entire legacy
+    category list inside one 558-character string and was invisible to the
+    guard for exactly that reason. Model prompts are the natural place for a
+    category vocabulary to reappear, so substrings are checked too.
+    """
+    forbidden = _forbidden_vocabulary()
+    # Years and short tokens appear legitimately inside unrelated prose
+    # (a URL, a date, a comment), so only distinctive multi-word or
+    # underscored domain values are searched for as substrings.
+    distinctive = {
+        value for value in forbidden
+        if len(value) >= 8 and ("_" in value or "/" in value)
+    }
+    assert distinctive, "expected distinctive domain values to search for"
+
+    offenders = []
+    for lineno, value in _string_constants(filename):
+        if len(value) <= 40:
+            continue  # already covered by the exact-match test
+        for needle in distinctive:
+            if needle in value:
+                offenders.append(f"{filename}:{lineno}: embeds {needle!r}")
+    assert offenders == [], (
+        "domain vocabulary embedded in a long string literal:\n  "
+        + "\n  ".join(offenders)
+    )

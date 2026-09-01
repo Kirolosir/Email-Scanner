@@ -43,6 +43,14 @@ APPROVAL_BINDINGS = {
         2: ("authenticated Gmail account", "a literal would bind the approval "
             "to a hardcoded address instead of the real mailbox"),
     },
+    "load_ai_drafting_approval": {
+        0: ("AI drafting approval file path", "a literal would ignore the "
+            "operator-selected approval artifact"),
+        1: ("authenticated Gmail account", "a literal would bind AI drafting "
+            "to a hardcoded mailbox"),
+        2: ("runtime taxonomy", "a literal would approve categories outside "
+            "the account configuration"),
+    },
 }
 
 # Arguments that may legitimately be omitted, but must still be runtime values
@@ -66,6 +74,9 @@ PARAMETER_NAMES = {
     "build_template_approvals": {
         0: "approval_path", 2: "actual_account",
     },
+    "load_ai_drafting_approval": {
+        0: "path", 1: "actual_account", 2: "valid_categories",
+    },
 }
 
 PRODUCTION_FILES = ["campaign.py", "triage.py", "daily_triage.py"]
@@ -77,15 +88,37 @@ REQUIRED_PARAMETERS = {
     "build_template_approvals": ["approval_path", "approved_names",
                                  "actual_account"],
     "load_template_approval": ["path", "actual_account"],
+    "load_ai_drafting_approval": [
+        "path", "actual_account", "valid_categories",
+    ],
 }
 
 
-def _calls_to(tree, name):
+def _alias_map(tree):
+    """Local name -> imported name, for `from x import y as z`.
+
+    Without this, a module that imports an approval loader under an alias is
+    invisible to every check below. triage.py does exactly that
+    (`load_ai_drafting_approval as _load_ai_drafting_approval`), so its AI
+    drafting binding was silently unguarded: a hardcoded account there would
+    have passed the whole suite. A guard that can be evaded by renaming an
+    import is not a guard.
+    """
+    aliases = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                aliases[alias.asname or alias.name] = alias.name
+    return aliases
+
+
+def _calls_to(tree, name, aliases=None):
+    aliases = aliases if aliases is not None else _alias_map(tree)
     return [
         node for node in ast.walk(tree)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
-        and node.func.id == name
+        and aliases.get(node.func.id, node.func.id) == name
     ]
 
 
@@ -100,8 +133,9 @@ def _argument_at(call, index, parameter_name):
 def _iter_binding_calls():
     for filename in PRODUCTION_FILES:
         tree = ast.parse((ROOT / filename).read_text(encoding="utf-8"))
+        aliases = _alias_map(tree)
         for function, spec in APPROVAL_BINDINGS.items():
-            for call in _calls_to(tree, function):
+            for call in _calls_to(tree, function, aliases):
                 yield filename, function, spec, call
 
 
@@ -165,12 +199,15 @@ def test_both_approval_systems_are_actually_wired():
     assert found["build_template_approvals"] >= 2, (
         "expected both triage.py and daily_triage.py to bind template approvals"
     )
+    assert found["load_ai_drafting_approval"] >= 2, (
+        "expected both triage.py and daily_triage.py to bind AI drafting approval"
+    )
 
 
 @pytest.mark.parametrize("function,parameters", sorted(REQUIRED_PARAMETERS.items()))
 def test_binding_parameters_have_no_defaults(function, parameters):
     """A default on a security argument lets a caller omit it silently."""
-    for filename in ("campaign.py", "triage.py"):
+    for filename in ("campaign.py", "triage.py", "drafting.py"):
         tree = ast.parse((ROOT / filename).read_text(encoding="utf-8"))
         definitions = [
             node for node in ast.walk(tree)
@@ -189,3 +226,34 @@ def test_binding_parameters_have_no_defaults(function, parameters):
                     f"{filename}: {function}() gives {parameter!r} a default; "
                     "it must stay required so the binding cannot be skipped"
                 )
+
+
+def test_guard_resolves_aliased_imports():
+    """Guards the guard. triage.py imports the AI drafting loader under an
+    alias; before alias resolution the guard counted zero calls there and
+    skipped every argument check, so a hardcoded account in triage.py would
+    have passed silently."""
+    tree = ast.parse(
+        "from drafting import load_ai_drafting_approval as _loader\n"
+        "x = _loader(path, account, taxonomy)\n"
+    )
+    calls = _calls_to(tree, "load_ai_drafting_approval")
+
+    assert len(calls) == 1, (
+        "the guard cannot see a call made through an aliased import"
+    )
+
+
+def test_every_production_file_binding_is_actually_inspected():
+    """Each production file that imports an approval loader must contribute
+    at least one inspected call, or its binding is unguarded."""
+    seen = {}
+    for filename, function, _spec, _call in _iter_binding_calls():
+        seen.setdefault(filename, set()).add(function)
+
+    assert "load_ai_drafting_approval" in seen.get("triage.py", set()), (
+        "triage.py's AI drafting binding is not being inspected"
+    )
+    assert "load_ai_drafting_approval" in seen.get("daily_triage.py", set()), (
+        "daily_triage.py's AI drafting binding is not being inspected"
+    )
