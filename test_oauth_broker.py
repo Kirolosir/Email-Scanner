@@ -1045,3 +1045,37 @@ def test_env_errors_never_echo_a_secret():
         except BrokerConfigError as exc:
             assert CLIENT_SECRET not in str(exc)
             assert BEARER not in str(exc)
+
+
+def test_ttl_constants_are_documented_as_upper_bounds():
+    """The 24-hour TTLs were stated in three places as if they were a
+    guarantee. They are not: both stores are in process memory, and the
+    deployed free-plan instance spins down when idle, which wipes them. A
+    pickup lost that way returns 404 - indistinguishable from one already
+    collected, which is the misleading part."""
+    source = _source("oauth_broker.py")
+    ttl_block = source[source.index("INVITE_TTL_SECONDS") - 400:
+                       source.index("INVITE_TTL_SECONDS") + 80]
+
+    assert "spin" in ttl_block.lower(), (
+        "the TTL constants must record that they are upper bounds, not "
+        "guarantees, or the next reader will trust them again"
+    )
+
+
+def test_documentation_does_not_promise_a_24_hour_pickup_window():
+    """Regression for a false claim that was in the README, the mint-invite
+    output, and implicitly in the constants."""
+    from pathlib import Path
+
+    readme = Path("README.md").read_text(encoding="utf-8")
+    client = Path("broker_client.py").read_text(encoding="utf-8")
+
+    # The only surviving mention in the README is the heading that denies it.
+    mentions = [line for line in readme.splitlines()
+                if "24 hour" in line or "24h" in line]
+    assert all("not 24 hours" in line for line in mentions), (
+        f"README still promises a 24-hour window: {mentions}"
+    )
+    assert "sits for up to 24 hours awaiting pickup" not in readme
+    assert "single use and expires in 24 hours" not in client

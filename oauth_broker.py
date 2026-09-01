@@ -69,6 +69,10 @@ DEFAULT_SCOPES = ("https://www.googleapis.com/auth/gmail.modify",)
 
 STATE_BYTES = 32          # 256 bits
 STATE_TTL_SECONDS = 600   # 10 minutes to complete a sign-in
+# Upper bounds, not guarantees. Both stores are in process memory, so on a
+# host that spins an idle instance down (Render's free plan does) the real
+# lifetime is "until the next spin-down", which can be far shorter. A pickup
+# lost this way returns 404 - indistinguishable from one already collected.
 INVITE_TTL_SECONDS = 86400
 PICKUP_TTL_SECONDS = 86400
 

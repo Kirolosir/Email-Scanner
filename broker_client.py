@@ -164,7 +164,10 @@ def main(argv=None):
         else:
             print("3. Send the owner:  https://<broker-host>/start/"
                   f"{invite_id}")
-        print("\nThe link is single use and expires in 24 hours.")
+        print("\nThe link is single use. Its 24-hour TTL is an upper bound,")
+        print("not a promise: on a free-plan instance an idle spin-down wipes")
+        print("in-memory state, so have the owner sign in and collect the")
+        print("credential in the same sitting.")
         return 0
 
     bearer = os.environ.get(args.bearer_env, "")

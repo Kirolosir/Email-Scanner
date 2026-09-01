@@ -469,6 +469,35 @@ with identical single-use semantics first.
 Threads are fine: `MemoryStore.take` removes with a single `dict.pop`, so two
 concurrent callbacks cannot both consume the same state.
 
+### On the free plan the real window is one sitting, not 24 hours
+
+The deployed broker (`srv-dabdm24s728c73adbr70`, "Email Scanner") runs on
+Render's **free** plan. Confirmed on the dashboard: Manual Scaling is 1,
+autoscaling is off, and free instances cannot scale at all — so the
+single-instance requirement above is enforced by the plan itself, not merely
+by configuration.
+
+The same plan carries a consequence that matters more. **Free instances spin
+down after periods of inactivity, and a spin-down wipes everything held in
+memory.** The invite, pending-state, and pickup stores are all in the web
+worker's memory, so:
+
+| Store | Survives a spin-down? | Consequence |
+| --- | --- | --- |
+| Seeded invites | Yes | Re-seeded from `BROKER_INVITE_IDS` at boot |
+| Pending OAuth states | **No** | An owner who takes longer than the idle window between opening the link and finishing Google sign-in gets "this link is not valid or has already been used" |
+| Sealed pickups | **No** | A credential the operator has not collected yet is **destroyed**, and `/pickup` then returns 404 exactly as though it had already been collected |
+
+So on the free plan, treat the whole flow as **one continuous sitting**: mint
+the invite, have the owner sign in, and collect the credential without a long
+idle gap. The failure mode is quiet and misleading — both losses look
+identical to "already used", which is the same response a genuine replay gets.
+
+To get an actual 24-hour window, either move to a paid instance (no spin-down)
+or persist the pickup store. Persisting it is not a free choice: it puts
+sealed credentials somewhere other than one process's memory, and that
+tradeoff should be reasoned through before it is built, not assumed.
+
 ### Target
 
 Render is the recommended host: it builds a Python service from
@@ -537,7 +566,10 @@ The command prints it:
 https://your-broker-host.example.com/start/<invite-id>
 ```
 
-Single use, expires in 24 hours. The owner opens it, signs in with Google, and
+Single use. The invite id itself is re-seeded from configuration at every
+boot, but the sign-in it starts is not: on the free plan the owner should
+open the link and finish while you are still with them, because an idle
+spin-down loses the pending state. The owner opens it, signs in with Google, and
 sees a plain confirmation page. That page contains no token and no code, and
 says explicitly that nothing was sent from their account and no message was
 read during sign-in.
@@ -578,7 +610,10 @@ After that, `tokens/coach.json` is an ordinary credential and the existing
 - TLS termination is the host's job. The app enforces `https`, honouring
   `X-Forwarded-Proto` so a hosting proxy does not cause it to reject every
   request.
-- Sealed ciphertext sits for up to 24 hours awaiting pickup. Collect promptly.
+- Sealed ciphertext is held **in memory only**. On the free plan an idle
+  spin-down destroys it, so collect it in the same sitting rather than
+  relying on a 24-hour window — there is not one. See
+  [On the free plan the real window is one sitting](#on-the-free-plan-the-real-window-is-one-sitting-not-24-hours).
 
 ## Required rollout order
 
