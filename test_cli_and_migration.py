@@ -252,7 +252,10 @@ def test_pipelines_forward_every_gate_into_plan_message(filename):
     """M8/M9. Each gate is enforced inside plan_message, so a call site that
     drops one silently disables it for that pipeline. parse_args tests cannot
     see this - only the call site can."""
-    required = {"template_approvals", "taxonomy_confirmation", "profile"}
+    required = {
+        "template_approvals", "taxonomy_confirmation", "profile",
+        "ai_drafting_approvals",
+    }
     calls = _plan_message_calls(filename)
 
     assert calls, f"expected {filename} to call plan_message"
@@ -273,7 +276,9 @@ def test_pipelines_pass_runtime_values_not_literals_into_plan_message(filename):
     import ast
     for call in _plan_message_calls(filename):
         for keyword in call.keywords:
-            if keyword.arg in {"taxonomy_confirmation", "profile"}:
+            if keyword.arg in {
+                "taxonomy_confirmation", "profile", "ai_drafting_approvals",
+            }:
                 assert not isinstance(keyword.value, ast.Constant), (
                     f"{filename}:{call.lineno} passes a literal as "
                     f"{keyword.arg}"
@@ -303,3 +308,80 @@ def test_write_config_uses_an_exclusive_create():
     assert any(("0o600" in flag or "384" in flag) for flag in flags), (
         "config must be created owner-only, not merely chmod'd afterwards"
     )
+
+
+def test_account_config_loads_dynamic_year_gate_system_labels_and_ai_guidance(
+    tmp_path,
+):
+    document = {
+        "version": 1,
+        "account": ACCOUNT,
+        "timezone": "America/New_York",
+        "taxonomy": [
+            {
+                "slug": "prospect",
+                "display": "Prospect",
+                "description": "A prospective applicant.",
+                "examples": ["Class of 2027"],
+                "label": "Custom/Prospect",
+                "expected_sender": "recruit",
+                "drafting": {
+                    "mode": "generic",
+                    "guidance": "Acknowledge without making a promise.",
+                },
+            },
+            {
+                "slug": "other",
+                "display": "Other",
+                "description": "Other human mail.",
+                "examples": [],
+                "label": "Custom/Other",
+                "drafting": {"mode": "off"},
+            },
+        ],
+        "protected_labels": [{"label": "Prospects/2027"}],
+        "evidence_gated_labels": [{
+            "label": "Prospects/2027",
+            "pattern_set": "grad_year",
+            "classifier_field": "grad_year",
+            "expected_value": "2027",
+            "require_sender_type": ["recruit"],
+            "require_categories": ["prospect"],
+            "min_confidence": "high",
+        }],
+        "system_labels": {
+            "needs_review": "Custom/Needs Review",
+            "processed": "Custom/Processed",
+        },
+        "ai_drafting": {
+            "display_name": "Coach Example",
+            "signature": "Coach Example",
+            "default_guidance": "Use only known facts.",
+            "max_words": 120,
+        },
+    }
+    path = tmp_path / "account.json"
+    path.write_text(json.dumps(document))
+
+    profile = load_profile(str(path))
+
+    assert profile.year_labels == {"2027": "Prospects/2027"}
+    assert profile.supported_years == {"2027"}
+    assert profile.evidence_categories == {"prospect"}
+    assert profile.evidence_sender_types == {"recruit"}
+    assert profile.system_labels["processed"] == "Custom/Processed"
+    assert profile.drafting_guidance["prospect"].startswith("Acknowledge")
+    assert profile.ai_drafting["max_words"] == 120
+
+
+def test_migration_carries_reviewed_system_labels_into_account_config():
+    label_config = {
+        "years": {"2027": "2027B"},
+        "categories": dict(LEGACY_PROFILE.category_labels),
+        "system": {
+            "needs_review": "Custom/Needs Review",
+            "processed": "Custom/Processed",
+        },
+    }
+    document = build_account_config(ACCOUNT, label_config=label_config)
+    assert document["system_labels"] == label_config["system"]

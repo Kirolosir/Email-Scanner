@@ -69,10 +69,13 @@ def _classification(category, sender_type, year="2027", valid=True):
     (build_initial_query, 2, "newer_than:2m"),
     (build_daily_query, 3, "newer_than:3d"),
 ])
-def test_queries_are_inbox_only_and_exclude_unsafe_mailboxes(builder, value, fragment):
+def test_queries_include_archived_received_mail_and_exclude_unsafe_mailboxes(
+    builder, value, fragment,
+):
     query = builder(value)
     assert fragment in query
-    for clause in ("in:inbox", "-in:spam", "-in:trash", "-in:sent", "-in:drafts"):
+    assert "in:inbox" not in query
+    for clause in ("-in:spam", "-in:trash", "-in:sent", "-in:drafts"):
         assert clause in query
 
 

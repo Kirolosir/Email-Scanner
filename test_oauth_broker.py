@@ -970,3 +970,78 @@ def test_operator_private_key_cannot_be_committed():
     # The example must stay committed; a filled-in copy must not.
     assert "broker.env" in ignored
     assert "!broker.env.example" in ignored
+
+
+# --------------------------------------------------------------------
+# Environment parsing must diagnose the real cause.
+# --------------------------------------------------------------------
+
+_GOOD_HEX = "bb" * 32
+
+
+def _env(**overrides):
+    env = {
+        "BROKER_CLIENT_ID": "id.apps.googleusercontent.com",
+        "BROKER_CLIENT_SECRET": CLIENT_SECRET,
+        "BROKER_REDIRECT_URI": "https://b.example.test/callback",
+        "BROKER_OPERATOR_PUBLIC_KEY": _GOOD_HEX,
+        "BROKER_OPERATOR_BEARER": BEARER,
+        "BROKER_INVITE_IDS": "",
+    }
+    env.update(overrides)
+    return {k: v for k, v in env.items() if v is not None}
+
+
+def test_a_valid_hex_public_key_is_accepted():
+    assert BrokerConfig.from_environment(_env()).operator_public_key == \
+        bytes.fromhex(_GOOD_HEX)
+
+
+@pytest.mark.parametrize("value", [None, "", "   ", '""'])
+def test_missing_public_key_says_it_is_missing(value):
+    """bytes.fromhex("") returns b"" without raising, so an unset variable
+    used to reach the length check and be reported as a format problem -
+    sending the reader to inspect a value that was correct."""
+    with pytest.raises(BrokerConfigError, match="is not set"):
+        BrokerConfig.from_environment(_env(BROKER_OPERATOR_PUBLIC_KEY=value))
+
+
+@pytest.mark.parametrize("value", [
+    '"' + _GOOD_HEX + '"',
+    "'" + _GOOD_HEX + "'",
+    "0x" + _GOOD_HEX,
+    "0X" + _GOOD_HEX,
+    "  " + _GOOD_HEX + "  ",
+    _GOOD_HEX + "\n",
+])
+def test_paste_artifacts_are_tolerated(value):
+    """Quotes, a 0x prefix, and stray whitespace are what a value picks up
+    on its way through a hosting dashboard."""
+    config = BrokerConfig.from_environment(
+        _env(BROKER_OPERATOR_PUBLIC_KEY=value)
+    )
+    assert config.operator_public_key == bytes.fromhex(_GOOD_HEX)
+
+
+@pytest.mark.parametrize("value,expected", [
+    (_GOOD_HEX[:-1], "must be hex"),
+    ("zz" * 32, "must be hex"),
+    ("bb" * 16, "exactly 64 hex characters"),
+    ("bb" * 64, "exactly 64 hex characters"),
+])
+def test_malformed_public_keys_report_the_observed_length(value, expected):
+    with pytest.raises(BrokerConfigError, match=expected):
+        BrokerConfig.from_environment(
+            _env(BROKER_OPERATOR_PUBLIC_KEY=value)
+        )
+
+
+def test_env_errors_never_echo_a_secret():
+    """An error about one variable must not print the value of another."""
+    for override in ({"BROKER_OPERATOR_PUBLIC_KEY": None},
+                     {"BROKER_OPERATOR_PUBLIC_KEY": "nothex" * 11}):
+        try:
+            BrokerConfig.from_environment(_env(**override))
+        except BrokerConfigError as exc:
+            assert CLIENT_SECRET not in str(exc)
+            assert BEARER not in str(exc)

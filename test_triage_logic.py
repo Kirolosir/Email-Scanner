@@ -1,8 +1,10 @@
 """Offline triage tests. All classification and Gmail services are fake."""
 from types import SimpleNamespace
+from types import MappingProxyType
 
 import pytest
 
+from account_profile import AccountProfile
 from gmail_common import QuotaThrottle
 from gmail_labeler import LabelDecision
 from triage import (
@@ -195,3 +197,36 @@ def test_label_config_validation(tmp_path):
     path.write_text('{"years":[],"categories":{}}')
     with pytest.raises(ValueError):
         load_label_config(path)
+
+
+def test_dynamic_account_evidence_gate_applies_its_configured_year_label():
+    profile = AccountProfile(
+        account="owner@example.test",
+        categories=frozenset({"prospect"}),
+        category_sender_types=MappingProxyType({"prospect": "recruit"}),
+        year_labels=MappingProxyType({"2031": "Prospects/2031"}),
+        category_labels=MappingProxyType({"prospect": "Triage/Prospect"}),
+        supported_years=frozenset({"2031"}),
+        evidence_categories=frozenset({"prospect"}),
+        evidence_sender_types=frozenset({"recruit"}),
+        evidence_rules=({
+            "label": "Prospects/2031",
+            "expected_value": "2031",
+            "require_sender_type": frozenset({"recruit"}),
+            "require_categories": frozenset({"prospect"}),
+            "min_confidence": "high",
+        },),
+    )
+    plan = plan_message(
+        _email(body="I am a Class of 2031 prospective student-athlete."),
+        {}, {"2031": "Prospects/2031"},
+        {"prospect": "Triage/Prospect"}, False,
+        classifier=lambda _: {
+            "category": "prospect", "grad_year": "2031",
+            "sender_type": "recruit", "confidence": "high",
+        },
+        profile=profile,
+    )
+
+    assert plan["classification"]["local_grad_year"] == "2031"
+    assert plan["decision"].add == ["Triage/Prospect", "Prospects/2031"]

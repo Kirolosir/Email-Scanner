@@ -20,7 +20,11 @@ from campaign import DraftLog, new_log_path
 from account_profile import load_profile as _load_profile
 from account_profile import assert_profile_matches_account
 from account_profile import load_profile as _load_account_profile
-from drafting import confirm_bulk_at_runtime, is_unreviewed_bulk
+from drafting import (
+    MODE_GENERIC,
+    load_ai_drafting_approval,
+    precheck_ai_drafting_approval,
+)
 from gmail_auth import get_gmail_service
 from taxonomy import load_taxonomy_confirmation
 
@@ -79,7 +83,7 @@ def build_initial_query(lookback_months=2):
     if not isinstance(lookback_months, int) or lookback_months <= 0:
         raise ValueError("lookback_months must be a positive integer")
     return (
-        f"in:inbox newer_than:{lookback_months}m "
+        f"newer_than:{lookback_months}m "
         "-in:spam -in:trash -in:sent -in:drafts"
     )
 
@@ -88,7 +92,7 @@ def build_daily_query(overlap_days=3):
     if not isinstance(overlap_days, int) or overlap_days <= 0:
         raise ValueError("overlap_days must be a positive integer")
     return (
-        f"in:inbox newer_than:{overlap_days}d "
+        f"newer_than:{overlap_days}d "
         "-in:spam -in:trash -in:sent -in:drafts"
     )
 
@@ -386,7 +390,12 @@ def parse_args(argv=None):
         "mode", nargs="?", choices=("initial", "daily"), default="initial",
         help="initial two-month backfill or overlapping daily scan (default: initial)",
     )
-    parser.add_argument("--config", default=DEFAULT_LABEL_CONFIG)
+    parser.add_argument(
+        "--config",
+        help=("Reviewed label JSON. Omit with --account-config to use labels "
+              "embedded in that account profile; legacy default is "
+              f"{DEFAULT_LABEL_CONFIG}"),
+    )
     parser.add_argument("--templates", default=DEFAULT_TEMPLATE_DIR)
     parser.add_argument("--account-config", metavar="FILE", help=(
                         "Per-account config selecting taxonomy, labels, and "
@@ -400,6 +409,9 @@ def parse_args(argv=None):
     parser.add_argument("--templates-approved", metavar="KEYS", help=(
                         "Comma-separated template keys approved for this "
                         "supervised run (per-category; does NOT pin wording)"))
+    parser.add_argument("--ai-drafting-approval", metavar="FILE", help=(
+                        "Private account/category approval for AI-generated "
+                        "unsent drafts; does not bind exact wording"))
     parser.add_argument("--state-path", default=DEFAULT_STATE_PATH)
     parser.add_argument("--status-path", default=DEFAULT_STATUS_PATH,
                         help="Private PII-free atomic run-status JSON")
@@ -520,7 +532,8 @@ def _run_locked(args, classifier, config, templates, state, status):
         status.finish(code == 0, counts, error_codes=error_codes)
         return code
 
-    today = dt.datetime.now(LOCAL_TIMEZONE).date()
+    local_timezone = getattr(args, "local_timezone", LOCAL_TIMEZONE)
+    today = dt.datetime.now(local_timezone).date()
     if args.mode == "daily" and state.already_ran_today(today) and not args.force:
         print(f"Daily triage already completed for {today}; nothing contacted or changed.")
         return done(0)
@@ -541,22 +554,13 @@ def _run_locked(args, classifier, config, templates, state, status):
     args.taxonomy_confirmation = load_taxonomy_confirmation(
         args.taxonomy_confirmation, own_address
     )
-    if is_unreviewed_bulk(
-        dict(getattr(args.profile, "drafting_modes", {}) or {}),
-        args.profile.protected_labels,
-    ):
-        if not confirm_bulk_at_runtime(
-            own_address, len(args.profile.drafting_modes),
-            assume_yes=args.yes,
-        ):
-            print("Aborted; unreviewed bulk drafting was not confirmed.")
-            counts["failures"] = 1
-            return 1
-
     args.template_approvals = build_template_approvals(
         args.template_approval,
         parse_approved_names(args.templates_approved),
         own_address,
+    )
+    args.ai_drafting_approvals = load_ai_drafting_approval(
+        args.ai_drafting_approval, own_address, args.profile.categories
     )
 
     account_labels = fetch_account_labels(service, throttle)
@@ -590,16 +594,27 @@ def _run_locked(args, classifier, config, templates, state, status):
             + estimate["invalid_metadata"] + len(failures)
         )
         counts["failures"] = len(failures)
-        minimum_seconds = max(
-            0, estimate["gemini_candidates"] - 1
-        ) * THROTTLE_SECONDS
+        candidate_count = estimate["gemini_candidates"]
+        generic_enabled = any(
+            mode == MODE_GENERIC
+            for mode in getattr(args.profile, "drafting_modes", {}).values()
+        )
+        maximum_model_calls = candidate_count * (2 if generic_enabled else 1)
+        minimum_seconds = max(0, candidate_count - 1) * THROTTLE_SECONDS
+        maximum_spacing = max(0, maximum_model_calls - 1) * THROTTLE_SECONDS
         print("\nEstimate only (metadata reads; zero Gemini calls; zero Gmail writes):")
         print(f"  scanned:                 {len(message_ids)}")
         print(f"  already processed:       {estimate['already_processed']}")
         print(f"  automated before Gemini: {estimate['automated']}")
         print(f"  invalid metadata:        {estimate['invalid_metadata']}")
         print(f"  Gemini candidates:       {estimate['gemini_candidates']}")
+        print(f"  classification calls:    up to {candidate_count}")
+        if generic_enabled:
+            print(f"  AI draft calls:          up to {candidate_count}")
+            print(f"  total model calls:       up to {maximum_model_calls}")
         print(f"  minimum model spacing:   {minimum_seconds:.0f} seconds")
+        if generic_enabled:
+            print(f"  maximum planned spacing: {maximum_spacing:.0f} seconds")
         print("  actual time may be longer because of Gmail latency and retries")
         return done(1 if failures else 0,
                     ["metadata_fetch_failed"] if failures else [])
@@ -627,7 +642,7 @@ def _run_locked(args, classifier, config, templates, state, status):
     for message in candidates:
         email = message_to_email(
             message, max_body_chars=args.max_body_chars,
-            own_address=own_address,
+            own_address=own_address, profile=args.profile,
         )
         email["message_id"] = message["id"]
         plan = plan_message(
@@ -637,6 +652,9 @@ def _run_locked(args, classifier, config, templates, state, status):
             template_approvals=getattr(args, "template_approvals", None),
             taxonomy_confirmation=getattr(args, "taxonomy_confirmation", None),
             profile=getattr(args, "profile", None),
+            ai_drafting_approvals=getattr(
+                args, "ai_drafting_approvals", None
+            ),
         )
         add_daily_review_policy(plan, config)
         plan["processed_label"] = processed_name
@@ -689,7 +707,7 @@ def _run_locked(args, classifier, config, templates, state, status):
 
     log_path = new_log_path(prefix="daily-triage")
     header = [
-        f"daily triage {dt.datetime.now(LOCAL_TIMEZONE).isoformat(timespec='seconds')}",
+        f"daily triage {dt.datetime.now(local_timezone).isoformat(timespec='seconds')}",
         f"mode: {args.mode}",
         "contains program-created draft ids only; no messages were sent",
     ]
@@ -729,22 +747,35 @@ def main(argv=None, classifier=None):
         level=logging.WARNING if args.scheduled else logging.INFO,
         format="%(levelname)s %(message)s",
     )
-    status = RunStatus(args.status_path)
-    status.start(f"{args.mode}:{'estimate' if args.estimate_only else 'apply' if args.apply else 'dry-run'}")
     try:
-        config = load_triage_label_config(args.config)
+        args.profile = _load_account_profile(args.account_config)
+        args.local_timezone = ZoneInfo(args.profile.timezone)
+        if args.state_path == DEFAULT_STATE_PATH:
+            args.state_path = args.profile.state_path
+            if args.status_path == DEFAULT_STATUS_PATH:
+                args.status_path = args.profile.status_path
+            if args.lock_dir == DEFAULT_LOCK_DIR:
+                args.lock_dir = args.profile.lock_dir
+        if args.templates == DEFAULT_TEMPLATE_DIR:
+            args.templates = args.profile.template_dir
+        config = load_triage_label_config(args.config, profile=args.profile)
         templates = load_templates(args.templates)
         # Structure only; the account binding is enforced in _run_locked
         # once the authenticated Gmail account is known.
         precheck_template_approval(args.template_approval)
-        args.profile = _load_account_profile(args.account_config)
+        precheck_ai_drafting_approval(args.ai_drafting_approval)
         state = DailyState(args.state_path).load(
             restrict_permissions=args.apply or args.scheduled
         )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"Configuration/state error ({type(exc).__name__}); no Gmail contact occurred.")
+        status = RunStatus(args.status_path)
+        status.start("configuration")
         status.finish(False, {"failures": 1}, ["configuration_or_state_invalid"])
         return 2
+
+    status = RunStatus(args.status_path)
+    status.start(f"{args.mode}:{'estimate' if args.estimate_only else 'apply' if args.apply else 'dry-run'}")
 
     target_key = "\0".join((
         str(Path(args.state_path).resolve()),

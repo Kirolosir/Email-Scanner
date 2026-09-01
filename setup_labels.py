@@ -10,8 +10,9 @@ import argparse
 import logging
 import sys
 
+from account_profile import assert_profile_matches_account, load_profile
 from gmail_auth import get_gmail_service
-from gmail_common import QuotaThrottle
+from gmail_common import QuotaThrottle, normalize_address
 from gmail_labeler import fetch_account_labels
 from triage_config import DEFAULT_LABEL_CONFIG, load_triage_label_config
 
@@ -85,8 +86,13 @@ def parse_args(argv=None):
         description="Create only the reviewed Gmail triage labels missing from an account."
     )
     parser.add_argument(
-        "--config", default=DEFAULT_LABEL_CONFIG,
-        help=f"Reviewed label JSON (default: {DEFAULT_LABEL_CONFIG})",
+        "--config",
+        help=("Reviewed label JSON. Omit with --account-config to use its "
+              f"embedded labels; legacy default is {DEFAULT_LABEL_CONFIG}"),
+    )
+    parser.add_argument(
+        "--account-config", metavar="FILE",
+        help="Per-account taxonomy, label, and drafting configuration",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -107,13 +113,22 @@ def main(argv=None):
     args = parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     try:
-        config = load_triage_label_config(args.config)
+        profile = load_profile(args.account_config)
+        config = load_triage_label_config(args.config, profile=profile)
     except (OSError, ValueError) as exc:
         print(f"Invalid label configuration: {exc}")
         return 2
 
     service = get_gmail_service(token_path=args.token_path)
     throttle = QuotaThrottle()
+    own_address = normalize_address(
+        service.users().getProfile(userId="me").execute().get("emailAddress", "")
+    )
+    try:
+        assert_profile_matches_account(profile, own_address)
+    except ValueError as exc:
+        print(f"Account config error: {exc}")
+        return 2
     account_labels = fetch_account_labels(service, throttle)
     plan = plan_label_setup(account_labels, config)
 

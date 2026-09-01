@@ -81,6 +81,11 @@ def build_account_config(account, profile=None, label_config=None,
         "taxonomy": taxonomy,
     }
 
+    configured_system = label_config.get("system", {})
+    system_labels = configured_system or dict(profile.system_labels)
+    if system_labels:
+        document["system_labels"] = dict(system_labels)
+
     protected = sorted(profile.protected_labels)
     if protected:
         document["protected_labels"] = [

@@ -1,5 +1,5 @@
 """Triage pipeline: read messages from a Gmail label, classify each with
-Gemini, apply matching labels, and create a template-based draft reply.
+Gemini, apply matching labels, and create approved template or AI draft replies.
 
 Flow per message:
     read -> classify -> decide_labels -> apply_labels -> template -> draft
@@ -40,11 +40,18 @@ from gemini_client import (
     VALID_CATEGORIES,
     VALID_CONFIDENCE,
     classify,
+    generate_reply,
 )
 import account_profile as _PROFILE_MOD
 from account_profile import load_profile as _load_profile
 import drafting as _DRAFTING
 from drafting import resolve_mode as _resolve_drafting_mode
+from drafting import (
+    AiDraftingApprovals as _AiDraftingApprovals,
+    build_generic_body as _build_generic_body,
+    load_ai_drafting_approval as _load_ai_drafting_approval,
+    precheck_ai_drafting_approval as _precheck_ai_drafting_approval,
+)
 from account_profile import (
     assert_profile_matches_account as _assert_profile_matches_account,
 )
@@ -386,7 +393,7 @@ def resolve_template(templates, category, grad_year,
     return None, None, reason
 
 
-def load_label_config(path):
+def load_label_config(path, profile=None):
     """Load configurable real label names without contacting Gmail.
 
     JSON shape: ``{"years": {"2027": "..."}, "categories": {...}}``.
@@ -394,7 +401,10 @@ def load_label_config(path):
     labels that already exist in the account and never creates a label.
     """
     if not path:
-        # Safe default: without reviewed real names, do no labeling at all.
+        # A bound per-account config is itself the reviewed source. Legacy
+        # behavior stays fail-closed when no explicit label config is given.
+        if profile is not None and getattr(profile, "taxonomy", ()):
+            return dict(profile.year_labels), dict(profile.category_labels)
         return {}, {}
     with open(path, encoding="utf-8") as f:
         config = json.load(f)
@@ -414,7 +424,7 @@ def load_label_config(path):
 
 
 def message_to_email(message, max_body_chars=DEFAULT_MAX_BODY_CHARS,
-                     own_address=""):
+                     own_address="", profile=None):
     """Flatten a Gmail message resource into the dict classify() wants,
     plus the fields needed to build a threaded reply draft."""
     headers = {}
@@ -428,8 +438,12 @@ def message_to_email(message, max_body_chars=DEFAULT_MAX_BODY_CHARS,
         get_plain_text_body(message), max_chars=max_body_chars
     )
     delivery = assess_delivery_headers(headers, own_address=own_address)
+    effective_profile = profile if profile is not None else _PROFILE
+    supported_years = (
+        set(effective_profile.supported_years) or set(SUPPORTED_GRAD_YEARS)
+    )
     year_evidence = extract_grad_year_evidence(
-        cleaning["text"], headers.get("subject", ""), SUPPORTED_GRAD_YEARS
+        cleaning["text"], headers.get("subject", ""), supported_years
     )
     return {
         "from": delivery["sender"] or normalize_address(headers.get("from", "")),
@@ -502,14 +516,15 @@ def _taxonomy_block(category, confirmation, profile):
 def plan_message(email, templates, year_labels, category_labels, no_label,
                  templates_dir=DEFAULT_TEMPLATE_DIR, classifier=None,
                  template_approvals=None, taxonomy_confirmation=None,
-                 profile=None):
+                 profile=None, draft_generator=None,
+                 ai_drafting_approvals=None):
     """Decide, without making any API calls, what should happen to one
     message: which labels to add and whether a draft can be built.
 
     Returns a dict with the classification, the LabelDecision, the
     template body (or None), and a reason when no draft is possible.
     """
-    classifier = classifier or classify
+    effective_profile = profile if profile is not None else _PROFILE
     classification_error = None
     delivery = email.get("delivery_safety") or assess_delivery_headers(
         {"from": email.get("from", ""), "reply-to": email.get("reply_to", "")},
@@ -523,8 +538,11 @@ def plan_message(email, templates, year_labels, category_labels, no_label,
         email["from"] = delivery.get("sender", "")
     if not email.get("reply_address"):
         email["reply_address"] = delivery.get("reply_address", "")
+    supported_years = (
+        set(effective_profile.supported_years) or set(SUPPORTED_GRAD_YEARS)
+    )
     local_year = email.get("local_year_evidence") or extract_grad_year_evidence(
-        email.get("body", ""), email.get("subject", ""), SUPPORTED_GRAD_YEARS
+        email.get("body", ""), email.get("subject", ""), supported_years
     )
     email["local_year_evidence"] = local_year
 
@@ -558,7 +576,11 @@ def plan_message(email, templates, year_labels, category_labels, no_label,
     else:
         try:
             classification_called = True
-            classification = classifier(email)
+            classification = (
+                classifier(email)
+                if classifier is not None
+                else classify(email, profile=effective_profile)
+            )
             if not isinstance(classification, dict):
                 raise ValueError("classifier result was not an object")
         except Exception as exc:
@@ -579,12 +601,12 @@ def plan_message(email, templates, year_labels, category_labels, no_label,
     # bound at import time to the default profile, so a per-account profile
     # must supply its own vocabulary or its categories would all normalize
     # to "unknown".
-    _effective_profile = profile if profile is not None else _PROFILE
+    _effective_profile = effective_profile
     if category not in _effective_profile.valid_categories:
         category = "unknown"
     raw_grad_year = classification.get("grad_year")
     grad_year = raw_grad_year.strip() if isinstance(raw_grad_year, str) else "unknown"
-    if grad_year not in SUPPORTED_GRAD_YEARS:
+    if grad_year not in supported_years:
         grad_year = "unknown"
     raw_sender_type = classification.get("sender_type")
     sender_type = (
@@ -594,7 +616,7 @@ def plan_message(email, templates, year_labels, category_labels, no_label,
     # Offline/test classifiers written before sender_type existed remain
     # deterministic. Live parse_result always supplies and validates it.
     if not sender_type:
-        sender_type = _PROFILE.category_sender_types.get(
+        sender_type = _effective_profile.category_sender_types.get(
             category, _PROFILE_MOD.UNKNOWN
         )
     if sender_type not in _PROFILE_MOD.VALID_SENDER_TYPES:
@@ -615,7 +637,7 @@ def plan_message(email, templates, year_labels, category_labels, no_label,
         and classification.get("valid", True) is not False
         and confidence in VALID_CONFIDENCE
     )
-    expected_sender = _PROFILE.category_sender_types.get(category)
+    expected_sender = _effective_profile.category_sender_types.get(category)
     if expected_sender is not None and sender_type != expected_sender:
         classification_valid = False
     classification_actionable = classification_valid and confidence == "high"
@@ -640,9 +662,24 @@ def plan_message(email, templates, year_labels, category_labels, no_label,
             classification, category="unknown", grad_year="unknown",
             sender_type="unknown",
         )
-    elif (sender_type in (_effective_profile.evidence_sender_types
-                          or {"recruit"})
-          and category in _effective_profile.evidence_categories):
+    matching_rule = next(
+        (
+            rule for rule in (_effective_profile.evidence_rules or ())
+            if rule.get("expected_value") in {grad_year, local_grad_year}
+        ),
+        None,
+    )
+    year_label_eligible = False
+    if matching_rule is not None:
+        year_label_eligible = (
+            sender_type in matching_rule["require_sender_type"]
+            and category in matching_rule["require_categories"]
+            and confidence == matching_rule["min_confidence"]
+        )
+
+    if not classification_actionable:
+        pass
+    elif matching_rule is not None and year_label_eligible:
         mentions_year = (
             grad_year != "unknown" or local_grad_year != "unknown"
             or local_year.get("ambiguous", False)
@@ -664,6 +701,11 @@ def plan_message(email, templates, year_labels, category_labels, no_label,
             "recruit message"
         )
 
+    label_classification = dict(
+        label_classification,
+        year_label_eligible=year_label_eligible and not year_evidence_conflict,
+    )
+
     if no_label:
         decision = decide_labels(classification, [], {}, {})
         decision.skips = ["--no-label: labeling disabled for this run"]
@@ -679,6 +721,9 @@ def plan_message(email, templates, year_labels, category_labels, no_label,
             decision.skips.append(year_policy_skip)
 
     template = template_key = None
+    draft_source = None
+    draft_generation_called = False
+    draft_generation_error = None
     draft_skip = None
     if classification_error:
         draft_skip = "classification failed; not drafting"
@@ -703,11 +748,49 @@ def plan_message(email, templates, year_labels, category_labels, no_label,
     elif _drafting_block(category, profile):
         draft_skip = _drafting_block(category, profile)
     else:
-        template, template_key, draft_skip = resolve_template(
-            templates, category, grad_year, templates_dir,
-            approvals=template_approvals,
-            valid_categories=_effective_profile.valid_categories,
-        )
+        mode = _resolve_drafting_mode(_effective_profile, category)
+        if mode == _DRAFTING.MODE_GENERIC:
+            approvals = (
+                ai_drafting_approvals
+                if ai_drafting_approvals is not None
+                else _AiDraftingApprovals()
+            )
+            protected = bool(
+                (
+                    set(email.get("label_names", ())) | set(decision.add)
+                ) & set(_effective_profile.protected_labels)
+            )
+            approved, reason = approvals.check(
+                category, carries_protected_label=protected
+            )
+            if not approved:
+                draft_skip = reason
+            else:
+                try:
+                    draft_generation_called = True
+                    generated = (
+                        draft_generator(email, classification, _effective_profile)
+                        if draft_generator is not None
+                        else generate_reply(
+                            email, classification, profile=_effective_profile
+                        )
+                    )
+                    template = _build_generic_body(generated)
+                    template_key = f"ai:{category}"
+                    draft_source = "ai"
+                except Exception as exc:
+                    draft_generation_error = type(exc).__name__
+                    draft_skip = (
+                        "AI draft generation failed safely; not drafting"
+                    )
+        else:
+            template, template_key, draft_skip = resolve_template(
+                templates, category, grad_year, templates_dir,
+                approvals=template_approvals,
+                valid_categories=_effective_profile.valid_categories,
+            )
+            if template is not None:
+                draft_source = "template"
 
     return {
         "email": email,
@@ -719,7 +802,10 @@ def plan_message(email, templates, year_labels, category_labels, no_label,
         "decision": decision,
         "template": template,
         "template_key": template_key,
+        "draft_source": draft_source,
         "draft_skip": draft_skip,
+        "draft_generation_called": draft_generation_called,
+        "draft_generation_error": draft_generation_error,
         "classification_error": classification_error,
         "classification_called": classification_called,
         "suppression_code": suppression_code,
@@ -848,7 +934,7 @@ def confirm(label_count, draft_count):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description="Classify a Gmail label and draft template replies."
+        description="Classify a Gmail label and prepare unsent draft replies."
     )
     parser.add_argument("label", help="Gmail label to triage")
     parser.add_argument("--templates", default=DEFAULT_TEMPLATE_DIR,
@@ -867,8 +953,13 @@ def parse_args(argv=None):
     parser.add_argument("--templates-approved", metavar="KEYS", help=(
                         "Comma-separated template keys approved for this "
                         "supervised run (per-category; does NOT pin wording)"))
+    parser.add_argument("--ai-drafting-approval", metavar="FILE", help=(
+                        "Private account/category approval for AI-generated "
+                        "unsent drafts; does not bind exact wording"))
     parser.add_argument("--limit", type=int, metavar="N",
                         help="Process at most N messages")
+    parser.add_argument("--token-path", help=(
+                        "Separate Gmail token file for this account"))
     parser.add_argument("--dry-run", action="store_true",
                         help="Report what would happen; change nothing")
     parser.add_argument("--yes", action="store_true",
@@ -887,10 +978,10 @@ def main(argv=None):
 
     templates = load_templates(args.templates)
     if not templates:
-        print(f"No templates found in {args.templates!r}; nothing could be "
-              "drafted. Add <category>.txt files first.")
-        return 1
-    print(f"Loaded {len(templates)} templates: {', '.join(sorted(templates))}")
+        print(f"No templates found in {args.templates!r}; template-mode "
+              "categories cannot draft, but approved AI drafting can continue.")
+    else:
+        print(f"Loaded {len(templates)} templates: {', '.join(sorted(templates))}")
     unsafe = unsafe_template_paths(templates, args.templates)
     if unsafe:
         print("Unsafe placeholder templates (never used for draft creation):")
@@ -901,8 +992,9 @@ def main(argv=None):
     # The account binding cannot be checked until we know who we authorized as.
     try:
         precheck_template_approval(args.template_approval)
+        _precheck_ai_drafting_approval(args.ai_drafting_approval)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
-        print(f"Template approval error: {exc}")
+        print(f"Drafting approval error: {exc}")
         return 1
 
     # Structural only; account bindings are enforced after authorization.
@@ -920,13 +1012,13 @@ def main(argv=None):
 
     try:
         configured_years, configured_categories = load_label_config(
-            args.label_config
+            args.label_config, profile=profile
         )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"Invalid label configuration: {exc}")
         return 1
 
-    service = get_gmail_service()
+    service = get_gmail_service(token_path=args.token_path)
     throttle = QuotaThrottle()
 
     own_address = normalize_address(
@@ -939,21 +1031,15 @@ def main(argv=None):
         taxonomy_confirmation = _load_taxonomy_confirmation(
             args.taxonomy_confirmation, own_address
         )
+        ai_drafting_approvals = _load_ai_drafting_approval(
+            args.ai_drafting_approval, own_address, profile.categories
+        )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"Account/taxonomy binding error: {exc}")
         return 1
     if profile.taxonomy:
         print(f"Taxonomy confirmed for: {taxonomy_confirmation.describe()}")
-
-    if _DRAFTING.is_unreviewed_bulk(
-        dict(getattr(profile, "drafting_modes", {}) or {}),
-        profile.protected_labels,
-    ):
-        if not _DRAFTING.confirm_bulk_at_runtime(
-            own_address, len(profile.drafting_modes), assume_yes=args.yes
-        ):
-            print("Aborted; unreviewed bulk drafting was not confirmed.")
-            return 1
+    print(f"AI drafting approvals: {ai_drafting_approvals.describe()}")
 
     try:
         template_approvals = build_template_approvals(
@@ -993,14 +1079,17 @@ def main(argv=None):
 
     plans = []
     for message in messages:
-        email = message_to_email(message, own_address=own_address)
+        email = message_to_email(
+            message, own_address=own_address, profile=profile
+        )
         email["message_id"] = message["id"]
         plans.append(
             plan_message(email, templates, year_labels, category_labels,
                          args.no_label, templates_dir=args.templates,
                          template_approvals=template_approvals,
                          taxonomy_confirmation=taxonomy_confirmation,
-                         profile=profile)
+                         profile=profile,
+                         ai_drafting_approvals=ai_drafting_approvals)
         )
 
     print()

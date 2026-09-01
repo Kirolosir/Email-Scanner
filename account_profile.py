@@ -17,19 +17,18 @@ the ``unknown`` sentinel, sender-type kinds, and the ``administrative`` system
 category used for deterministically-detected automated mail. Those are protocol
 values the code reasons about, not per-inbox choices.
 
-DECISION RECORD (pass two, do not lose):
+DECISION RECORD:
   * Migration must NOT auto-confirm an existing account's categories. the account owner's
     seven categories get the same fresh confirmation prompt as any discovered
     taxonomy, even though he has used those names all season. Confirmation
     attests that a human reviewed the taxonomy now; inheriting it from history
     would make "nothing drafts until confirmed" untrue for the one account
     most likely to draft first.
-  * Generic (free-form) drafting is refused outright for any category carrying
-    a protected label, rather than gated. Model-authored wording plus a label
-    that exists because it needs extra care is a contradiction.
-  * The all-generic/no-protection configuration requires a config
-    acknowledgement block naming the account and category count, plus a runtime
-    typed phrase containing the account address, which --yes cannot bypass.
+  * Generic drafting never requires exact template wording. It is separately
+    approved by account and category, and protected-label messages require an
+    explicit acknowledgement in that approval artifact.
+  * The separate AI-drafting approval is the durable acknowledgement for
+    generic categories. It is account/category-bound and works unattended.
 """
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -72,6 +71,9 @@ class AccountProfile:
     category_labels: MappingProxyType = field(
         default_factory=lambda: MappingProxyType({})
     )
+    system_labels: MappingProxyType = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
     # Evidence-gated labelling (generalizes the 2027B gate)
     evidence_categories: frozenset = frozenset()
@@ -80,6 +82,7 @@ class AccountProfile:
     # The value the evidence gate expects the model and the message text to
     # agree on before an evidence-gated label may be applied.
     evidence_expected_value: str = ""
+    evidence_rules: tuple = ()
     # Categories the campaign audit treats as non-recruit correspondence.
     non_recruit_audit_categories: frozenset = frozenset()
 
@@ -93,6 +96,12 @@ class AccountProfile:
     # slug -> "off" | "template" | "generic". Empty means the profile does
     # not use per-category drafting control; the loader always populates it.
     drafting_modes: MappingProxyType = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    drafting_guidance: MappingProxyType = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    ai_drafting: MappingProxyType = field(
         default_factory=lambda: MappingProxyType({})
     )
     unreviewed_bulk_acknowledgement: object = None
@@ -165,12 +174,25 @@ LEGACY_PROFILE = AccountProfile(
     protected_labels=frozenset({"2027B"}),
     year_labels=_LEGACY_YEAR_LABELS,
     category_labels=_LEGACY_CATEGORY_LABELS,
+    system_labels=MappingProxyType({
+        "needs_review": "Example/Triage/Needs Review",
+        "processed": "Example/Triage/Processed",
+    }),
     evidence_categories=frozenset({
         "recruit_intro", "recruit_update", "video_update",
     }),
     evidence_sender_types=frozenset({"recruit"}),
     supported_years=frozenset({"2026", "2027", "2028", "2029", "2030"}),
     evidence_expected_value="2027",
+    evidence_rules=({
+        "label": "2027B",
+        "expected_value": "2027",
+        "require_sender_type": frozenset({"recruit"}),
+        "require_categories": frozenset({
+            "recruit_intro", "recruit_update", "video_update",
+        }),
+        "min_confidence": "high",
+    },),
     non_recruit_audit_categories=frozenset({
         "parent", "other_coach", "administrative",
     }),
@@ -243,7 +265,8 @@ def _load_account_config(path):
 
     allowed = {
         "version", "account", "timezone", "taxonomy", "protected_labels",
-        "evidence_gated_labels", "paths", "unreviewed_bulk_acknowledgement",
+        "evidence_gated_labels", "system_labels", "ai_drafting", "paths",
+        "unreviewed_bulk_acknowledgement",
     }
     unexpected = sorted(set(document) - allowed)
     _require(not unexpected,
@@ -264,6 +287,7 @@ def _load_account_config(path):
     labels = {}
     sender_types = {}
     modes = {}
+    guidance = {}
     for raw in raw_taxonomy:
         _require(isinstance(raw, dict), "each taxonomy entry must be an object")
         slug = taxonomy_module.sanitize_slug(raw.get("slug", ""))
@@ -274,13 +298,25 @@ def _load_account_config(path):
             taxonomy_module.validate_label_name(label)
             labels[slug] = label
         if raw.get("expected_sender"):
-            sender_types[slug] = str(raw["expected_sender"]).strip().lower()
+            expected_sender = str(raw["expected_sender"]).strip().lower()
+            _require(expected_sender in VALID_SENDER_TYPES,
+                     f"unsupported expected_sender for {slug!r}")
+            sender_types[slug] = expected_sender
         # Absent drafting config means off. Every category gets an explicit
         # mode, so no loaded config can reach the runtime ungoverned.
         drafting = raw.get("drafting") or {}
         _require(isinstance(drafting, dict),
                  f"drafting for {slug!r} must be an object")
+        unexpected_drafting = sorted(set(drafting) - {"mode", "guidance"})
+        _require(not unexpected_drafting,
+                 f"unsupported drafting keys for {slug!r}: "
+                 + ", ".join(unexpected_drafting))
         modes[slug] = str(drafting.get("mode", drafting_module.MODE_OFF))
+        category_guidance = str(drafting.get("guidance", "")).strip()
+        _require(len(category_guidance) <= 2_000,
+                 f"drafting guidance for {slug!r} is too long")
+        if category_guidance:
+            guidance[slug] = category_guidance
         entries.append({
             "slug": slug,
             "display": str(raw.get("display", slug)),
@@ -302,7 +338,101 @@ def _load_account_config(path):
         taxonomy_module.validate_label_name(name)
         protected_names.add(name)
 
-    # Categories whose label is protected: generic drafting is refused there.
+    raw_evidence = document.get("evidence_gated_labels") or []
+    _require(isinstance(raw_evidence, list),
+             "evidence_gated_labels must be a list")
+    evidence_rules = []
+    year_labels = {}
+    evidence_categories = set()
+    evidence_sender_types = set()
+    for raw in raw_evidence:
+        _require(isinstance(raw, dict),
+                 "each evidence-gated label must be an object")
+        allowed_rule = {
+            "label", "pattern_set", "classifier_field", "expected_value",
+            "require_sender_type", "require_categories", "min_confidence",
+        }
+        unexpected_rule = sorted(set(raw) - allowed_rule)
+        _require(not unexpected_rule,
+                 "unsupported evidence gate keys: "
+                 + ", ".join(unexpected_rule))
+        label = raw.get("label")
+        taxonomy_module.validate_label_name(label)
+        _require(raw.get("pattern_set") == "grad_year",
+                 "only the grad_year evidence pattern set is supported")
+        _require(raw.get("classifier_field") == "grad_year",
+                 "only the grad_year classifier field is supported")
+        expected = str(raw.get("expected_value", "")).strip()
+        _require(len(expected) == 4 and expected.isdigit()
+                 and expected.startswith("20"),
+                 "evidence expected_value must be a four-digit year")
+        _require(expected not in year_labels,
+                 f"duplicate evidence rule for year {expected}")
+        required_senders = raw.get("require_sender_type") or []
+        required_categories = raw.get("require_categories") or []
+        _require(isinstance(required_senders, list) and required_senders,
+                 "evidence rule must require at least one sender type")
+        _require(isinstance(required_categories, list) and required_categories,
+                 "evidence rule must require at least one category")
+        required_senders = {
+            str(value).strip().lower() for value in required_senders
+        }
+        required_categories = {
+            str(value).strip().lower() for value in required_categories
+        }
+        _require(required_senders <= VALID_SENDER_TYPES,
+                 "evidence rule contains an unsupported sender type")
+        _require(required_categories <= slugs,
+                 "evidence rule contains a category outside the taxonomy")
+        _require(raw.get("min_confidence", "high") == "high",
+                 "evidence-gated labels require high confidence")
+        year_labels[expected] = label
+        evidence_categories.update(required_categories)
+        evidence_sender_types.update(required_senders)
+        evidence_rules.append({
+            "label": label,
+            "expected_value": expected,
+            "require_sender_type": frozenset(required_senders),
+            "require_categories": frozenset(required_categories),
+            "min_confidence": "high",
+        })
+
+    raw_system = document.get("system_labels") or {}
+    _require(isinstance(raw_system, dict), "system_labels must be an object")
+    unexpected_system = sorted(set(raw_system) - SYSTEM_LABEL_KEYS)
+    _require(not unexpected_system,
+             "unsupported system label keys: " + ", ".join(unexpected_system))
+    system_labels = {}
+    for key, name in raw_system.items():
+        taxonomy_module.validate_label_name(name)
+        system_labels[key] = name
+    if system_labels:
+        _require(set(system_labels) == SYSTEM_LABEL_KEYS,
+                 "system_labels must define needs_review and processed")
+
+    raw_ai = document.get("ai_drafting") or {}
+    _require(isinstance(raw_ai, dict), "ai_drafting must be an object")
+    allowed_ai = {
+        "display_name", "role", "organization", "signature",
+        "default_guidance", "max_words",
+    }
+    unexpected_ai = sorted(set(raw_ai) - allowed_ai)
+    _require(not unexpected_ai,
+             "unsupported ai_drafting keys: " + ", ".join(unexpected_ai))
+    ai_drafting = {}
+    for key in allowed_ai - {"max_words"}:
+        value = str(raw_ai.get(key, "")).strip()
+        _require(len(value) <= 2_000,
+                 f"ai_drafting {key!r} is too long")
+        if value:
+            ai_drafting[key] = value
+    max_words = raw_ai.get("max_words", 180)
+    _require(isinstance(max_words, int) and 30 <= max_words <= 500,
+             "ai_drafting max_words must be an integer from 30 to 500")
+    ai_drafting["max_words"] = max_words
+
+    # Retained as explicit context for drafting-mode validation. Runtime AI
+    # approval decides whether protected-label messages may be drafted.
     protected_categories = {
         slug for slug, label in labels.items() if label in protected_names
     }
@@ -311,7 +441,11 @@ def _load_account_config(path):
     )
 
     acknowledgement = document.get("unreviewed_bulk_acknowledgement")
-    if drafting_module.is_unreviewed_bulk(modes, protected_names):
+    # Backward compatibility for configs created before the dedicated
+    # AI-drafting approval existed. New configs do not need this duplicate
+    # acknowledgement; runtime drafting still fails closed without the new
+    # account/category-bound artifact.
+    if acknowledgement is not None:
         drafting_module.validate_bulk_acknowledgement(
             acknowledgement, account, len(modes)
         )
@@ -325,10 +459,20 @@ def _load_account_config(path):
         categories=frozenset(slugs),
         category_sender_types=MappingProxyType(sender_types),
         protected_labels=frozenset(protected_names),
-        year_labels=MappingProxyType({}),
+        year_labels=MappingProxyType(year_labels),
         category_labels=MappingProxyType(labels),
+        system_labels=MappingProxyType(system_labels),
+        evidence_categories=frozenset(evidence_categories),
+        evidence_sender_types=frozenset(evidence_sender_types),
+        supported_years=frozenset(year_labels),
+        evidence_expected_value=(
+            next(iter(year_labels)) if len(year_labels) == 1 else ""
+        ),
+        evidence_rules=tuple(evidence_rules),
         taxonomy=tuple(entries),
         drafting_modes=MappingProxyType(modes),
+        drafting_guidance=MappingProxyType(guidance),
+        ai_drafting=MappingProxyType(ai_drafting),
         unreviewed_bulk_acknowledgement=acknowledgement,
         state_dir=str(paths.get("state_dir", "triage-state")),
         draft_log_dir=str(paths.get("draft_log_dir", "draft-logs")),

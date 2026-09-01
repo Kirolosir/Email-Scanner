@@ -203,7 +203,10 @@ def decide_labels(classification, current_label_names,
         )
     elif _is_undetermined(grad_year):
         decision.skips.append("classifier extracted no grad year; not labeling")
-    elif not (sender_type == "recruit" and category in RECRUIT_YEAR_CATEGORIES):
+    elif not classification.get(
+        "year_label_eligible",
+        sender_type == "recruit" and category in RECRUIT_YEAR_CATEGORIES,
+    ):
         decision.skips.append(
             f"year {grad_year!r} not applied because sender/category is not "
             "a verified recruit message"

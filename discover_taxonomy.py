@@ -23,7 +23,7 @@ import sys
 import discovery
 from gmail_common import QuotaThrottle
 
-DEFAULT_QUERY = "in:inbox newer_than:2m -in:spam -in:trash -in:sent -in:drafts"
+DEFAULT_QUERY = "newer_than:2m -in:spam -in:trash -in:sent -in:drafts"
 
 
 def parse_args(argv=None):

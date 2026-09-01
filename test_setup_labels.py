@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from account_profile import load_profile
 from triage_config import TriageLabelConfig, load_triage_label_config
 from setup_labels import apply_label_setup, plan_label_setup
 
@@ -110,3 +111,40 @@ def test_label_creation_isolates_failures():
     created, failures = apply_label_setup(service, config, plan)
     assert len(created) == len(plan["create"]) - 1
     assert failures == [("Example/Triage/Other", "ConnectionError")]
+
+
+def test_generalized_account_uses_embedded_labels_without_legacy_config(tmp_path):
+    document = {
+        "version": 1,
+        "account": "owner@example.test",
+        "timezone": "UTC",
+        "taxonomy": [{
+            "slug": "project",
+            "display": "Project",
+            "description": "Project messages",
+            "examples": [],
+            "label": "Custom/Project",
+            "drafting": {"mode": "off"},
+        }],
+        "evidence_gated_labels": [{
+            "label": "Custom/2028",
+            "pattern_set": "grad_year",
+            "classifier_field": "grad_year",
+            "expected_value": "2028",
+            "require_sender_type": ["other"],
+            "require_categories": ["project"],
+            "min_confidence": "high",
+        }],
+        "system_labels": {
+            "needs_review": "Custom/Needs Review",
+            "processed": "Custom/Processed",
+        },
+    }
+    path = tmp_path / "account.json"
+    path.write_text(json.dumps(document))
+    profile = load_profile(str(path))
+
+    config = load_triage_label_config(None, profile=profile)
+    assert config.years == {"2028": "Custom/2028"}
+    assert config.categories == {"project": "Custom/Project"}
+    assert config.system["processed"] == "Custom/Processed"

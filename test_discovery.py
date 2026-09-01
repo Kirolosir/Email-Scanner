@@ -383,7 +383,8 @@ def test_cli_defaults_are_conservative():
     )
     assert args.live is False
     assert args.max_sample == DEFAULT_SAMPLE
-    assert "in:inbox" in args.query
+    assert "newer_than:2m" in args.query
+    assert "in:inbox" not in args.query
     assert "-in:sent" in args.query and "-in:trash" in args.query
 
 

@@ -1,9 +1,7 @@
-"""Offline tests for per-category drafting opt-in and the unsafe-configuration
-refusal. Covers D1-D8 and U1-U5 from the pre-build plan.
+"""Offline tests for per-category drafting opt-in and AI-drafting approval.
 
-Overall property: enabling drafting is a per-category decision the owner makes
-explicitly, and the configuration that removes every review layer at once
-cannot be reached by default or by --yes.
+Overall property: enabling drafting is a per-category decision, but no generic
+mode can produce text without a separate account/category-bound approval.
 """
 import json
 
@@ -12,7 +10,9 @@ import pytest
 import drafting
 from account_profile import AccountProfile, load_profile
 from drafting import (
+    AI_DRAFTING_ACKNOWLEDGEMENT,
     AI_BANNER,
+    AiDraftingApprovals,
     MODE_GENERIC,
     MODE_OFF,
     MODE_TEMPLATE,
@@ -22,6 +22,7 @@ from drafting import (
     confirm_bulk_at_runtime,
     expected_bulk_phrase,
     is_unreviewed_bulk,
+    load_ai_drafting_approval,
     resolve_mode,
     validate_bulk_acknowledgement,
     validate_drafting_modes,
@@ -58,7 +59,8 @@ def _confirmed(profile):
     )
 
 
-def _plan(profile, category="recruiting", confirmation=None):
+def _plan(profile, category="recruiting", confirmation=None,
+          ai_approvals=None, draft_generator=None):
     email = {
         "message_id": "m1", "from": "a@b.test", "subject": "s",
         "body": "Real message content here.", "thread_id": "t1",
@@ -73,6 +75,8 @@ def _plan(profile, category="recruiting", confirmation=None):
         template_approvals=TemplateApprovals(name_only={category}),
         taxonomy_confirmation=confirmation or _confirmed(profile),
         profile=profile,
+        ai_drafting_approvals=ai_approvals,
+        draft_generator=draft_generator,
     )
 
 
@@ -157,6 +161,111 @@ def test_generic_mode_still_requires_taxonomy_confirmation():
     assert "taxonomy unconfirmed" in plan["draft_skip"]
 
 
+def test_generic_mode_generates_without_a_template_or_template_digest():
+    profile = _profile({"recruiting": MODE_GENERIC})
+    approvals = AiDraftingApprovals(
+        account=ACCOUNT, categories={"recruiting"}
+    )
+    calls = []
+
+    def generate(email, classification, actual_profile):
+        calls.append((email["subject"], classification["category"], actual_profile))
+        return "Thanks for reaching out. I will review your note."
+
+    plan = _plan(
+        profile,
+        ai_approvals=approvals,
+        draft_generator=generate,
+    )
+
+    assert plan["template"].startswith(AI_BANNER)
+    assert "Thanks for reaching out" in plan["template"]
+    assert plan["template_key"] == "ai:recruiting"
+    assert plan["draft_source"] == "ai"
+    assert plan["draft_generation_called"] is True
+    assert calls and calls[0][2] is profile
+
+
+def test_generic_mode_without_ai_approval_never_calls_generator():
+    profile = _profile({"recruiting": MODE_GENERIC})
+    calls = []
+    plan = _plan(
+        profile,
+        ai_approvals=AiDraftingApprovals(account=ACCOUNT),
+        draft_generator=lambda *_args: calls.append(True),
+    )
+
+    assert plan["template"] is None
+    assert "not approved" in plan["draft_skip"]
+    assert calls == []
+
+
+def test_generic_generator_failure_isolated_to_message():
+    profile = _profile({"recruiting": MODE_GENERIC})
+    plan = _plan(
+        profile,
+        ai_approvals=AiDraftingApprovals(
+            account=ACCOUNT, categories={"recruiting"}
+        ),
+        draft_generator=lambda *_args: (_ for _ in ()).throw(RuntimeError("x")),
+    )
+
+    assert plan["template"] is None
+    assert plan["draft_generation_error"] == "RuntimeError"
+    assert "failed safely" in plan["draft_skip"]
+
+
+def test_protected_message_requires_separate_permission():
+    profile = _profile(
+        {"recruiting": MODE_GENERIC}, protected={"Triage/Recruiting"}
+    )
+    blocked = _plan(
+        profile,
+        ai_approvals=AiDraftingApprovals(
+            account=ACCOUNT, categories={"recruiting"},
+            allow_protected_labels=False,
+        ),
+        draft_generator=lambda *_args: "Body",
+    )
+    assert blocked["template"] is None
+    assert "protected-label" in blocked["draft_skip"]
+
+    allowed = _plan(
+        profile,
+        ai_approvals=AiDraftingApprovals(
+            account=ACCOUNT, categories={"recruiting"},
+            allow_protected_labels=True,
+        ),
+        draft_generator=lambda *_args: "Body",
+    )
+    assert allowed["draft_source"] == "ai"
+
+
+def test_ai_drafting_approval_is_account_and_category_bound(tmp_path):
+    document = {
+        "version": 1,
+        "account": ACCOUNT,
+        "approved_categories": ["recruiting"],
+        "allow_protected_labels": True,
+        "acknowledgement": AI_DRAFTING_ACKNOWLEDGEMENT,
+    }
+    path = tmp_path / "approval.json"
+    path.write_text(json.dumps(document))
+
+    approval = load_ai_drafting_approval(
+        str(path), ACCOUNT, {"recruiting", "parent"}
+    )
+    assert approval.categories == {"recruiting"}
+    assert approval.allow_protected_labels is True
+
+    with pytest.raises(DraftingConfigError, match="account does not match"):
+        load_ai_drafting_approval(
+            str(path), "different@example.test", {"recruiting"}
+        )
+    with pytest.raises(DraftingConfigError, match="outside the account taxonomy"):
+        load_ai_drafting_approval(str(path), ACCOUNT, {"parent"})
+
+
 def test_model_output_cannot_select_the_drafting_mode():
     """D7. The mode comes from config, never from the classifier."""
     profile = _profile({"recruiting": MODE_OFF})
@@ -199,8 +308,9 @@ def test_generic_draft_always_carries_the_banner():
 
 
 @pytest.mark.parametrize("model_text", ["", "   ", None])
-def test_banner_survives_empty_model_output(model_text):
-    assert carries_banner(build_generic_body(model_text))
+def test_empty_model_output_is_refused(model_text):
+    with pytest.raises(DraftingConfigError, match="no reply text"):
+        build_generic_body(model_text)
 
 
 def test_banner_is_not_config_supplied():
@@ -219,19 +329,13 @@ def test_banner_is_not_config_supplied():
 
 
 # --------------------------------------------------------------------
-# Structural refusal: generic + protected label
+# Protected labels require explicit AI-drafting permission
 # --------------------------------------------------------------------
 
-def test_generic_is_refused_for_a_protected_label_category():
-    """Decision two: refused outright, not gated."""
-    with pytest.raises(DraftingConfigError, match="protected"):
-        validate_drafting_modes(
-            {"recruiting": MODE_GENERIC}, {"recruiting"},
-            protected_categories={"recruiting"},
-        )
-    # Template mode on a protected category remains allowed.
+def test_generic_mode_can_be_configured_for_a_protected_category():
+    """Configuration is separate from runtime account/category approval."""
     assert validate_drafting_modes(
-        {"recruiting": MODE_TEMPLATE}, {"recruiting"},
+        {"recruiting": MODE_GENERIC}, {"recruiting"},
         protected_categories={"recruiting"},
     )
 
@@ -253,8 +357,8 @@ def test_unsafe_shape_is_detected_across_category_counts():
         modes = {f"c{i}": MODE_GENERIC for i in range(count)}
         assert is_unreviewed_bulk(modes, protected_labels=()) is True
 
-    # Any protected label, or any non-generic category, is not the shape.
-    assert is_unreviewed_bulk({"a": MODE_GENERIC}, protected_labels={"X"}) is False
+    # A protected label must not make the risky shape disappear.
+    assert is_unreviewed_bulk({"a": MODE_GENERIC}, protected_labels={"X"}) is True
     assert is_unreviewed_bulk({"a": MODE_GENERIC, "b": MODE_OFF}, ()) is False
     assert is_unreviewed_bulk({}, ()) is False
 
@@ -348,25 +452,30 @@ def test_loaded_config_gives_every_category_an_explicit_mode(tmp_path):
     assert profile.drafting_modes["marketing"] == MODE_OFF
 
 
-def test_loaded_config_refuses_generic_on_a_protected_category(tmp_path):
+def test_loaded_config_allows_generic_on_a_protected_category_with_bulk_ack(tmp_path):
+    phrase = expected_bulk_phrase(ACCOUNT, 1)
     path = _config(
         tmp_path,
         taxonomy=[{"slug": "recruiting", "label": "Triage/Recruiting",
                    "drafting": {"mode": "generic"}}],
         protected_labels=[{"label": "Triage/Recruiting"}],
+        unreviewed_bulk_acknowledgement={
+            "account": ACCOUNT, "category_count": 1, "phrase": phrase,
+        },
     )
-    with pytest.raises(DraftingConfigError, match="protected"):
-        load_profile(path)
+    assert load_profile(path).drafting_modes["recruiting"] == MODE_GENERIC
 
 
-def test_loaded_all_generic_config_requires_the_acknowledgement(tmp_path):
+def test_loaded_all_generic_config_relies_on_separate_runtime_ai_approval(tmp_path):
     path = _config(tmp_path, taxonomy=[
         {"slug": "a", "label": "Triage/A", "drafting": {"mode": "generic"}},
         {"slug": "b", "label": "Triage/B", "drafting": {"mode": "generic"}},
     ])
-    with pytest.raises(DraftingConfigError, match="removes every review layer"):
-        load_profile(path)
+    profile = load_profile(path)
+    assert set(profile.drafting_modes.values()) == {MODE_GENERIC}
 
+    # The legacy duplicate acknowledgement remains accepted, but permission
+    # to generate is now exclusively checked by AiDraftingApprovals.
     ok = _config(
         tmp_path,
         taxonomy=[
@@ -388,3 +497,42 @@ def test_legacy_profile_has_no_drafting_modes():
     legacy = load_profile()
     assert dict(legacy.drafting_modes) == {}
     assert resolve_mode(legacy, "parent") is None
+
+
+def test_comment_key_is_allowed_but_typos_are_still_rejected(tmp_path):
+    """The shipped example explains itself in the file a reader is looking
+    at, so "_comment" is permitted. Strictness matters more than the comment
+    though: any other unknown key must still fail loudly, or a typo like
+    "aproved_categories" would silently approve nothing while appearing to
+    approve everything."""
+    base = {
+        "version": 1, "account": "owner@example.test",
+        "approved_categories": ["recruiting"],
+        "allow_protected_labels": False,
+        "acknowledgement": drafting.AI_DRAFTING_ACKNOWLEDGEMENT,
+    }
+
+    commented = tmp_path / "ok.json"
+    commented.write_text(json.dumps({**base, "_comment": "explains itself"}))
+    approvals = load_ai_drafting_approval(
+        str(commented), "owner@example.test", {"recruiting"}
+    )
+    assert approvals.categories == frozenset({"recruiting"})
+
+    for typo in ("aproved_categories", "allow_protected_label", "coment"):
+        bad = tmp_path / f"{typo}.json"
+        bad.write_text(json.dumps({**base, typo: []}))
+        with pytest.raises(DraftingConfigError, match="unsupported"):
+            load_ai_drafting_approval(
+                str(bad), "owner@example.test", {"recruiting"}
+            )
+
+
+def test_shipped_example_is_conservative():
+    """Examples get copied wholesale. The shipped one must not demonstrate
+    the maximally permissive configuration."""
+    document = json.load(open("ai-drafting-approval.example.json"))
+
+    assert document["allow_protected_labels"] is False
+    assert len(document["approved_categories"]) <= 2
+    assert "_comment" in document and "larger grant" in document["_comment"]

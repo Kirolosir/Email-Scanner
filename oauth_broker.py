@@ -142,16 +142,55 @@ class BrokerConfig:
     def bearer_matches(self, presented):
         return hmac.compare_digest(self._operator_bearer, presented or "")
 
+    @staticmethod
+    def _clean_env_value(raw):
+        """Strip artifacts a value picks up on its way through a dashboard.
+
+        Whitespace, a trailing newline, and surrounding quotes are common
+        when pasting into a hosting provider's environment editor, and some
+        editors store the quotes literally.
+        """
+        value = (raw or "").strip()
+        for quote in ('"', "'"):
+            if len(value) >= 2 and value.startswith(quote) and \
+                    value.endswith(quote):
+                value = value[1:-1].strip()
+        return value
+
     @classmethod
     def from_environment(cls, env=None):
         env = env if env is not None else os.environ
-        public_hex = env.get("BROKER_OPERATOR_PUBLIC_KEY", "")
+
+        public_hex = cls._clean_env_value(
+            env.get("BROKER_OPERATOR_PUBLIC_KEY", "")
+        )
+        if public_hex.lower().startswith("0x"):
+            public_hex = public_hex[2:]
+
+        # An unset variable must not be reported as a format problem.
+        # bytes.fromhex("") returns b"" without raising, so an empty value
+        # would otherwise sail past the hex check and fail the length check
+        # with a message that sends you looking at the wrong thing.
+        if not public_hex:
+            raise BrokerConfigError(
+                "BROKER_OPERATOR_PUBLIC_KEY is not set (or is empty). It is "
+                "the 64-character hex PUBLIC key printed by: "
+                "python broker_client.py keygen --private-out broker-operator.key"
+            )
         try:
             public_key = bytes.fromhex(public_hex)
         except ValueError as exc:
             raise BrokerConfigError(
-                "BROKER_OPERATOR_PUBLIC_KEY must be hex"
+                "BROKER_OPERATOR_PUBLIC_KEY must be hex: expected 64 "
+                f"hex characters, got {len(public_hex)} characters that are "
+                "not valid hex"
             ) from exc
+        if len(public_key) != broker_crypto.KEY_BYTES:
+            raise BrokerConfigError(
+                "BROKER_OPERATOR_PUBLIC_KEY must be exactly 64 hex "
+                f"characters (32 bytes); got {len(public_hex)} characters "
+                f"decoding to {len(public_key)} bytes"
+            )
         return cls(
             client_id=env.get("BROKER_CLIENT_ID", ""),
             client_secret=env.get("BROKER_CLIENT_SECRET", ""),

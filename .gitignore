@@ -29,6 +29,11 @@ campaign-approval*.json
 !campaign-approval.example.json
 template-approval*.json
 !template-approval.example.json
+ai-drafting-approval*.json
+!ai-drafting-approval.example.json
+account-config*.json
+!account-config.ai.example.json
+taxonomy-confirmation*.json
 
 # Python
 __pycache__/
@@ -42,3 +47,5 @@ env/
 
 # OS
 .DS_Store
+body.txt
+testbody.txt
