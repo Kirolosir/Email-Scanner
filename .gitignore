@@ -1,0 +1,44 @@
+# Gmail OAuth
+credentials.json
+token*.json
+tokens/
+client_secret*.json
+
+# OAuth broker operator key. Losing this means sealed credentials can never
+# be opened; committing it means anyone with the repo can open them.
+*.key
+broker-operator*
+broker.env
+!broker.env.example
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Per-run campaign draft-id logs (keep locally; needed for --undo)
+draft-logs/
+*.log
+
+# Daily triage private journal and scheduler output
+triage-state/
+automation-logs/
+daily-state*.json
+audit-reports/
+campaign-approval*.json
+!campaign-approval.example.json
+template-approval*.json
+!template-approval.example.json
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# OS
+.DS_Store

@@ -1,0 +1,5 @@
+# Dependencies for the OAuth broker only. The triage tool's own
+# requirements.txt is separate and is not needed on the broker host.
+cryptography>=42
+requests>=2.31
+gunicorn>=21.2

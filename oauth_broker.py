@@ -1,0 +1,465 @@
+"""Hosted OAuth callback broker: let an account owner authorize Gmail from
+their own device, without the operator's machine being involved.
+
+NOT DEPLOYED. This module is a WSGI application and a design; nothing here
+starts a public listener, and no hosting configuration is included.
+
+Flow
+----
+1.  The operator creates a single-use invite out of band and sends the owner
+    a /start/<invite> link.
+2.  The owner opens it. The broker mints a CSRF `state` and a PKCE verifier,
+    stores both server-side, and redirects to Google. Nothing secret is in
+    that redirect.
+3.  Google sends the owner back to /callback with a code and the state. The
+    broker validates the state (single-use, expiring, constant-time), then
+    exchanges the code for tokens SERVER-SIDE using the client secret and the
+    PKCE verifier.
+4.  The refresh token is immediately sealed to the operator's X25519 public
+    key and only the ciphertext is stored. The owner sees a plain success
+    page containing no token, no code, and no secret.
+5.  The operator fetches the ciphertext once from /pickup/<invite> with a
+    bearer credential and decrypts it locally.
+
+The token therefore passes through Google and this broker only, and the
+broker never holds a form of it that it could use.
+
+Security properties this file is responsible for
+------------------------------------------------
+* `state` is 256 bits of os.urandom, single-use, TTL-bounded, and compared
+  with hmac.compare_digest.
+* PKCE S256 is always used, so an intercepted code is not redeemable.
+* The client secret is read from the environment and never appears in a
+  response, a redirect, a log line, or an error page.
+* redirect_uri is fixed by configuration and never taken from a request, so
+  there is no open redirect.
+* Tokens and codes are never logged and never placed in a URL the broker
+  builds.
+* Only sealed ciphertext is persisted. Plaintext exists in one local variable
+  for the duration of the exchange.
+
+Known limits, to settle before standing anything up
+---------------------------------------------------
+* The stores are in-memory, so this is correct for a single worker process
+  only. Multiple gunicorn workers would need shared storage (Redis, or a
+  small database) with the same single-use semantics.
+* There is no rate limiting here; put that in front of it.
+* HTTPS is required and enforced by `require_https`, but TLS termination is
+  the deployment's job.
+"""
+import hmac
+import json
+import logging
+import os
+import secrets
+import time
+import urllib.parse
+from base64 import urlsafe_b64encode
+from hashlib import sha256
+
+import broker_crypto
+
+logger = logging.getLogger(__name__)
+
+GOOGLE_AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
+
+# Matches the desktop flow's least-privilege choice.
+DEFAULT_SCOPES = ("https://www.googleapis.com/auth/gmail.modify",)
+
+STATE_BYTES = 32          # 256 bits
+STATE_TTL_SECONDS = 600   # 10 minutes to complete a sign-in
+INVITE_TTL_SECONDS = 86400
+PICKUP_TTL_SECONDS = 86400
+
+# Never emit these into a response body, header, or log line.
+SECRET_FIELD_NAMES = frozenset({
+    "client_secret", "code", "access_token", "refresh_token", "id_token",
+    "code_verifier",
+})
+
+
+class BrokerConfigError(RuntimeError):
+    """Raised when the broker is not safely configured."""
+
+
+def _b64url(raw):
+    return urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+class BrokerConfig:
+    """Broker configuration. The client secret is read from the environment
+    and is never accepted from a request or written to a response."""
+
+    def __init__(self, client_id, client_secret, redirect_uri,
+                 operator_public_key, operator_bearer,
+                 scopes=DEFAULT_SCOPES, require_https=True,
+                 seed_invites=()):
+        if not client_id:
+            raise BrokerConfigError("client_id is required")
+        if not client_secret:
+            raise BrokerConfigError("client_secret is required")
+        if not redirect_uri:
+            raise BrokerConfigError("redirect_uri is required")
+        if require_https and not redirect_uri.startswith("https://"):
+            raise BrokerConfigError(
+                "redirect_uri must be https; an OAuth code must never cross "
+                "a plaintext connection"
+            )
+        if len(operator_public_key or b"") != broker_crypto.KEY_BYTES:
+            raise BrokerConfigError(
+                "operator_public_key must be 32 raw bytes"
+            )
+        if len(operator_bearer or "") < 32:
+            raise BrokerConfigError(
+                "operator_bearer must be at least 32 characters"
+            )
+        self.client_id = client_id
+        self._client_secret = client_secret
+        self.redirect_uri = redirect_uri
+        self.operator_public_key = bytes(operator_public_key)
+        self._operator_bearer = operator_bearer
+        self.scopes = tuple(scopes)
+        self.require_https = require_https
+        # Invite ids are minted OFFLINE by the operator and supplied here.
+        # Nothing reachable over the network can create one, and because the
+        # stores are per-process, a shell session on a hosted instance could
+        # not have seeded the web worker anyway.
+        self.seed_invites = tuple(
+            value.strip() for value in seed_invites if value and value.strip()
+        )
+        for invite_id in self.seed_invites:
+            if len(invite_id) < 16:
+                raise BrokerConfigError(
+                    "seeded invite ids must be at least 16 characters; mint "
+                    "them with: python broker_client.py mint-invite"
+                )
+
+    @property
+    def client_secret(self):
+        return self._client_secret
+
+    def bearer_matches(self, presented):
+        return hmac.compare_digest(self._operator_bearer, presented or "")
+
+    @classmethod
+    def from_environment(cls, env=None):
+        env = env if env is not None else os.environ
+        public_hex = env.get("BROKER_OPERATOR_PUBLIC_KEY", "")
+        try:
+            public_key = bytes.fromhex(public_hex)
+        except ValueError as exc:
+            raise BrokerConfigError(
+                "BROKER_OPERATOR_PUBLIC_KEY must be hex"
+            ) from exc
+        return cls(
+            client_id=env.get("BROKER_CLIENT_ID", ""),
+            client_secret=env.get("BROKER_CLIENT_SECRET", ""),
+            redirect_uri=env.get("BROKER_REDIRECT_URI", ""),
+            operator_public_key=public_key,
+            operator_bearer=env.get("BROKER_OPERATOR_BEARER", ""),
+            seed_invites=env.get("BROKER_INVITE_IDS", "").split(","),
+        )
+
+
+class MemoryStore:
+    """Single-use, TTL-bounded storage.
+
+    In-memory, so correct for one worker process only. Deployment with more
+    than one worker must swap this for shared storage with identical
+    single-use semantics.
+    """
+
+    def __init__(self, clock=time.monotonic):
+        self._items = {}
+        self._clock = clock
+
+    def put(self, key, value, ttl):
+        self._items[key] = (value, self._clock() + ttl)
+
+    def peek(self, key):
+        entry = self._items.get(key)
+        if entry is None:
+            return None
+        value, expires = entry
+        if self._clock() >= expires:
+            self._items.pop(key, None)
+            return None
+        return value
+
+    def take(self, key):
+        """Remove and return in one step, so two concurrent callers cannot
+        both receive the same value.
+
+        dict.pop is a single bytecode-level operation under the GIL, so it
+        is the removal that decides the winner. Reading first and popping
+        second would let two threads in a threaded WSGI server both observe
+        a live state before either consumed it - which is exactly the replay
+        the single-use rule exists to stop.
+        """
+        entry = self._items.pop(key, None)
+        if entry is None:
+            return None
+        value, expires = entry
+        if self._clock() >= expires:
+            return None
+        return value
+
+    def discard(self, key):
+        self._items.pop(key, None)
+
+    def __len__(self):
+        return len(self._items)
+
+
+def _exchange_with_requests(token_endpoint, payload):
+    import requests
+
+    response = requests.post(token_endpoint, data=payload, timeout=30)
+    if response.status_code != 200:
+        # Deliberately does not include the body: it can echo the code.
+        raise RuntimeError(
+            f"token exchange failed with status {response.status_code}"
+        )
+    return response.json()
+
+
+class OAuthBroker:
+    """WSGI application implementing the three endpoints."""
+
+    def __init__(self, config, exchange_fn=_exchange_with_requests,
+                 clock=time.monotonic):
+        self.config = config
+        self._exchange = exchange_fn
+        self._clock = clock
+        self.invites = MemoryStore(clock)
+        self.states = MemoryStore(clock)
+        self.pickups = MemoryStore(clock)
+        for invite_id in getattr(config, "seed_invites", ()):
+            self.invites.put(invite_id, {"label": "seeded", "used": False},
+                             INVITE_TTL_SECONDS)
+
+    # -- operator-side helpers (not HTTP endpoints) ------------------
+
+    def create_invite(self, label="account owner"):
+        """Mint a single-use invite id in this process.
+
+        Not reachable over HTTP, and on a hosted instance not reachable from
+        a shell either, since the stores live in the web worker's memory.
+        Deployment seeds invites through BROKER_INVITE_IDS instead; this
+        stays for local runs and tests.
+        """
+        invite_id = secrets.token_urlsafe(24)
+        self.invites.put(invite_id, {"label": label, "used": False},
+                         INVITE_TTL_SECONDS)
+        return invite_id
+
+    # -- routing -----------------------------------------------------
+
+    @staticmethod
+    def _scheme(environ):
+        """The scheme the CLIENT used, not the one the proxy used to reach us.
+
+        Behind a hosting proxy the app is normally spoken to over plain HTTP
+        on the internal network, so wsgi.url_scheme alone would reject every
+        request. X-Forwarded-Proto carries what the browser actually used.
+
+        A client that could reach this app directly could forge that header,
+        but gains nothing by it: Google will only redirect to the https
+        redirect_uri registered on the OAuth client, so no code reaches an
+        http endpoint regardless. This check is defence in depth against a
+        misconfigured deployment, not the thing keeping codes off the wire.
+        """
+        forwarded = environ.get("HTTP_X_FORWARDED_PROTO", "")
+        if forwarded:
+            return forwarded.split(",")[0].strip().lower()
+        return environ.get("wsgi.url_scheme", "")
+
+    def __call__(self, environ, start_response):
+        path = environ.get("PATH_INFO", "")
+        method = environ.get("REQUEST_METHOD", "GET")
+
+        if method != "GET":
+            return self._respond(start_response, "405 Method Not Allowed",
+                                 "Method not allowed.")
+
+        # Answered before the scheme check so a platform health probe on the
+        # internal network cannot mark the service unhealthy. It reveals
+        # nothing: a fixed string, no configuration, no counts.
+        if path == "/healthz":
+            return self._respond(start_response, "200 OK", "ok")
+
+        if self.config.require_https and self._scheme(environ) != "https":
+            return self._respond(start_response, "400 Bad Request",
+                                 "This endpoint requires HTTPS.")
+
+        if path.startswith("/start/"):
+            return self._start(environ, start_response,
+                               path[len("/start/"):])
+        if path == "/callback":
+            return self._callback(environ, start_response)
+        if path.startswith("/pickup/"):
+            return self._pickup(environ, start_response,
+                                path[len("/pickup/"):])
+        return self._respond(start_response, "404 Not Found", "Not found.")
+
+    # -- endpoints ---------------------------------------------------
+
+    def _start(self, environ, start_response, invite_id):
+        invite = self.invites.peek(invite_id)
+        if invite is None or invite.get("used"):
+            # Same message either way: an attacker must not learn whether an
+            # invite id exists.
+            return self._respond(start_response, "404 Not Found",
+                                 "This link is not valid or has expired.")
+
+        state = secrets.token_urlsafe(STATE_BYTES)
+        verifier = secrets.token_urlsafe(64)
+        challenge = _b64url(sha256(verifier.encode("ascii")).digest())
+
+        self.states.put(state, {"state": state, "invite_id": invite_id,
+                                "verifier": verifier}, STATE_TTL_SECONDS)
+
+        query = urllib.parse.urlencode({
+            "client_id": self.config.client_id,
+            "redirect_uri": self.config.redirect_uri,
+            "response_type": "code",
+            "scope": " ".join(self.config.scopes),
+            "state": state,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "access_type": "offline",
+            "prompt": "consent",
+        })
+        location = f"{GOOGLE_AUTH_ENDPOINT}?{query}"
+        start_response("302 Found", [
+            ("Location", location),
+            ("Cache-Control", "no-store"),
+            ("Content-Length", "0"),
+        ])
+        return [b""]
+
+    def _callback(self, environ, start_response):
+        params = urllib.parse.parse_qs(environ.get("QUERY_STRING", ""))
+        presented_state = (params.get("state") or [""])[0]
+        code = (params.get("code") or [""])[0]
+
+        if params.get("error"):
+            return self._respond(start_response, "400 Bad Request",
+                                 "Sign-in was cancelled or denied.")
+
+        # Single-use: taken before any other work, so a replayed callback
+        # cannot reach the exchange even concurrently.
+        record = self._take_state(presented_state)
+        if record is None or not code:
+            return self._respond(start_response, "400 Bad Request",
+                                 "This sign-in link is not valid or has "
+                                 "already been used. Ask for a new one.")
+
+        invite = self.invites.peek(record["invite_id"])
+        if invite is None or invite.get("used"):
+            return self._respond(start_response, "400 Bad Request",
+                                 "This invitation has already been used.")
+
+        payload = {
+            "code": code,
+            "client_id": self.config.client_id,
+            "client_secret": self.config.client_secret,
+            "redirect_uri": self.config.redirect_uri,
+            "grant_type": "authorization_code",
+            "code_verifier": record["verifier"],
+        }
+        try:
+            tokens = self._exchange(GOOGLE_TOKEN_ENDPOINT, payload)
+        except Exception:
+            # No exception detail is surfaced: it can contain the code.
+            logger.warning("Token exchange failed for an invite")
+            return self._respond(start_response, "502 Bad Gateway",
+                                 "Could not complete sign-in. Please ask for "
+                                 "a new link.")
+        finally:
+            payload = None
+
+        refresh_token = (tokens or {}).get("refresh_token")
+        if not refresh_token:
+            logger.warning("Exchange returned no refresh token")
+            return self._respond(start_response, "400 Bad Request",
+                                 "Sign-in did not return a durable "
+                                 "credential. Please ask for a new link.")
+
+        sealed = broker_crypto.seal(
+            self.config.operator_public_key,
+            json.dumps({
+                "refresh_token": refresh_token,
+                "scope": (tokens or {}).get("scope", ""),
+                "token_type": (tokens or {}).get("token_type", ""),
+            }).encode("utf-8"),
+        )
+        # Only ciphertext is retained. Drop every plaintext reference.
+        tokens = None
+        refresh_token = None
+
+        self.pickups.put(record["invite_id"], sealed, PICKUP_TTL_SECONDS)
+        self.invites.put(record["invite_id"],
+                         {"label": invite.get("label"), "used": True},
+                         INVITE_TTL_SECONDS)
+
+        return self._respond(
+            start_response, "200 OK",
+            "Thanks - your account is connected. You can close this tab. "
+            "Nothing was sent from your account, and no message was read "
+            "during sign-in.",
+        )
+
+    def _pickup(self, environ, start_response, invite_id):
+        header = environ.get("HTTP_AUTHORIZATION", "")
+        presented = header[len("Bearer "):] if header.startswith("Bearer ") else ""
+        if not self.config.bearer_matches(presented):
+            return self._respond(start_response, "401 Unauthorized",
+                                 "Unauthorized.")
+
+        sealed = self.pickups.take(invite_id)
+        if sealed is None:
+            return self._respond(start_response, "404 Not Found",
+                                 "Nothing to collect.")
+        start_response("200 OK", [
+            ("Content-Type", "application/octet-stream"),
+            ("Cache-Control", "no-store"),
+            ("Content-Length", str(len(sealed))),
+        ])
+        return [sealed]
+
+    # -- helpers -----------------------------------------------------
+
+    def _take_state(self, presented):
+        """Consume the pending state matching `presented`, or return None.
+
+        A direct dict lookup rather than a scan. The state is 256 bits of
+        os.urandom, so it cannot be guessed, and lookup cost no longer grows
+        with the number of sign-ins in flight.
+
+        The compare_digest below confirms the stored value in constant time.
+        With a direct-key lookup that confirmation is a second opinion rather
+        than the primary defence - it becomes load-bearing only if the store
+        is ever changed to key by a hash or prefix, which is exactly the kind
+        of change that would otherwise silently weaken this.
+        """
+        if not presented:
+            return None
+        record = self.states.take(presented)
+        if record is None:
+            return None
+        if not hmac.compare_digest(record.get("state", ""), presented):
+            return None
+        return record
+
+    @staticmethod
+    def _respond(start_response, status, message):
+        body = message.encode("utf-8")
+        start_response(status, [
+            ("Content-Type", "text/plain; charset=utf-8"),
+            ("Cache-Control", "no-store"),
+            ("X-Content-Type-Options", "nosniff"),
+            ("Content-Length", str(len(body))),
+        ])
+        return [body]

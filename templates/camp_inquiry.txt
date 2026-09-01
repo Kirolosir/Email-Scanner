@@ -1,0 +1,14 @@
+[PLACEHOLDER TEMPLATE - camp_inquiry]
+
+Thanks for your interest in our camps.
+
+Session dates, pricing, and registration are all posted on the camp page.
+Group rates are available - let us know how many players you're bringing
+and we can sort out the details.
+
+Hope to see you this summer.
+
+Best,
+The Account Owner
+
+[Replace this file with the coach's real camp_inquiry template.]

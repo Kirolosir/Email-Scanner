@@ -1,0 +1,3 @@
+# Explicit mappings only: alias,canonical
+recruit.personal@example.test,recruit@example.test
+recruit.school@example.test,recruit@example.test

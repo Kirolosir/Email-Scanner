@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "_comment": "Per-template approval, bound to one Gmail account. 'account' is required and is checked against the authenticated mailbox, so an artifact reviewed on the test account cannot authorize drafting on the coach's account. 'label' is optional: include it to scope the artifact to a single triage.py label; omit it for daily_triage.py, which scans an inbox query rather than one label. Each key under approved_templates is a template file stem (recruit_intro, recruit_intro_2027, parent...) and each value is the sha256 digest of that file's EXACT reviewed wording, so editing the template revokes its approval. Generate a digest with: .venv/bin/python -c \"from triage import template_digest; print(template_digest(open('templates/recruit_intro.txt', encoding='utf-8').read()))\". Keep the real file private (chmod 600) and list only templates a human has actually read.",
+  "account": "owner@example.edu",
+  "label": "2027B",
+  "approved_templates": {
+    "recruit_intro": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  }
+}

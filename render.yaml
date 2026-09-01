@@ -1,0 +1,38 @@
+# Render blueprint for the OAuth broker.
+#
+# SINGLE INSTANCE IS A CORRECTNESS REQUIREMENT, not a cost choice. The
+# pending-state, invite, and pickup stores live in the web worker's memory.
+# A second instance would not see states minted by the first, so sign-ins
+# would fail intermittently and, worse, the single-use guarantees would only
+# hold per instance. numInstances and the single gunicorn worker below must
+# stay at 1 unless the stores are moved to shared storage.
+services:
+  - type: web
+    name: example-oauth-broker
+    runtime: python
+    plan: starter
+    numInstances: 1
+    autoDeploy: false
+    buildCommand: pip install -r broker-requirements.txt
+    startCommand: >-
+      gunicorn broker_wsgi:application
+      --workers 1 --threads 4
+      --bind 0.0.0.0:$PORT --timeout 60
+      --access-logfile - --error-logfile -
+    healthCheckPath: /healthz
+    envVars:
+      # Set every one of these in the dashboard. None may be committed.
+      - key: BROKER_CLIENT_ID
+        sync: false
+      - key: BROKER_CLIENT_SECRET
+        sync: false
+      - key: BROKER_REDIRECT_URI
+        sync: false
+      - key: BROKER_OPERATOR_PUBLIC_KEY
+        sync: false
+      - key: BROKER_OPERATOR_BEARER
+        sync: false
+      - key: BROKER_INVITE_IDS
+        sync: false
+      - key: PYTHON_VERSION
+        value: "3.12"

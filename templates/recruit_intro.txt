@@ -1,0 +1,14 @@
+[PLACEHOLDER TEMPLATE - recruit_intro]
+
+Thanks for reaching out and for your interest in the program. I enjoyed
+reading about your club experience and your position.
+
+Please fill out our recruiting questionnaire at the link below so we have
+your information on file, and send along any recent game film you have.
+
+We'll be at several showcases this fall and will keep an eye out for you.
+
+Best,
+The Account Owner
+
+[Replace this file with the coach's real recruit_intro template.]

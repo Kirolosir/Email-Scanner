@@ -1,0 +1,2 @@
+# One address per line. Blank lines and comments are ignored.
+already-registered@example.test

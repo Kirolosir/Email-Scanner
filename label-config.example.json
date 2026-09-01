@@ -1,0 +1,19 @@
+{
+  "years": {
+    "2027": "2027B"
+  },
+  "categories": {
+    "recruit_intro": "Example/Triage/Recruit Introduction",
+    "recruit_update": "Example/Triage/Recruit Update",
+    "video_update": "Example/Triage/Video Update",
+    "parent": "Example/Triage/Parent",
+    "other_coach": "Example/Triage/Other Coach",
+    "camp_inquiry": "Example/Triage/Camp Inquiry",
+    "administrative": "Example/Triage/Administrative",
+    "other": "Example/Triage/Other"
+  },
+  "system": {
+    "needs_review": "Example/Triage/Needs Review",
+    "processed": "Example/Triage/Processed"
+  }
+}

@@ -1,0 +1,13 @@
+[PLACEHOLDER TEMPLATE - recruit_update]
+
+Thanks for the update and for keeping us posted on your schedule.
+
+I've made a note of the change. We'll do our best to get out to one of
+your games this season, and I appreciate you sending the film along.
+
+Keep up the good work.
+
+Best,
+The Account Owner
+
+[Replace this file with the coach's real recruit_update template.]
