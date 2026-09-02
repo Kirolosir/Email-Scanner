@@ -19,8 +19,7 @@ What deliberately does NOT carry over:
     owner confirms fresh even for categories they have used for months.
     Confirmation attests that a human reviewed the taxonomy now; inheriting it
     from history would make "nothing drafts until confirmed" untrue for the
-    account most likely to draft first. This is a deliberate cost of about two
-    minutes, chosen over a silent exception.
+    account most likely to draft first.
   * drafting modes. Every category is emitted as "off", so migrating cannot
     switch drafting on for anything.
 

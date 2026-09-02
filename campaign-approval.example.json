@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "account": "coach@example.edu",
-  "label": "2027B",
+  "account": "owner@example.edu",
+  "label": "YEAR_LABEL",
   "approved_recipients": [
-    "reviewed-recruit@example.com"
+    "reviewed-recipient@example.com"
   ]
 }

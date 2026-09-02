@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "account": "coach@example.edu",
+  "account": "owner@example.edu",
   "timezone": "America/New_York",
   "taxonomy": [
     {
@@ -102,13 +102,13 @@
   ],
   "protected_labels": [
     {
-      "label": "2027B",
+      "label": "YEAR_LABEL",
       "requires_recipient_approval": true
     }
   ],
   "evidence_gated_labels": [
     {
-      "label": "2027B",
+      "label": "YEAR_LABEL",
       "pattern_set": "grad_year",
       "classifier_field": "grad_year",
       "expected_value": "2027",
@@ -130,8 +130,8 @@
     "max_words": 180
   },
   "paths": {
-    "state_dir": "triage-state/coach-example",
-    "draft_log_dir": "draft-logs/coach-example",
+    "state_dir": "triage-state/owner-example",
+    "draft_log_dir": "draft-logs/owner-example",
     "template_dir": "templates"
   }
 }

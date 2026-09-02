@@ -1,24 +1,28 @@
-# Example Email Drafting Tool
+# Email Drafting Tool
 
-This project supports three guarded workflows: campaign reply drafts from a
-Gmail label, incoming-email triage with add-only labels and template replies,
-and an idempotent once-daily inbox processor. It never sends mail
-automatically. Production code contains no Gmail send operation, and an
-offline regression test rejects one if it is introduced.
+There are three guarded workflows here: campaign reply drafts from a Gmail
+label, incoming-email triage with add-only labels and approved fixed or
+AI-generated replies, and a once-daily inbox processor that's safe to run
+twice.
 
-Both drafting workflows are approval-gated, and both default to creating
-nothing. A campaign needs a reviewed recipient allowlist for the protected
-`2027B` label. Triage needs a per-template approval recording that a human
-read that template's exact wording — supplying real template text is not by
-itself approval to draft with it. See
-[Template approval is required even after a template is real](#template-approval-is-required-even-after-a-template-is-real).
+Nothing is ever sent. There's no Gmail send operation anywhere in production
+code, and an offline regression test fails if someone adds one.
 
-Google documents `gmail.modify` as able to read, compose, **and send** email.
-It is the least-privileged single scope supporting this tool's reads, draft
-creation, label additions, and explicitly requested rollback-to-Trash. Gmail
-does not offer a broad draft-creation scope that is technically incapable of
-sending. Application structure, tests, previews, confirmation gates, and
-logs—not OAuth—enforce the no-send boundary.
+Both drafting workflows create nothing by default. A campaign needs a reviewed
+recipient allowlist before it will write against the protected `YEAR_LABEL`.
+Triage needs a reviewed taxonomy, plus either a digest-bound template approval
+or an account/category-bound AI-drafting approval. Writing a template or
+picking a drafting mode doesn't grant permission to draft; that takes a
+separate artifact, described in
+[Classification and drafting modes](#classification-and-drafting-modes).
+
+**Scope disclosure.** Google documents `gmail.modify` as able to read,
+compose, **and send** email. It is the least-privileged single scope covering
+this tool's reads, draft creation, label additions, and explicitly requested
+rollback-to-Trash. Gmail offers no broad draft-creation scope that is
+technically incapable of sending, so the no-send boundary is enforced by
+application structure, tests, previews, confirmation gates, and logs — not by
+OAuth.
 
 ## Setup and authorization
 
@@ -38,33 +42,34 @@ file as `credentials.json`. The optional desktop authorization fallback is:
 .venv/bin/python gmail_auth.py --authorize
 ```
 
-Google opens its own sign-in/consent page. This application never collects the
-Gmail password. For a second account, keep a separate ignored token and verify
-the exact account:
+Google opens its own sign-in and consent page. This application never sees the
+Gmail password. For a second account, keep a separate ignored token and pin the
+exact address you expect:
 
 ```sh
 .venv/bin/python gmail_auth.py --authorize \
-  --token-path tokens/coach.json \
+  --token-path tokens/owner.json \
   --expected-account "owner@example.edu"
 ```
 
-The attempted coach authorization is currently blocked by Example's Workspace
-policy with `Error 400: admin_policy_enforced`. That is an administrator
-decision, not a software error. Do not change clients, accounts, or scopes to
-work around it. No coach-account setup, scan, label, draft, or schedule
-activation may occur until Example IT approves the OAuth application and exact
-account authorization succeeds.
+Authorizing the account owner's mailbox currently fails with `Error 400:
+admin_policy_enforced`. That's their Workspace administrator's decision, not a
+bug on our side. Don't switch clients, accounts, or scopes to get around it.
+Until IT approves the OAuth application and authorization succeeds against the
+exact address, nothing runs against that account: no setup, no scan, no label,
+no draft, no schedule.
 
-A hosted OAuth broker now exists in the repository so an account owner can
-authorize from their own device. It is written and tested but **not deployed**
-and has never been stood up; see
-[Hosted OAuth broker](#hosted-oauth-broker-not-deployed). The desktop flow
-above is unchanged and remains the only path used so far.
+There's a hosted OAuth broker that lets an account owner authorize from their
+own device. It's been run end to end with a personal test account, but it has
+never produced a credential for the owner's mailbox, and it doesn't work around
+the administrator block. See
+[Hosted OAuth broker](#hosted-oauth-broker-deployed-test-service). The desktop
+flow above stays available either way.
 
-Secret files, tokens, logs, caches, state, and virtual environments are
-ignored. On POSIX systems, token/state files use mode 0600 and their private
-directories use 0700. Changing OAuth scopes requires deliberate
-re-authorization; never do that during a campaign run.
+Secret files, tokens, logs, caches, state, and virtual environments are all
+gitignored. On POSIX systems token and state files are mode 0600 and their
+private directories are 0700. Changing OAuth scopes forces a deliberate
+re-authorization, so don't do it in the middle of a campaign run.
 
 ## Offline checks
 
@@ -80,93 +85,98 @@ The demos use fake Gmail, synthetic messages/templates, and stub classifiers:
 No default demo uses the network. Gemini requires an explicit live path.
 Imports and CLI `--help` paths are network-free and do not load `.env`.
 
-## Urgent `2027B` campaign
+## Urgent campaign
 
-`2027B` is the exact urgent campaign label. Campaign deduplication uses the
-normalized sender email address; known aliases can be provided explicitly with
-`aliases.example.txt`. There is no AI identity matching.
+`YEAR_LABEL` is the exact campaign label. Deduplication works on the normalized
+sender address, and you can supply known aliases explicitly through
+`aliases.example.txt`. No AI is involved in deciding who is the same person.
 
-Start with a test account and dry run:
+Start with a test account and a dry run:
 
 ```sh
-GMAIL_TOKEN_PATH=token.json .venv/bin/python campaign.py "2027B" body.txt \
+GMAIL_TOKEN_PATH=token.json .venv/bin/python campaign.py "YEAR_LABEL" body.txt \
   --aliases aliases.example.txt --exclude exclusions.example.txt \
   --limit 2 --dry-run
 ```
 
-The supplied `body.txt` contains the coach-provided campaign wording and direct
-registration links. Preserve it unless the coach approves an edit. A full scan
-may cover roughly 9,000 messages and take approximately 30–40 minutes under the
-current quota pacing. `--limit` limits drafts after deduplication; it does not
-skip the scan required to select newest threads reliably.
+`body.txt` holds the wording the account owner supplied, including the direct
+registration links. Leave it alone unless they approve an edit. A full scan
+covers roughly 9,000 messages and takes 30 to 40 minutes at current quota
+pacing. `--limit` caps drafts after deduplication. It won't shorten the scan,
+which has to finish before the newest thread per sender can be picked
+reliably.
 
-Every created draft ID is flushed to `draft-logs/`. Preview and then roll back
-only one recorded run with:
+Every created draft ID is flushed to `draft-logs/` as it happens. To roll back
+one recorded run, preview it first:
 
 ```sh
 .venv/bin/python campaign.py --undo draft-logs/campaign-YYYYMMDD-HHMMSS.log --dry-run
 .venv/bin/python campaign.py --undo draft-logs/campaign-YYYYMMDD-HHMMSS.log
 ```
 
-Rollback moves the associated draft messages to Trash after its own
-confirmation; it never permanently deletes them.
+Rollback asks for its own confirmation, then moves those drafts to Trash. It
+never deletes anything permanently.
 
-`2027B` is a protected campaign label. A dry run without an approval file is
-allowed for inspection, but it prints `UNREVIEWED` and real draft writes remain
-blocked. Before a real run, create a private read-only recipient audit. This
-command reads Gmail and calls Gemini for normal unique recipients, but has no
-Gmail write operation:
+`YEAR_LABEL` is protected. You can dry-run without an approval file to look
+around, but the run prints `UNREVIEWED` and real draft writes stay blocked.
+Before a real run, build a private recipient audit. The audit reads Gmail and
+calls Gemini for normal unique recipients, and it has no Gmail write operation
+at all:
 
 ```sh
-.venv/bin/python campaign_audit.py "2027B" \
-  --token-path tokens/coach.json \
+.venv/bin/python campaign_audit.py "YEAR_LABEL" \
+  --token-path tokens/owner.json \
   --aliases aliases.example.txt \
-  --output audit-reports/2027B-REVIEW.json
+  --output audit-reports/YEAR_LABEL-REVIEW.json
 ```
 
-The audit report contains recipient addresses and therefore uses directory
-mode 0700 and file mode 0600. It never stores subjects, bodies, credentials,
-tokens, or free-form model reasoning. `candidate_for_human_approval` is a
-recommendation, not approval. The coach must review the population and prepare
-a separate approval file based on `campaign-approval.example.json`:
+Because the report lists recipient addresses, its directory is mode 0700 and
+the file is 0600. It stores no subjects, bodies, credentials, tokens, or
+free-form model reasoning. Note that `candidate_for_human_approval` is a
+recommendation and nothing more. The account owner still has to review the
+population themselves and write a separate approval file, modelled on
+`campaign-approval.example.json`.
 
-Use `--max-scan` and `--limit` for the first audit pilot. A full audit of roughly
-2,000 unique recipients can require several hours at six seconds between model
-calls, before Gmail latency or retries, and can consume paid/API quota.
+Use `--max-scan` and `--limit` for the first audit pilot. Auditing roughly
+2,000 unique recipients can run for several hours at six seconds between model
+calls, before you count Gmail latency or retries, and it consumes paid API
+quota.
 
 ```json
 {
   "version": 1,
   "account": "owner@example.edu",
-  "label": "2027B",
-  "approved_recipients": ["reviewed-recruit@example.com"]
+  "label": "YEAR_LABEL",
+  "approved_recipients": ["reviewed-recipient@example.com"]
 }
 ```
 
-Keep the real file private and ignored, for example:
+Keep the real file private:
 
 ```sh
-chmod 600 campaign-approval.coach.json
+chmod 600 campaign-approval.owner.json
 ```
 
-The campaign validates the approval against Gmail's actual authenticated
-account and exact label, rejects malformed/empty/conflicting recipients, then
-intersects it with aliases and exclusions. A small reviewed pilot is:
+At run time the campaign checks that approval against the authenticated Gmail
+account and the exact label, rejects malformed, empty, or conflicting
+recipients, then intersects what's left with your aliases and exclusions. A
+small reviewed pilot looks like this:
 
 ```sh
-.venv/bin/python campaign.py "2027B" body.txt \
-  --token-path tokens/coach.json \
-  --approval campaign-approval.coach.json \
+.venv/bin/python campaign.py "YEAR_LABEL" body.txt \
+  --token-path tokens/owner.json \
+  --approval campaign-approval.owner.json \
   --aliases aliases.example.txt --exclude exclusions.example.txt \
   --limit 3 --dry-run
 ```
 
-Remove `--dry-run` only after the preview is correct. There is no bypass flag
-for the protected-label approval gate.
+Drop `--dry-run` only once the preview looks right. There's no flag that
+bypasses the protected-label gate.
 
-## Classification and templates
+## Classification and drafting modes
 
-The validated categories are:
+With no account profile supplied, the tool falls back to a legacy built-in
+category list:
 
 - `recruit_intro`
 - `recruit_update`
@@ -178,259 +188,351 @@ The validated categories are:
 - `other`
 - `unknown`
 
+Point `--account-config FILE` at a real profile and that list is replaced by
+the account owner's reviewed taxonomy. `discover_taxonomy.py` can propose
+category names from redacted subject lines, but a proposal grants nothing and
+creates no Gmail labels. `approve_account.py` is what records the exact
+taxonomy digests the owner actually reviewed. Real files under `accounts/` and
+proposals under `review/` are private and gitignored.
+
+**What reaches Gemini.** Classification sends the safe reply metadata, the
+subject, and at most 8,000 characters of the cleaned current top-posted
+message. Quoted history, common signatures, and attachment contents are left
+out. Automated, bulk, bounce, no-reply, malformed, and unsafe-Reply-To
+messages are stopped before Gemini and are never drafted.
+
 Gemini returns category, graduation year, sender type, confidence, evidence,
-and a short reason in a strict format. Unsupported/malformed output becomes
-`unknown`; raw model output and message bodies are never logged. Automatic,
-bulk, bounce, no-reply, malformed, and unsafe Reply-To messages are stopped
-before Gemini and never drafted. Classification sends the safe reply metadata,
-subject, and at most 8,000 characters of the cleaned current top-posted message
-to Gemini. Quoted history, common signatures, and attachment contents are not
-included. Gmail approval alone is insufficient; retain Example's approval for
-that data processing before enabling it.
+and a short reason, in a strict format. Anything unsupported or malformed
+becomes `unknown`. Raw model output and message bodies are never logged.
+Approval to touch Gmail doesn't cover any of this: sending message content to
+a third-party model is a separate institutional decision, and you need it
+before enabling classification.
+
+Each configured category gets exactly one drafting mode:
+
+- `off`: classification and add-only labels still run, but no reply is
+  generated.
+- `template`: fixed wording, bound to its SHA-256 approval.
+- `generic`: Gemini writes wording per message. This needs a separate
+  account/category-bound `--ai-drafting-approval`, though not a template
+  digest. Every generated draft carries the hardcoded
+  `AI-DRAFTED - UNREVIEWED WORDING - NOT SENT` banner, and the account owner
+  has to review, edit, or discard it.
+
+Miss either the mode or the approval and drafting stays off. An unapproved
+generic path is rejected before generation, so no message content reaches the
+generation call at all. Generic drafting never sends mail, and it never gets a
+vote on whether a protected year label applies.
+
+Once you've reviewed the profile, create the taxonomy and generic-drafting
+approvals offline:
+
+```sh
+.venv/bin/python approve_account.py \
+  --account-config accounts/owner.json \
+  --taxonomy-output accounts/owner-taxonomy.json \
+  --ai-output accounts/owner-ai.json
+```
+
+The owner types the exact sentence the command prints. Nobody else can type it
+for them. If generic categories should also be allowed to draft on messages
+carrying a protected label, add `--allow-protected-labels`, and the sentence
+they type changes to say `including messages under protected labels`. That's a
+strictly larger grant, but it doesn't loosen the local/model evidence
+agreement that governs whether the label applies in the first place.
+
+### Fixed-template mode
 
 Templates resolve in this order:
 
 1. `templates/<category>_<grad_year>.txt`
 2. `templates/<category>.txt`
 
-A `[PLACEHOLDER TEMPLATE ...]` marker always blocks real drafting. The current
-category templates, including `video_update`, `other_coach`, `administrative`,
-and `other`, remain placeholders until The Account Owner supplies exact approved
-wording. Unknown, ambiguous, conflicting, malformed, or missing-template cases
-receive `Needs Review` and no generated reply.
+All 8 templates shipped in `templates/` are still placeholders.
 
-### Template approval is required even after a template is real
+Anything unknown, ambiguous, conflicting, malformed, or missing a template gets
+`Needs Review` and no generated reply.
 
-Replacing a placeholder with real wording does **not** start drafting.
-Removing the placeholder marker only clears the first of two independent
-gates. A template is used for draft creation only when it is both:
+### Two independent gates
+
+Swapping a placeholder for real wording does **not** start drafting. A template
+only gets used when it is both:
 
 1. not `[PLACEHOLDER TEMPLATE ...]` marked, and
 2. explicitly approved for its exact template key.
 
-The default is fail-closed: with no approval supplied, triage still classifies
-and applies labels normally, and skips only draft creation, logging
-`template unapproved: no reviewed approval for '<key>'`. That appears in the
-same place as missing-template and `other` skips, and those messages route to
-`Needs Review` as usual.
+The marker is checked first, so an approval can never unlock a placeholder.
 
-Approval is per template key, never global. Approving `recruit_intro` does not
-activate `parent` or `camp_inquiry`. Because `recruit_intro_2027.txt` is
-different wording from `recruit_intro.txt`, it is also approved separately.
-Approval can never unlock a placeholder: the marker is checked first.
+The default fails closed. With no approval supplied, triage classifies and
+labels as usual and skips only the draft, logging `template unapproved: no
+reviewed approval for '<key>'` and routing the message to `Needs Review`.
 
-Both `triage.py` and `daily_triage.py` accept the two flags below, and both
-share one enforcement point, so the scheduled 6 PM run is gated identically.
+Approval is per template key, never global. Approving `recruit_intro` won't
+activate `parent` or `camp_inquiry`. And since `recruit_intro_2027.txt` is
+different wording from `recruit_intro.txt`, it needs its own approval.
 
-**`--template-approval FILE` (wording-bound; use this for real runs).** The
-artifact pins each approved key to the SHA-256 digest of the exact reviewed
-text, so editing a template after approval automatically revokes it rather
-than carrying the approval over to wording nobody has read:
+Both `triage.py` and `daily_triage.py` take the two flags below, and both go
+through one enforcement point, so the scheduled 6 PM run is gated exactly like
+an interactive one.
+
+**`--template-approval FILE` (wording-bound; use this for real runs).** Pins
+each approved key to the SHA-256 digest of the exact reviewed text. Edit a
+template after approval and you revoke it, rather than carrying the approval
+over to wording nobody has read:
 
 ```sh
 .venv/bin/python triage.py "INBOX" \
-  --template-approval template-approval.coach.json --limit 5 --dry-run
+  --template-approval template-approval.owner.json --limit 5 --dry-run
 ```
 
 **`--templates-approved KEYS` (name-only; supervised runs only).** A
-comma-separated list of keys approved for one run. It is deliberately weaker:
-it does **not** pin wording, so it attests only that an operator named the key
-on the command line. Use it for interactive pilots where a human inspects each
-draft, never for scheduled runs:
+comma-separated list of keys approved for a single run. It's deliberately the
+weaker of the two: it doesn't pin wording, so all it really attests is that an
+operator typed the key on the command line. Fine for an interactive pilot where
+someone reads every draft. Never use it for a scheduled run:
 
 ```sh
 .venv/bin/python triage.py "INBOX" \
   --templates-approved recruit_intro,parent --limit 5 --dry-run
 ```
 
-Both commands print the active approvals, and the name-only form prints an
-explicit warning that wording is not pinned.
+Both commands print the approvals they're running with, and the name-only form
+adds an explicit warning that wording isn't pinned.
 
-To build an approval artifact, generate the digest of each reviewed template.
-This command reads one local file and makes no network call:
+To build an approval artifact, take the digest of each reviewed template. This
+reads one local file and makes no network call:
 
 ```sh
 .venv/bin/python -c "from triage import template_digest; print(template_digest(open('templates/recruit_intro.txt', encoding='utf-8').read()))"
 ```
 
-Copy each digest into a private file based on `template-approval.example.json`,
-listing only templates a human has actually read:
+Copy the digests into a private file modelled on
+`template-approval.example.json`. List only the templates someone has actually
+read:
 
 ```json
 {
   "version": 1,
   "account": "owner@example.edu",
-  "label": "2027B",
+  "label": "YEAR_LABEL",
   "approved_templates": {
     "recruit_intro": "sha256:dc25272e...66218"
   }
 }
 ```
 
-`account` is required and is checked against the authenticated Gmail account,
-the same way the campaign approval artifact is bound. An approval reviewed on
-the test account therefore cannot authorize drafting in the coach's mailbox;
-the run fails with `template approval account does not match the
-authenticated Gmail account`. Address comparison is normalized, so
-`Coach <coach@example.edu>` and `COACH@EXAMPLE.EDU` match.
+`account` is required, and it's checked against the authenticated Gmail
+account. It's the same binding the campaign approval uses. An approval you
+reviewed on the test account therefore can't authorize drafting in the owner's
+mailbox; the run stops with `template approval account does not match the
+authenticated Gmail account`. Comparison is normalized, so
+`Owner <owner@example.edu>` and `OWNER@EXAMPLE.EDU` match.
 
 `label` is optional, because the daily processor scans an inbox query rather
-than a single label. Omit it and the artifact applies to any label within its
-account. Include it and it is honored strictly: it must equal the label passed
-to `triage.py`, and a run that does not target one label — the daily
-processor — is refused outright rather than silently widened. For a
-`daily_triage.py` artifact, leave `label` out.
+than one label. Leave it out and the artifact covers any label in its account.
+Put it in and it's honored strictly: it has to equal the label passed to
+`triage.py`, and a run that isn't targeting a single label gets refused instead
+of quietly widened. That means the daily processor needs an artifact with no
+`label`.
 
 Structure is validated before any Gmail contact, so a malformed file fails
-immediately; the account binding is then enforced after authorization, once
-the authenticated account is known.
-
-Keep the real file private and ignored; `template-approval*.json` is already
-ignored apart from the example:
-
-```sh
-chmod 600 template-approval.coach.json
-```
-
-Malformed artifacts are rejected rather than partially applied: a wrong
-version, an empty `approved_templates`, a non-string key, or a digest that is
-not `sha256:<64 hex>` all fail the run instead of silently leaving a template
+right away. The account binding is checked later, after authorization, once
+there's an authenticated account to compare against. A wrong version, an empty
+`approved_templates`, a non-string key, or a digest that isn't
+`sha256:<64 hex>` all fail the run rather than leaving a template
 unapproved-but-assumed-approved.
 
-One limit this gate does not cover: the digest proves the wording is unchanged
+Keep the real file private. `template-approval*.json` is gitignored apart from
+the example:
+
+```sh
+chmod 600 template-approval.owner.json
+```
+
+**What this gate does not cover.** The digest proves the wording is unchanged
 since the artifact was written, and the account binding proves it was reviewed
-for this mailbox, but neither can prove a human actually read the text. That
-remains an operator responsibility, as it does for the campaign allowlist.
+for this mailbox. Neither proves a human actually read the text. That remains
+an operator responsibility, as it does for the campaign allowlist.
 
 ## Exact label policy and bootstrap
 
-`2027B` is reserved for email sent by an actual 2027 recruit in a recruiting
-category. The model's year is never sufficient. The cleaned current message
-must also contain deterministic recruiting-year evidence such as `Class of
-2027`, the classifier must be high confidence, and the local/model years must
-agree. Dates, schedules, phone numbers, quoted history, and footers do not
-qualify. Parent, other-coach, administrative, automated, vendor, and reporter
-messages do not receive it merely because their text mentions a 2027 recruit.
-Low/medium confidence and contradictory evidence route to Needs Review with no
-draft.
+In the legacy profile, `YEAR_LABEL` is reserved for mail actually sent by a
+recruit of that class year, in a recruiting category. A generalized account
+profile can define the same protected label and evidence rule through config
+instead of hardcoding it into the pipeline.
 
-`label-config.example.json` contains the reviewed mapping:
+The model's answer alone is never enough to apply it. Four things have to line
+up: the cleaned current message contains deterministic year evidence such as
+`Class of <year>`, the classifier is high confidence, and the locally extracted
+year agrees with the model's. Dates, schedules, phone numbers, quoted history,
+and footers don't count as evidence. A parent, another coach, an administrator,
+an automated sender, a vendor, or a reporter doesn't get the label just because
+their text mentions a recruit of that year. Low or medium confidence, or
+evidence that contradicts itself, routes to Needs Review with no draft.
 
-- existing-only year label: `2027B`
-- category labels under `Example/Triage/...`
-- `Example/Triage/Needs Review`
-- hidden `Example/Triage/Processed`
+`label-config.example.json` holds the reviewed mapping:
 
-The legacy `triage.py` and daily processor never create labels. The separate
-bootstrap command is the only module allowed to create the exact configured
-triage labels. Preview it on a test account:
+- the year label, which must already exist
+- category labels under a configured prefix
+- a `Needs Review` label
+- a hidden `Processed` label
+
+Neither `triage.py` nor the daily processor ever creates a label. The bootstrap
+command is the only module allowed to, and only for the exact labels named in
+that config. Preview it on a test account first:
 
 ```sh
 GMAIL_TOKEN_PATH=token.json .venv/bin/python setup_labels.py \
   --config label-config.example.json --dry-run
 ```
 
-After reviewing the exact list:
+Then, once you've read the exact list it printed:
 
 ```sh
 GMAIL_TOKEN_PATH=token.json .venv/bin/python setup_labels.py \
   --config label-config.example.json
 ```
 
-Setup is idempotent, requires typed confirmation, never creates `2027B`, never
-accepts a free-text label name, never consumes classifier output, and never
-renames/removes/deletes a label.
+Running it twice is harmless. It asks for typed confirmation, won't create
+`YEAR_LABEL`, won't accept a free-text label name, never reads classifier
+output, and never renames, removes, or deletes a label.
 
 ## Two-month backfill and daily triage
 
-Before classification, estimate the initial workload using metadata only. This
-makes zero Gemini calls and zero Gmail writes:
+Before classifying anything, estimate the initial workload from metadata alone.
+This makes zero Gemini calls and zero Gmail writes:
 
 ```sh
 .venv/bin/python daily_triage.py initial \
-  --token-path tokens/coach.json --estimate-only --scheduled
+  --account-config accounts/owner.json \
+  --taxonomy-confirmation accounts/owner-taxonomy.json \
+  --ai-drafting-approval accounts/owner-ai.json \
+  --token-path tokens/owner.json --estimate-only --scheduled
 ```
 
-The estimate counts already-processed, automated, invalid-metadata, and Gemini
-candidate messages, and reports minimum model-spacing time using the configured
-six-second interval. Actual time may be longer because of Gmail latency and
-retries.
+The estimate breaks the window down into already-processed, automated,
+invalid-metadata, and genuine Gemini candidates, then reports the minimum
+model-spacing time at the configured six-second interval. Expect it to take
+longer in practice, once Gmail latency and retries are in play.
 
-`daily_triage.py` defaults to dry run. Initial mode searches only Inbox mail
-from approximately two months and explicitly excludes Spam, Trash, Sent, and
+`daily_triage.py` defaults to a dry run. Initial mode searches Inbox mail from
+roughly the last two months and explicitly excludes Spam, Trash, Sent, and
 Drafts:
 
 ```sh
 GMAIL_TOKEN_PATH=token.json .venv/bin/python daily_triage.py initial \
-  --config label-config.example.json --max-scan 50 --limit 10 --dry-run
+  --account-config accounts/owner.json \
+  --taxonomy-confirmation accounts/owner-taxonomy.json \
+  --ai-drafting-approval accounts/owner-ai.json \
+  --max-scan 50 --limit 10 --dry-run
 ```
 
-After a reviewed test-account preview, approved templates, and a small pilot,
-the explicit write gate is:
+Once you've reviewed a test-account preview, approved the templates, and run a
+small pilot, `--apply` is the explicit write gate:
 
 ```sh
 GMAIL_TOKEN_PATH=token.json .venv/bin/python daily_triage.py initial \
-  --config label-config.example.json --template-approval template-approval.coach.json \
+  --account-config accounts/owner.json \
+  --taxonomy-confirmation accounts/owner-taxonomy.json \
+  --ai-drafting-approval accounts/owner-ai.json \
   --max-scan 50 --limit 10 --apply
 ```
 
-`--apply` authorizes Gmail writes; it does not approve any template. Without
-`--template-approval` (or, for a supervised run, `--templates-approved`), the
-run above still labels normally and creates zero drafts, reporting each
-skipped category as `template unapproved`. That is expected, not a failure.
+All `--apply` does is authorize Gmail writes. It doesn't approve a template, an
+AI category, or a taxonomy. Template categories still need
+`--template-approval` and generic categories still need
+`--ai-drafting-approval`. A category missing its approval can still be labeled;
+it just won't draft.
 
-Daily mode searches a three-day overlap to avoid missed late-arriving mail:
+**`--limit N` is a budget of N Gmail writes**, counting label adds and drafts
+together. Not N messages, and not N classifications. One message usually costs
+more than one write: a category label, sometimes `Needs Review`, the
+`Processed` label, and a draft if its category drafts.
+
+The budget is spent whole messages at a time. A message that doesn't fit is
+deferred rather than half-written, because applying its category label without
+`Processed` would leave the next run treating it as new. Deferred messages
+aren't marked processed, so the following run picks them up, and a bounded
+daily run doesn't set the same-day guard while work remains. That makes
+`--limit` a throttle for a staged rollout rather than a way to skip mail.
+
+The run prints what it spent and what it deferred:
+
+```
+Label adds:   up to 11
+Drafts:       up to 0
+Write budget: 11 of 12 (--limit bounds label adds plus drafts)
+Deferred:     1 candidate(s) left for the next run; they were not marked processed
+```
+
+Because every message costs at least the `Processed` label, at most N messages
+are fetched and classified, so N also caps Gemini calls. If a limit is too
+small to afford even one message, the run says so and changes nothing rather
+than stalling silently. To bound the Gmail *read* instead, use `--max-scan`.
+
+This was previously a classification-only bound: a measured `--limit 15` run
+classified 15 messages but processed 158 and wrote up to 182 labels.
+
+Daily mode searches a three-day overlap so late-arriving mail isn't missed:
 
 ```sh
 GMAIL_TOKEN_PATH=token.json .venv/bin/python daily_triage.py daily --dry-run
 ```
 
-Important terminology:
+Three terms that are easy to confuse:
 
-- A live `--dry-run` prevents Gmail writes, but still reads Gmail and may call
+- A live `--dry-run` blocks Gmail writes. It still reads Gmail and may call
   Gemini.
-- `--estimate-only` reads Gmail metadata, makes zero Gemini calls, and makes
-  zero Gmail writes.
-- The offline demos/tests use fake Gmail and stub classifiers and make zero
-  network calls.
+- `--estimate-only` reads Gmail metadata, calls Gemini zero times, and writes
+  to Gmail zero times.
+- The offline demos and tests use fake Gmail and stub classifiers, and make no
+  network calls at all.
 
-It skips messages already carrying `Example/Triage/Processed` or marked
-complete in its private journal. The atomically written journal lives under
-`triage-state/`, uses owner-only permissions, and stores IDs/statuses—not
-subjects, senders, bodies, credentials, or model output. Existing draft threads
-are reconciled before creation. A manual/external thread draft is never adopted,
-modified, or entered into a rollback log; it is routed to Needs Review. A draft
-provably created by this program can be recovered from its journal. If
-interrupted after draft creation but before the processed label, the immediately
-flushed draft log and journal prevent a duplicate on restart.
-Corrupt/unsupported authoritative state blocks rather than resetting.
+The processor skips anything already carrying the `Processed` label or marked
+complete in its private journal. That journal is written atomically under
+`triage-state/` with owner-only permissions, and it holds IDs and statuses.
+Not subjects, not senders, not bodies, not credentials, not model output.
+
+Existing drafts on a thread are reconciled before anything new is created. A
+draft written by hand, or by some other tool, is never adopted, never modified,
+and never entered into a rollback log; that thread goes to Needs Review
+instead. A draft this program provably created can be recovered from the
+journal. And if a run is interrupted after creating a draft but before applying
+the processed label, the draft log and journal are flushed immediately enough
+that a restart won't duplicate it. Corrupt or unsupported state blocks the run
+rather than resetting itself.
 
 Every run also takes a crash-safe, nonblocking OS lock keyed by a private hash
-of its target. A concurrent same-target run exits with status 75 before Gmail
-contact. A PII-free atomic status file records the last attempt/success, counts,
+of its target. A second run against the same target exits with status 75 before
+it ever contacts Gmail. A PII-free status file records the last attempt and
+success, counts,
 safe error codes, and lock conflicts. Runtime/state/status directories are 0700
 and private files are 0600.
 
-Each message is isolated: one API/classification failure does not discard the
-other plans. Labels are add-only. Drafts are replies in existing threads and
-remain unsent for individual review.
+Messages are isolated from each other, so one API or classification failure
+doesn't throw away the rest of the plans. Labels are add-only. Drafts are
+replies inside existing threads, and they sit there unsent until someone reads
+them.
 
 ## Prepared 6 PM macOS schedule (not installed)
 
-`launchd/com.example.email.daily-triage.plist.example` is prepared for 6:00 PM
-local time with absolute paths and no secrets. It includes `--apply --yes`, so
-do not install it until every rollout gate below passes. The computer must be
-running and online; the same-day guard and processed journal make duplicate
-invocations harmless. Its non-secret `--token-path` points specifically to
-`tokens/coach.json` so a scheduled coach run cannot silently use `token.json`.
-The Mac's system timezone must remain America/New_York for 18:00 to mean the
-requested Eastern-time run.
+`launchd/com.example.email.daily-triage.plist.example` is set up for 6:00 PM
+local time and contains no secrets. launchd needs absolute paths, so replace
+every `/ABSOLUTE/PATH/TO/CHECKOUT` in it with this checkout's real location
+before installing. It carries
+`--apply --yes`, so don't install it until every rollout gate below has passed.
+The machine has to be awake and online. Duplicate invocations are harmless,
+between the same-day guard and the processed journal. Its `--token-path`
+points at `tokens/owner.json` specifically, so a scheduled run against the
+owner's mailbox can't quietly fall back to `token.json`. One thing to watch:
+18:00 only means the intended Eastern-time run while the Mac's system timezone
+stays America/New_York.
 
-The plist also uses `--scheduled`. Unattended output contains counts, label
-category names, opaque identifiers, timestamps, and safe error codes only; it
-does not contain subjects, addresses, bodies, classifier reasoning, or secrets.
+The plist also passes `--scheduled`. Unattended output is limited to counts,
+label category names, opaque identifiers, timestamps, and safe error codes. No
+subjects, addresses, bodies, classifier reasoning, or secrets.
 
-Before eventual activation, create private scheduler logs:
+Before you ever activate it, create private scheduler logs:
 
 ```sh
 mkdir -p automation-logs
@@ -439,35 +541,37 @@ touch automation-logs/daily-triage.out.log automation-logs/daily-triage.err.log
 chmod 600 automation-logs/*.log
 ```
 
-Copy the reviewed plist to `~/Library/LaunchAgents/`, validate with
-`plutil -lint`, and enable with `launchctl bootstrap gui/$(id -u) ...`.
-Inspect with `launchctl print gui/$(id -u)/com.example.email.daily-triage`.
-Pause/remove with `launchctl bootout gui/$(id -u) ...`. These are future
-operator instructions only; the project does not install or activate the job.
+Copy the reviewed plist to `~/Library/LaunchAgents/`, check it with
+`plutil -lint`, and enable it with `launchctl bootstrap gui/$(id -u) ...`.
+Inspect it with `launchctl print gui/$(id -u)/com.example.email.daily-triage`,
+and pause or remove it with `launchctl bootout gui/$(id -u) ...`. These are
+instructions for whoever eventually turns it on. The project itself installs
+nothing.
 
-## Hosted OAuth broker (not deployed)
+## Hosted OAuth broker (deployed test service)
 
 `oauth_broker.py`, `broker_crypto.py`, `broker_client.py`, and `broker_wsgi.py`
-let an account owner complete Google sign-in on their own device, without the
-operator's machine being involved. Nothing here has been deployed, no hosting
-account has been provisioned, and no public URL exists.
+let an account owner complete Google sign-in on their own device, with the
+operator's machine out of the loop entirely. The test broker is deployed at
+`https://email-scanner-hhma.onrender.com`. The local tools don't assume it's
+up, and the Workspace administrator block applies to it unchanged.
 
-The credential passes through Google and the broker only. The broker seals the
-refresh token to a public key the operator generated locally, so it can encrypt
-but never decrypt: a fully compromised broker yields ciphertext, not a Gmail
-token.
+The credential only ever passes through Google and the broker. The broker seals
+the refresh token to a public key the operator generated locally, which means it
+can encrypt but has no way to decrypt. Fully compromise the broker and what you
+get is ciphertext, not a Gmail token.
 
 ### Single instance is a correctness requirement
 
-The pending-state, invite, and pickup stores live in the web worker's memory.
-A second instance would not see states minted by the first, sign-ins would fail
-intermittently, and the single-use guarantees would hold only per instance.
-`render.yaml` pins `numInstances: 1` and `--workers 1`, and a test asserts both.
-Moving to more than one process means moving those stores to shared storage
-with identical single-use semantics first.
+The pending-state, invite, and pickup stores all live in the web worker's
+memory. A second instance wouldn't see states minted by the first, so sign-ins
+would fail intermittently and the single-use guarantees would only hold per
+instance. `render.yaml` pins `numInstances: 1` and `--workers 1`, and a test
+asserts both. Before going to more than one process, those stores have to move
+to shared storage with the same single-use semantics.
 
-Threads are fine: `MemoryStore.take` removes with a single `dict.pop`, so two
-concurrent callbacks cannot both consume the same state.
+Threads are fine. `MemoryStore.take` removes with a single `dict.pop`, so two
+concurrent callbacks can't both consume the same state.
 
 ### On the free plan the real window is one sitting, not 24 hours
 
@@ -498,16 +602,14 @@ or persist the pickup store. Persisting it is not a free choice: it puts
 sealed credentials somewhere other than one process's memory, and that
 tradeoff should be reasoned through before it is built, not assumed.
 
-### Target
+### Host
 
-Render is the recommended host: it builds a Python service from
-`broker-requirements.txt` with no Dockerfile, and one instance is the default
-rather than something to remember to configure. Fly.io works equally well, but
-`fly launch` can create two machines by default, which is exactly the failure
-above — if you use Fly, set `min_machines_running = 1`, disable autoscaling,
-and confirm only one machine exists before sending anyone an invite.
-
-`Procfile` carries the same start command for any Procfile-style host.
+Deployed on Render, which builds a Python service from
+`broker-requirements.txt` with no Dockerfile and defaults to one instance.
+`Procfile` carries the same start command for any Procfile-style host. On a
+host that defaults to more than one instance — `fly launch` creates two
+machines by default — pin it to one and confirm before sending any invite,
+or the single-instance requirement above is silently violated.
 
 ### Environment variables
 
@@ -533,11 +635,11 @@ Run on your own machine. The private half never leaves it.
 .venv/bin/python broker_client.py keygen --private-out broker-operator.key
 ```
 
-It prints the public half. Put that in `BROKER_OPERATOR_PUBLIC_KEY`. Keep
-`broker-operator.key` (mode 0600) — without it the sealed credential is
-unrecoverable, and there is no way to ask the broker for a second copy.
+It prints the public half. That goes in `BROKER_OPERATOR_PUBLIC_KEY`. Hold on
+to `broker-operator.key` at mode 0600. Lose it and the sealed credential is
+gone for good; there's no way to ask the broker for a second copy.
 
-Generate the pickup credential too:
+Generate the pickup credential while you're here:
 
 ```sh
 .venv/bin/python -c "import secrets; print(secrets.token_urlsafe(48))"
@@ -545,10 +647,10 @@ Generate the pickup credential too:
 
 ### 2. Mint an invite
 
-Invites are created offline and seeded through configuration. Nothing
-reachable over the network can create one, so there is no admin endpoint to
-defend. A shell on the host would not work either — the stores live in the web
-worker's memory, and a shell is a different process.
+Invites are created offline and seeded through configuration. Nothing reachable
+over the network can create one, so there's no admin endpoint to defend. A
+shell on the host wouldn't help an attacker either, since the stores live in
+the web worker's memory and a shell is a different process.
 
 ```sh
 .venv/bin/python broker_client.py mint-invite --broker-url https://your-broker-host.example.com
@@ -566,16 +668,15 @@ The command prints it:
 https://your-broker-host.example.com/start/<invite-id>
 ```
 
-Single use. The invite id itself is re-seeded from configuration at every
-boot, but the sign-in it starts is not: on the free plan the owner should
-open the link and finish while you are still with them, because an idle
-spin-down loses the pending state. The owner opens it, signs in with Google, and
-sees a plain confirmation page. That page contains no token and no code, and
-says explicitly that nothing was sent from their account and no message was
-read during sign-in.
+The link is single use. The invite id gets re-seeded from configuration at every
+boot, but the sign-in it starts doesn't, so on the free plan have the owner open
+it and finish while you're still with them. An idle spin-down loses the pending
+state. They sign in with Google and land on a plain confirmation page. It shows
+no token and no code, and says outright that nothing was sent from their account
+and no message was read during sign-in.
 
-If they abandon it, or the state's 10-minute window lapses, mint a fresh
-invite. Nothing is reusable by design.
+If they abandon it, or the state's 10-minute window lapses, mint a fresh invite.
+Nothing here is reusable, by design.
 
 ### 4. Retrieve the sealed credential
 
@@ -585,60 +686,126 @@ export BROKER_OPERATOR_BEARER='<the value you generated in step 1>'
 .venv/bin/python broker_client.py collect \
   --url https://your-broker-host.example.com/pickup/<invite-id> \
   --private broker-operator.key \
-  --token-out tokens/coach.json
+  --token-out tokens/owner.json
 ```
 
 The bearer is read from the environment, never from the command line, because
 arguments are visible to every process via `ps`.
 
-Pickup is one time: a successful fetch deletes the ciphertext. A *failed*
-authorization does not consume it, so a wrong bearer cannot destroy the
-credential. `collect` refuses to overwrite an existing token file.
+Pickup happens once. A successful fetch deletes the ciphertext. A *failed*
+authorization doesn't consume it, so a wrong bearer can't destroy the
+credential. `collect` also refuses to overwrite an existing token file.
 
-After that, `tokens/coach.json` is an ordinary credential and the existing
+From there, `tokens/owner.json` is an ordinary credential, and the existing
 `--token-path` flags use it unchanged.
 
 ### Before standing any of this up
 
-- The Google OAuth client must be type **Web application**, with the exact
-  `BROKER_REDIRECT_URI` registered. The desktop client used by `gmail_auth.py`
-  will not work here.
-- Example's `admin_policy_enforced` block applies to the broker exactly as it
-  does to the desktop flow. The broker does not work around an administrator
-  decision and must not be used to try.
-- There is no rate limiting in the app; put it in front.
-- TLS termination is the host's job. The app enforces `https`, honouring
-  `X-Forwarded-Proto` so a hosting proxy does not cause it to reject every
-  request.
+- The Google OAuth client has to be type **Web application**, with the exact
+  `BROKER_REDIRECT_URI` registered. The desktop client `gmail_auth.py` uses
+  won't work here.
+- The `admin_policy_enforced` block applies to the broker just as it does to
+  the desktop flow. The broker doesn't route around an administrator decision,
+  and must not be used to try.
+- There's no rate limiting in the app. Put it in front.
+- TLS termination is the host's job. The app enforces `https` and honours
+  `X-Forwarded-Proto`, so a hosting proxy doesn't make it reject every request.
 - Sealed ciphertext is held **in memory only**. On the free plan an idle
   spin-down destroys it, so collect it in the same sitting rather than
   relying on a 24-hour window — there is not one. See
   [On the free plan the real window is one sitting](#on-the-free-plan-the-real-window-is-one-sitting-not-24-hours).
 
+## Readiness checker
+
+The readiness command runs offline by default. It executes the full test suite,
+runs the static no-send audit separately, validates the account-bound taxonomy
+and drafting approvals, checks private token permissions, and validates any
+optional campaign artifacts. It contacts nothing: not Gmail, not Gemini, not
+OAuth, not the broker.
+
+```sh
+.venv/bin/python check_readiness.py \
+  --account-config accounts/owner.json \
+  --taxonomy-confirmation accounts/owner-taxonomy.json \
+  --ai-drafting-approval accounts/owner-ai.json \
+  --token-path tokens/owner.json
+```
+
+An offline pass prints `OFFLINE READY`, which deliberately stops short of
+claiming the token belongs to the configured account or that the Gmail labels
+exist. Once you have explicit approval for a network read, add `--live`. Live
+mode refreshes the existing token in memory if it has to, then reads the Gmail
+profile and label list and nothing else. It never starts OAuth, never persists
+the refreshed token, never reads a message, and performs zero Gmail writes:
+
+```sh
+.venv/bin/python check_readiness.py \
+  --account-config accounts/owner.json \
+  --taxonomy-confirmation accounts/owner-taxonomy.json \
+  --ai-drafting-approval accounts/owner-ai.json \
+  --token-path tokens/owner.json \
+  --live
+```
+
+It only contacts the hosted broker if you pass both `--live` and an explicit
+`--broker-health-url`. To include a campaign, supply `--campaign-label`,
+`--campaign-approval`, and `--campaign-body` together. Incomplete inputs make
+the result not ready, and so does any check that can't finish.
+
+## Prepared account configuration (not activated)
+
+`account-config.prepared.json` holds drafted category wording guidance for the
+account owner's eventual mailbox. It's inert, kept in the repository so it can
+be reviewed before anyone uses it. On its own it grants nothing: no approval
+artifact is bound to it, it declares no protected label, and every drafting
+mode in it stays inert until the steps in its `_comment` are done.
+
+Two separate institutional approvals have to land before it goes live, and the
+first doesn't imply the second:
+
+1. **Gmail OAuth.** The last attempt came back `Error 400:
+   admin_policy_enforced`, which is a Workspace policy decision. Ask for the
+   current ticket status. Don't assume it's resolved, and don't work around it.
+2. **Gemini data processing.** Sending recruit email content, which may involve
+   minors, to a third-party model is its own decision. Gmail access doesn't
+   cover it. Gemini also runs on a personal API key right now, which is a
+   governance problem to fix before any production use.
+
+Even after both, the account still needs taxonomy discovery run against it,
+since these categories were drafted rather than discovered. Then the owner
+personally runs `approve_account.py`, and an account-bound AI-drafting approval
+gets created.
+
+`YEAR_LABEL` is deliberately missing from the prepared config. Adding it takes
+a `protected_labels` entry plus an `evidence_gated_labels` rule. AI drafting on
+protected-label messages needs `allow_protected_labels` on top of that, and the
+longer confirmation phrase ending in `including messages under protected
+labels`.
+
 ## Required rollout order
 
 1. Run all offline tests and fake Gmail demonstrations.
-2. Obtain Example IT OAuth approval.
-3. Authorize exactly `owner@example.edu` into `tokens/coach.json`.
+2. Obtain institutional IT OAuth approval.
+3. Authorize exactly `owner@example.edu` into `tokens/owner.json`.
 4. Verify the authorized Gmail profile/account with a read-only check.
-5. Preview coach-account label setup, then confirm exact label creation.
+5. Preview owner-account label setup, then confirm exact label creation.
 6. Run `--estimate-only` for the approximately two-month backfill.
 7. Run a small interactive live dry run and inspect classifications.
-8. Run the read-only `2027B` campaign audit.
-9. Have the coach review and explicitly approve the recipient allowlist.
+8. Run the read-only `YEAR_LABEL` campaign audit.
+9. Have the account owner review and explicitly approve the recipient allowlist.
 10. Run a one-to-three-draft campaign pilot and inspect every result.
 11. Test rollback only against the pilot's program-created draft log.
-12. Supply the eight real category templates, then review each one's exact
-    wording and record its digest in a private `--template-approval` artifact.
-    Replacing a placeholder is not approval; drafting stays blocked per
-    category until its key is approved.
+12. Review the account taxonomy and select a drafting mode per category.
+    Template-mode categories require reviewed wording and a digest-bound
+    `--template-approval`; generic categories require an account/category-bound
+    `--ai-drafting-approval` and always carry the unreviewed-AI banner.
 13. Run a small daily-triage draft-only pilot and inspect every label/draft.
 14. Enable the 6:00 PM schedule only after explicit approval.
 
 Before real-account writes, also confirm exclusion sources, exact campaign
-text, all category/year templates, and the pilot size. Passing offline tests
+text, each enabled category's drafting approval, and the pilot size. Passing offline tests
 makes this suitable for staged review; it does not make the system
-production-ready or override Example policy.
+production-ready or override institutional policy.
 
 Official references: [Gmail OAuth scopes](https://developers.google.com/workspace/gmail/api/auth/scopes),
 [Gmail label behavior](https://developers.google.com/workspace/gmail/api/guides/labels),

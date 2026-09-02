@@ -5,11 +5,11 @@ TEST_EMAILS = [
     {
         "from": "jaylen.brooks04@gmail.com",
         "subject": "Class of 2027 - interested in the soccer program",
-        "body": "Hi The Account Owner, my name is Jaylen Brooks and I'm a "
+        "body": "Hi Coach, my name is Jaylen Brooks and I'm a "
                 "class of 2027 center back from Columbus, Ohio. I play "
                 "club for Ohio Elite SC and wanted to introduce myself "
                 "and see what the recruiting process looks like for "
-                "Example.",
+                "the program.",
     },
     {
         "from": "sofia.martins09@gmail.com",
@@ -30,7 +30,7 @@ TEST_EMAILS = [
     {
         "from": "rebecca.chen.parent@gmail.com",
         "subject": "On behalf of my son Marcus Chen",
-        "body": "Hi The Account Owner, I'm Marcus Chen's mother - he's a "
+        "body": "Hi Coach, I'm Marcus Chen's mother - he's a "
                 "junior midfielder who emailed you last month. He's a "
                 "bit shy about reaching out too often so I wanted to "
                 "follow up and ask whether you'll be at the showcase in "

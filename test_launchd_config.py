@@ -15,7 +15,10 @@ def test_launchd_example_is_6pm_absolute_and_contains_no_secrets():
     assert "daily" in arguments
     assert "--apply" in arguments and "--yes" in arguments
     assert "--scheduled" in arguments
-    assert "/Users/kirolos/Documents/Email-Scanner/tokens/coach.json" in arguments
+        # Pinned to a named token so a scheduled run cannot silently fall
+    # back to token.json. Matched by suffix: the leading path is this
+    # checkout's location, which is not a property worth asserting.
+    assert any(value.endswith("/tokens/owner.json") for value in arguments)
     assert "EnvironmentVariables" not in config
     assert "/automation-logs/" in config["StandardOutPath"]
     assert "/automation-logs/" in config["StandardErrorPath"]

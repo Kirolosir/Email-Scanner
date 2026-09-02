@@ -8,24 +8,24 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/kirolos/Documents/Email-Scanner/.venv/bin/python</string>
-    <string>/Users/kirolos/Documents/Email-Scanner/daily_triage.py</string>
+    <string>/ABSOLUTE/PATH/TO/CHECKOUT/.venv/bin/python</string>
+    <string>/ABSOLUTE/PATH/TO/CHECKOUT/daily_triage.py</string>
     <string>daily</string>
     <string>--config</string>
-    <string>/Users/kirolos/Documents/Email-Scanner/label-config.example.json</string>
+    <string>/ABSOLUTE/PATH/TO/CHECKOUT/label-config.example.json</string>
     <string>--templates</string>
-    <string>/Users/kirolos/Documents/Email-Scanner/templates</string>
+    <string>/ABSOLUTE/PATH/TO/CHECKOUT/templates</string>
     <string>--state-path</string>
-    <string>/Users/kirolos/Documents/Email-Scanner/triage-state/daily-state.json</string>
+    <string>/ABSOLUTE/PATH/TO/CHECKOUT/triage-state/daily-state.json</string>
     <string>--token-path</string>
-    <string>/Users/kirolos/Documents/Email-Scanner/tokens/coach.json</string>
+    <string>/ABSOLUTE/PATH/TO/CHECKOUT/tokens/owner.json</string>
     <string>--apply</string>
     <string>--yes</string>
     <string>--scheduled</string>
   </array>
 
   <key>WorkingDirectory</key>
-  <string>/Users/kirolos/Documents/Email-Scanner</string>
+  <string>/ABSOLUTE/PATH/TO/CHECKOUT</string>
 
   <key>StartCalendarInterval</key>
   <dict>
@@ -41,8 +41,8 @@
   <false/>
 
   <key>StandardOutPath</key>
-  <string>/Users/kirolos/Documents/Email-Scanner/automation-logs/daily-triage.out.log</string>
+  <string>/ABSOLUTE/PATH/TO/CHECKOUT/automation-logs/daily-triage.out.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/kirolos/Documents/Email-Scanner/automation-logs/daily-triage.err.log</string>
+  <string>/ABSOLUTE/PATH/TO/CHECKOUT/automation-logs/daily-triage.err.log</string>
 </dict>
 </plist>

@@ -1,16 +1,13 @@
 """The one place a category name, label name, account address, grad year, or
 timezone may appear as a literal in production source.
 
-Pass one of the multi-inbox generalization. Every other production module
-sources these values from here instead of defining its own copy, so the
-inventory of 24 hardcoded sites across 6 modules collapses to this file.
-That makes the eventual per-account config a matter of loading a different
-profile, not of hunting literals again.
+Every other production module sources these values from here rather than
+defining its own copy, so supporting another inbox means loading a different
+profile, not hunting literals across modules.
 
-This pass is deliberately behavior-neutral. ``LEGACY_PROFILE`` reproduces the
-exact values the tool used before the refactor, and ``load_profile(None)``
-returns it, so nothing changes for the existing account until a real config
-file is supplied.
+``LEGACY_PROFILE`` reproduces the exact values the tool used before this was
+extracted, and ``load_profile(None)`` returns it, so behavior is unchanged for
+the existing account until a real config file is supplied.
 
 Structural vocabulary is NOT domain data and stays in code: confidence levels,
 the ``unknown`` sentinel, sender-type kinds, and the ``administrative`` system
@@ -18,12 +15,12 @@ category used for deterministically-detected automated mail. Those are protocol
 values the code reasons about, not per-inbox choices.
 
 DECISION RECORD:
-  * Migration must NOT auto-confirm an existing account's categories. the account owner's
-    seven categories get the same fresh confirmation prompt as any discovered
-    taxonomy, even though he has used those names all season. Confirmation
-    attests that a human reviewed the taxonomy now; inheriting it from history
-    would make "nothing drafts until confirmed" untrue for the one account
-    most likely to draft first.
+  * Migration must NOT auto-confirm an existing account's categories. The
+    legacy profile's seven categories get the same fresh confirmation prompt
+    as any discovered taxonomy, even though that account has used those names
+    for a full season. Confirmation attests that a human reviewed the taxonomy
+    now; inheriting it from history would make "nothing drafts until
+    confirmed" untrue for the one account most likely to draft first.
   * Generic drafting never requires exact template wording. It is separately
     approved by account and category, and protected-label messages require an
     explicit acknowledgement in that approval artifact.
@@ -267,6 +264,11 @@ def _load_account_config(path):
         "version", "account", "timezone", "taxonomy", "protected_labels",
         "evidence_gated_labels", "system_labels", "ai_drafting", "paths",
         "unreviewed_bulk_acknowledgement",
+        # "_comment" only, matching template-approval and ai-drafting-approval.
+        # A prepared-but-unactivated config needs to explain itself in the file
+        # someone will actually open. Every other unknown key stays rejected so
+        # a typo fails loudly instead of being silently ignored.
+        "_comment",
     }
     unexpected = sorted(set(document) - allowed)
     _require(not unexpected,

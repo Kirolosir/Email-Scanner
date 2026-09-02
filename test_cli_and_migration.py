@@ -385,3 +385,72 @@ def test_migration_carries_reviewed_system_labels_into_account_config():
     }
     document = build_account_config(ACCOUNT, label_config=label_config)
     assert document["system_labels"] == label_config["system"]
+
+
+# --------------------------------------------------------------------
+# The prepared account config must stay prepared, not activated.
+# --------------------------------------------------------------------
+
+PREPARED_CONFIG = "account-config.prepared.json"
+
+
+def test_prepared_config_exists_and_loads():
+    """Drafted wording guidance belongs in the repository where it can be
+    reviewed, not only in a chat transcript."""
+    from account_profile import load_profile
+
+    profile = load_profile(PREPARED_CONFIG)
+    assert profile.account == "owner@example.edu"
+    assert len(profile.taxonomy) == 8
+
+
+def test_prepared_config_activates_nothing():
+    """It is inert by construction: no approval artifact is bound to it, and
+    it declares no protected label, so no drafting can occur from it alone."""
+    import os
+    from account_profile import load_profile
+
+    profile = load_profile(PREPARED_CONFIG)
+
+    # No confirmation or approval may be embedded in the config itself.
+    # Checked structurally, not by substring: the explanatory _comment
+    # legitimately uses the word "confirmation" to say one is REQUIRED, and a
+    # blob-wide search would flag the very text that documents the blocker.
+    document = json.load(open(PREPARED_CONFIG))
+    payload = {k: v for k, v in document.items() if k != "_comment"}
+    assert "confirmation" not in json.dumps(payload)
+    assert "approved_categories" not in payload
+    assert "unreviewed_bulk_acknowledgement" not in payload
+    for entry in payload["taxonomy"]:
+        assert "confirmation" not in entry
+        assert "digest" not in entry
+
+    # No protected label, so the higher-consequence grant is not in play.
+    assert profile.protected_labels == frozenset()
+
+    # And no approval artifact exists on disk for this account.
+    for sibling in ("accounts/owner-taxonomy.json", "accounts/owner-ai.json"):
+        assert not os.path.exists(sibling), (
+            f"{sibling} exists; the prepared config is no longer inert"
+        )
+
+
+def test_prepared_config_states_the_blockers():
+    """Anyone opening the file must learn it needs institutional approval for Gmail
+    AND, separately, for sending recruit content to Gemini."""
+    document = json.load(open(PREPARED_CONFIG))
+    comment = document["_comment"]
+
+    assert "NOT ACTIVATED" in comment
+    assert "admin_policy_enforced" in comment
+    assert "Gemini" in comment and "SEPARATE" in comment
+    assert "approve_account.py" in comment
+
+
+def test_prepared_config_other_category_is_off():
+    """'other' routes to Needs Review rather than drafting."""
+    from account_profile import load_profile
+    import drafting
+
+    profile = load_profile(PREPARED_CONFIG)
+    assert profile.drafting_modes["other"] == drafting.MODE_OFF

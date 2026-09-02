@@ -7,7 +7,7 @@ from gemini_client import classify
 TEST_EMAIL = {
     "from": "nicholas.reyes@gmail.com",
     "subject": "Interested in the soccer program",
-    "body": "Hi The Account Owner, my name is Nicholas and I'm a class of 2028 "
+    "body": "Hi Coach, my name is Nicholas and I'm a class of 2028 "
             "midfielder from New Jersey. I'd love to learn more about your "
             "program and any camps you have coming up.",
 }

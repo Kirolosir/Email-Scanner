@@ -33,7 +33,17 @@ ai-drafting-approval*.json
 !ai-drafting-approval.example.json
 account-config*.json
 !account-config.ai.example.json
+# Drafted wording guidance for an account that is not live yet. Contains no
+# secret, no approval, and no confirmation - it is inert configuration kept
+# in the repo so it can be reviewed before it is ever used.
+!account-config.prepared.json
 taxonomy-confirmation*.json
+
+# Private per-account runtime profiles, approvals, and taxonomy reviews.
+# Shipped examples stay at the repository root; real account artifacts live
+# in these directories and must never be committed.
+accounts/
+review/
 
 # Python
 __pycache__/
@@ -49,3 +59,8 @@ env/
 .DS_Store
 body.txt
 testbody.txt
+
+# Account-specific scheduler jobs. The .example template is tracked; a real
+# one names the account and its token path, so it stays local.
+launchd/*.plist
+!launchd/*.plist.example

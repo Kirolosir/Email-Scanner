@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "_comment": "Per-account, per-category permission to create UNSENT AI-generated drafts. Deliberately conservative: start with one or two low-risk categories and allow_protected_labels false, then widen only after reading real drafts the tool produced. Every slug listed here must exist in the account config's taxonomy and be set to drafting mode 'generic'. Setting allow_protected_labels to true is a strictly larger grant - it permits model-written text on messages carrying a protected label such as 2027B - and approve_account.py requires a different, longer typed confirmation for it. Do not copy this file with every category listed; generate it with: python approve_account.py --account-config <config> --taxonomy-output <path> --ai-output <path>",
-  "account": "coach@example.edu",
+  "_comment": "Per-account, per-category permission to create UNSENT AI-generated drafts. Deliberately conservative: start with one or two low-risk categories and allow_protected_labels false, then widen only after reading real drafts the tool produced. Every slug listed here must exist in the account config's taxonomy and be set to drafting mode 'generic'. Setting allow_protected_labels to true is a strictly larger grant - it permits model-written text on messages carrying a protected label such as YEAR_LABEL - and approve_account.py requires a different, longer typed confirmation for it. Do not copy this file with every category listed; generate it with: python approve_account.py --account-config <config> --taxonomy-output <path> --ai-output <path>",
+  "account": "owner@example.edu",
   "approved_categories": [
     "camp_inquiry",
     "recruit_intro"

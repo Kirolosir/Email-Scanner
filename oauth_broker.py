@@ -1,8 +1,13 @@
 """Hosted OAuth callback broker: let an account owner authorize Gmail from
 their own device, without the operator's machine being involved.
 
-NOT DEPLOYED. This module is a WSGI application and a design; nothing here
-starts a public listener, and no hosting configuration is included.
+DEPLOYED as a test service at https://email-scanner-hhma.onrender.com, on
+Render's free plan. Hosting configuration is in `render.yaml`, `Procfile`,
+`broker-requirements.txt`, and `broker.env.example`. It has been run end to
+end with a personal test account. It has never produced a credential for the
+account owner's mailbox, and it doesn't bypass the Workspace
+admin_policy_enforced block, which applies here exactly as it does to the
+desktop flow.
 
 Flow
 ----
@@ -38,11 +43,17 @@ Security properties this file is responsible for
 * Only sealed ciphertext is persisted. Plaintext exists in one local variable
   for the duration of the exchange.
 
-Known limits, to settle before standing anything up
----------------------------------------------------
+Known limits
+------------
 * The stores are in-memory, so this is correct for a single worker process
   only. Multiple gunicorn workers would need shared storage (Redis, or a
-  small database) with the same single-use semantics.
+  small database) with the same single-use semantics. `render.yaml` pins
+  numInstances: 1 and --workers 1.
+* On Render's free plan an idle spin-down wipes those stores. Pending states
+  and uncollected sealed pickups are destroyed, and both then look identical
+  to "already used". Treat the flow as one continuous sitting; there is no
+  24-hour pickup window on this plan. See the README section "On the free
+  plan the real window is one sitting, not 24 hours".
 * There is no rate limiting here; put that in front of it.
 * HTTPS is required and enforced by `require_https`, but TLS termination is
   the deployment's job.
