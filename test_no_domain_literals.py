@@ -33,6 +33,8 @@ PIPELINE_MODULES = [
     "campaign.py",
     "approve_account.py",
     "broker_client.py",
+    "check_readiness.py",
+    "readiness.py",
     "broker_crypto.py",
     "broker_wsgi.py",
     "campaign_audit.py",
