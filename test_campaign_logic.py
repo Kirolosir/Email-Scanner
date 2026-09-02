@@ -357,8 +357,8 @@ def test_limits_and_preview_choose_newest():
 
 def test_campaign_placeholder_detection():
     assert find_unresolved_placeholders(
-        "Register here: [Example Clinic Registration Link]"
-    ) == ["[Example Clinic Registration Link]"]
+        "Register here: [Clinic Registration Link]"
+    ) == ["[Clinic Registration Link]"]
     assert find_unresolved_placeholders("Final approved body https://example.test") == []
 
 
@@ -502,3 +502,116 @@ def test_draft_log_is_owner_only(tmp_path):
     with DraftLog(path) as log:
         log.record("d1")
     assert (path.stat().st_mode & 0o777) == 0o600
+
+
+# --------------------------------------------------------------------
+# A draft log is a rollback handle. A run that drafted nothing has
+# nothing to roll back, so it must leave no file.
+#
+# Found live: with generic drafting off for every category, each daily
+# run wrote a header-only log. Those accumulate one per day and are
+# indistinguishable at a glance from a run whose drafts need review.
+# --------------------------------------------------------------------
+
+def test_a_run_with_zero_drafts_creates_no_log_file(tmp_path):
+    path = tmp_path / "logs" / "daily-triage-20260902-160000.log"
+
+    with DraftLog(path, ["daily triage", "mode: daily"]) as log:
+        pass
+
+    assert not path.exists(), (
+        "a run that created no drafts left a log file behind"
+    )
+    assert log.count == 0
+    assert log.created is False
+
+
+def test_the_file_appears_only_on_the_first_recorded_draft(tmp_path):
+    path = tmp_path / "logs" / "run.log"
+
+    with DraftLog(path, ["header line"]) as log:
+        assert not path.exists(), "log existed before any draft was recorded"
+        log.record("r-1")
+        assert path.exists(), "log missing after the first draft"
+        log.record("r-2")
+
+    body = path.read_text(encoding="utf-8")
+    assert "# header line" in body, "header lost by deferring the open"
+    assert load_draft_ids(path) == ["r-1", "r-2"]
+    assert log.count == 2
+    assert log.created is True
+
+
+def test_a_deferred_log_is_still_owner_only(tmp_path):
+    import os
+    import stat
+
+    path = tmp_path / "logs" / "run.log"
+    with DraftLog(path, ["header"]) as log:
+        log.record("r-1")
+
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+    assert stat.S_IMODE(os.stat(path.parent).st_mode) == 0o700
+
+
+def test_each_id_is_still_flushed_as_it_is_recorded(tmp_path):
+    """The log has to survive a kill mid-run, so ids cannot sit in a
+    buffer waiting for close()."""
+    path = tmp_path / "logs" / "run.log"
+
+    log = DraftLog(path, ["header"])
+    log.record("r-1")
+    # Deliberately not closed: this is the interrupted-run case.
+    assert load_draft_ids(path) == ["r-1"]
+
+
+def test_an_unusable_log_directory_fails_before_any_draft(tmp_path):
+    """Deferring the open must not defer the failure. If the log cannot be
+    written, that has to surface before a draft exists, or the run creates
+    a draft with no way to roll it back.
+
+    A regular file standing where the log directory belongs is the
+    deterministic case. The other real one - a directory owned by someone
+    else - cannot be built here without root, and is what the os.access
+    check in __init__ covers: chmod on it raises and is swallowed, so the
+    explicit check is what catches it.
+    """
+    import pytest
+
+    occupied = tmp_path / "not-a-directory"
+    occupied.write_text("this is a file")
+
+    with pytest.raises(OSError):
+        DraftLog(occupied / "run.log", ["header"])
+
+
+def test_the_writability_preflight_rejects_an_unusable_directory(monkeypatch,
+                                                                 tmp_path):
+    """Directly exercise the check that covers a directory we cannot chmod."""
+    import os
+    import pytest
+
+    monkeypatch.setattr(os, "access", lambda *a, **k: False)
+    with pytest.raises(OSError, match="not writable"):
+        DraftLog(tmp_path / "logs" / "run.log", ["header"])
+
+    assert not (tmp_path / "logs" / "run.log").exists()
+
+
+def test_a_pre_existing_log_file_is_tightened_to_0600(tmp_path):
+    """os.open's mode argument is ignored when the file already exists, so
+    the explicit chmod is what protects a log left behind with loose
+    permissions (a crashed earlier run, a restored backup)."""
+    import os
+    import stat
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    path = logs / "run.log"
+    path.write_text("")
+    os.chmod(path, 0o644)
+
+    with DraftLog(path, ["header"]) as log:
+        log.record("r-1")
+
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600

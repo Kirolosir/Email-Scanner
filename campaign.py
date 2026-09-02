@@ -19,25 +19,10 @@ Usage:
     python campaign.py LABEL BODY_FILE [options]
     python campaign.py --undo LOGFILE [--dry-run] [--yes]
 
-Options:
-    --exclude FILE   Text file of email addresses to skip (one per line;
-                     blank lines and # comments ignored).
-    --exclude-label LABEL
-                     Also skip senders found under an existing Gmail label.
-                     The label is read only and is never created or changed.
-    --aliases FILE   CSV-like alias mapping: alias,canonical (one per line).
-    --approval FILE  Private account/label-bound reviewed recipient allowlist;
-                     required for real writes against protected label 2027B.
-    --token-path FILE
-                     Select a separately authorized Gmail token.
-    --limit N        Create at most N drafts (applied after dedupe and
-                     exclusion).
-    --max-scan N     Stop scanning after N messages. Testing aid: without
-                     it, every run scans the full label (~9,000 messages)
-                     before it can honor --limit.
-    --dry-run        Report what would happen; creates/deletes nothing.
-    --yes            Skip the interactive confirmation prompt.
-    --undo LOGFILE   Move exactly the drafts listed in LOGFILE to Trash.
+Run --help for the full option list. Two are easy to misread: --limit applies
+after dedupe and exclusion, and --max-scan is what bounds the Gmail read --
+without it every run scans the full label (~9,000 messages) before it can
+honor --limit.
 """
 import argparse
 import datetime
@@ -93,10 +78,24 @@ class DraftLog:
 
     Leading '#' lines record what the run was, so a log found later can
     be identified; the --undo reader skips them.
+
+    The file is created on the FIRST recorded id, not at construction. A run
+    that drafts nothing leaves no log behind, so every file in draft-logs/ is
+    a real rollback handle rather than a header-only stub. With drafting off
+    for every category, the eager version wrote one empty file per run.
+
+    Deferring the open must not defer the failure, though: if the log were
+    unwritable, opening it lazily would surface that only after the first
+    draft already existed, leaving a created draft with nothing to roll it
+    back. __init__ therefore still prepares and checks the directory, and
+    only the file creation waits.
     """
 
     def __init__(self, path, header_lines=()):
         self.path = path
+        self._header_lines = tuple(header_lines)
+        self._file = None
+        self.count = 0
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, mode=0o700, exist_ok=True)
@@ -104,15 +103,29 @@ class DraftLog:
                 os.chmod(parent, 0o700)
             except OSError:
                 pass
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        os.chmod(path, 0o600)
+        # Fail now, not after the first draft is already created.
+        if not os.access(parent or ".", os.W_OK | os.X_OK):
+            raise OSError(
+                f"draft log directory {parent or '.'} is not writable; "
+                "refusing to create drafts that could not be rolled back"
+            )
+
+    @property
+    def created(self):
+        """True once this run has actually written a log file."""
+        return self._file is not None
+
+    def _open(self):
+        fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        os.chmod(self.path, 0o600)
         self._file = os.fdopen(fd, "a", encoding="utf-8")
-        for line in header_lines:
+        for line in self._header_lines:
             self._file.write(f"# {line}\n")
         self._file.flush()
-        self.count = 0
 
     def record(self, draft_id):
+        if self._file is None:
+            self._open()
         self._file.write(f"{draft_id}\n")
         self._file.flush()
         self.count += 1
@@ -837,7 +850,7 @@ def main(argv=None):
         f"undo with: python campaign.py --undo {log_path}",
     ]
 
-    print(f"\nLogging draft ids to {log_path}")
+    print(f"\nDraft ids will be logged to {log_path} if any are created")
     with DraftLog(log_path, header) as draft_log:
         try:
             created, failures = create_drafts(
@@ -853,8 +866,9 @@ def main(argv=None):
             return 130
 
     print(f"\nDone. Created {created} drafts.")
-    print(f"Draft ids logged to {log_path}")
-    print(f"To roll this run back:  python campaign.py --undo {log_path}")
+    if created:
+        print(f"Draft ids logged to {log_path}")
+        print(f"To roll this run back:  python campaign.py --undo {log_path}")
     if failures:
         print(f"{len(failures)} failed:")
         for sender, error in failures[:10]:
