@@ -69,6 +69,7 @@ from private_runtime import (
     AlreadyRunningError,
     ExclusiveRunLock,
     RunStatus,
+    ensure_private_directory,
 )
 
 
@@ -154,9 +155,10 @@ class DailyState:
             logger.warning("Could not enforce private daily-state permissions")
 
     def save(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # ensure_private_directory, not a bare mkdir: mkdir's mode covers only
+        # the leaf, so a nested state_dir left its parent world-listable.
         try:
-            os.chmod(self.path.parent, 0o700)
+            ensure_private_directory(self.path.parent)
         except OSError:
             logger.warning("Could not enforce 0700 on daily-state directory")
 
@@ -207,6 +209,115 @@ class DailyState:
 
 def validate_required_labels(account_labels, config):
     return [name for name in config.all_names if name not in account_labels]
+
+
+def render_draft_preview(plans, scheduled=False):
+    """Render the wording of every draft this run would create.
+
+    The point of a dry run is deciding whether to authorize real drafts, and
+    that decision cannot be made from a "Draft: yes" column. Before this, a
+    dry run reported that drafts would be created without ever showing what
+    they would say.
+
+    Suppressed in --scheduled runs: unattended output stays free of subjects
+    and message-derived text.
+
+    Returns the rendered text, or "" when there is nothing to show.
+    """
+    if scheduled:
+        return ""
+    drafting = [plan for plan in plans if plan.get("template")]
+    if not drafting:
+        return ""
+
+    lines = ["", "=" * 72,
+             f"DRAFT PREVIEW - wording of all {len(drafting)} draft(s) this "
+             "run would create", "=" * 72]
+    for index, plan in enumerate(drafting, start=1):
+        email = plan.get("email", {})
+        source = plan.get("draft_source") or "template"
+        lines.append("")
+        lines.append(f"[{index}] category: {plan.get('category', 'unknown')}"
+                     f"   source: {source}")
+        lines.append(f"    in reply to: {email.get('subject', '(no subject)')}")
+        lines.append(f"    to: {email.get('reply_address') or email.get('from', '')}")
+        lines.append("    " + "-" * 64)
+        for line in (plan["template"] or "").splitlines() or [""]:
+            lines.append(f"    {line}")
+        lines.append("    " + "-" * 64)
+    lines.append("")
+    lines.append("Review the wording above before authorizing a real run.")
+    return "\n".join(lines)
+
+
+def select_candidates(messages, limit, already_processed):
+    """Choose which fetched messages this run will process.
+
+    ``limit`` is a budget of Gmail WRITE operations, and every message this
+    run touches costs at least one of them - the processed label - so at most
+    ``limit`` messages can be admitted here. The exact per-plan cost is not
+    known until the plan exists; plans_within_write_budget enforces the real
+    bound afterwards. This is the cheap upper bound that stops the run
+    fetching and classifying messages it could never afford to write.
+
+    Module-level and directly testable on purpose: this is one of the places
+    a run decides what --limit means, and when two such places disagreed the
+    budget leaked. Testing them only in isolation cannot catch that.
+
+    Returns (candidates, skipped_count).
+    """
+    candidates = []
+    skipped = 0
+    for message in messages:
+        if already_processed(message):
+            skipped += 1
+            continue
+        candidates.append(message)
+        if limit is not None and len(candidates) >= limit:
+            break
+    return candidates, skipped
+
+
+def plan_write_cost(plan):
+    """Gmail write operations one plan performs: label adds plus a draft.
+
+    An upper bound. A plan whose draft already exists in the journal, or
+    whose labels fail, performs fewer writes; it never performs more.
+    """
+    return (
+        len(plan["decision"].add)
+        + 1                                        # the processed label
+        + (1 if plan.get("template") is not None else 0)
+    )
+
+
+def plans_within_write_budget(plans, limit):
+    """Split plans into those this run can afford and those it defers.
+
+    ``--limit N`` means at most N Gmail writes in total - label adds plus
+    drafts - not N messages and not N classifications. A measured
+    ``--limit 15`` run previously wrote up to 182 labels across 158
+    messages, because the limit bounded classification only.
+
+    Admission is by whole plan. Stopping midway through one would leave a
+    message carrying its category label but not the processed label, so the
+    next run would treat it as new work. Deferred plans are simply not
+    marked processed, so the following run picks them up: the limit becomes
+    a throttle on a staged rollout rather than a way to skip mail.
+
+    Returns (admitted, deferred).
+    """
+    if limit is None:
+        return list(plans), []
+    admitted = []
+    spent = 0
+    for index, plan in enumerate(plans):
+        cost = plan_write_cost(plan)
+        if spent + cost > limit:
+            return admitted, list(plans[index:])
+        admitted.append(plan)
+        spent += cost
+    return admitted, []
 
 
 def add_daily_review_policy(plan, config):
@@ -619,24 +730,34 @@ def _run_locked(args, classifier, config, templates, state, status):
         return done(1 if failures else 0,
                     ["metadata_fetch_failed"] if failures else [])
 
-    messages, failures = fetch_messages(service, message_ids, throttle)
+    processed_name = config.system["processed"]
+
+    def _already_processed(message):
+        attach_label_names([message], account_labels)
+        return (processed_name in message.get("_label_names", [])
+                or state.record_for(message["id"]).get("status") == "complete")
+
+    def _would_consume_budget(message):
+        # Every message this run touches costs at least the processed label,
+        # so an unprocessed message is exactly one that spends budget.
+        return not _already_processed(message)
+
+    # limit bounds the Gmail read itself. Passing it here is the whole point:
+    # the post-fetch loop below would otherwise stop at the limit only after
+    # every message in the window had already been downloaded in full.
+    messages, failures = fetch_messages(
+        service, message_ids, throttle,
+        limit=args.limit, is_candidate=_would_consume_budget,
+    )
     for message_id, failure in failures:
         display_id = opaque_id(message_id) if args.scheduled else message_id
         print(f"  ERROR {display_id}: fetch failed ({failure}); skipped")
     counts["failures"] += len(failures)
     attach_label_names(messages, account_labels)
-
-    processed_name = config.system["processed"]
-    candidates = []
-    for message in messages:
-        record = state.record_for(message["id"])
-        if (processed_name in message.get("_label_names", [])
-                or record.get("status") == "complete"):
-            counts["skipped"] += 1
-            continue
-        candidates.append(message)
-        if args.limit is not None and len(candidates) >= args.limit:
-            break
+    candidates, skipped = select_candidates(
+        messages, args.limit, _already_processed
+    )
+    counts["skipped"] += skipped
 
     plans = []
     for message in candidates:
@@ -669,12 +790,20 @@ def _run_locked(args, classifier, config, templates, state, status):
     )
     reconcile_existing_drafts(plans, state, draft_threads, config)
 
+    # The write budget is applied HERE, before the preview, so a dry run
+    # reports exactly what an --apply run would do. Computing it in the
+    # executor alone would make the preview overstate every bounded run.
+    plans, deferred = plans_within_write_budget(plans, args.limit)
+
     if not args.scheduled:
         print("\nInteractive preview: subjects and message metadata may be visible below.")
         print()
         print_plan_table(plans)
         print()
         print_notes(plans)
+        preview = render_draft_preview(plans, scheduled=args.scheduled)
+        if preview:
+            print(preview)
     label_count = sum(len(plan["decision"].add) + 1 for plan in plans)
     draft_count = sum(plan["template"] is not None for plan in plans)
     review_count = sum(plan["needs_review"] for plan in plans)
@@ -683,6 +812,17 @@ def _run_locked(args, classifier, config, templates, state, status):
     print(f"Label adds:   up to {label_count}")
     print(f"Drafts:       up to {draft_count}")
     print(f"Needs review: {review_count}")
+    if args.limit is not None:
+        print(f"Write budget: {label_count + draft_count} of {args.limit} "
+              "(--limit bounds label adds plus drafts)")
+    if deferred:
+        print(f"Deferred:     {len(deferred)} candidate(s) left for the next "
+              "run; they were not marked processed")
+    if not plans and deferred:
+        cheapest = min(plan_write_cost(plan) for plan in deferred)
+        print(f"\n--limit {args.limit} is too small to process any message; "
+              f"the cheapest pending one needs {cheapest} writes. "
+              "Raise --limit to make progress.")
 
     if not args.apply:
         print("\nDry run - Gmail was read and Gemini may have been called, but no "
@@ -690,7 +830,9 @@ def _run_locked(args, classifier, config, templates, state, status):
         return done(1 if failures else 0,
                     ["message_fetch_failed"] if failures else [])
     if not plans:
-        if args.mode == "daily" and not failures:
+        # Deferred work means the day is NOT done. Marking it complete here
+        # would set the same-day guard and hide the remainder until tomorrow.
+        if args.mode == "daily" and not failures and not deferred:
             state.mark_daily_complete(today)
         print("Nothing eligible to process; no Gmail writes or draft log created.")
         return done(1 if failures else 0,
@@ -733,7 +875,7 @@ def _run_locked(args, classifier, config, templates, state, status):
                 print(f"  ERROR {display_id}: {code} ({error.rsplit('(', 1)[-1].rstrip(')')})")
         counts["drafted"] = draft_log.count
 
-    if args.mode == "daily" and counts["failures"] == 0:
+    if args.mode == "daily" and counts["failures"] == 0 and not deferred:
         state.mark_daily_complete(today)
     print(f"\nCompleted {len(plans)} candidates with {counts['failures']} errors.")
     if counts["drafted"]:

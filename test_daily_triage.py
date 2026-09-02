@@ -451,3 +451,511 @@ def test_daily_main_returns_distinct_code_when_target_lock_is_held(
             "daily", "--state-path", str(state_path), "--dry-run",
         ])
     assert result == LOCKED_EXIT_CODE
+
+
+# --------------------------------------------------------------------
+# --limit must count classifiable messages, not raw fetches.
+#
+# A live --limit 15 dry run in a mailbox that is ~88% bulk spent fourteen of
+# its fifteen slots on automated mail that was suppressed immediately after
+# being fetched, producing exactly one draft. The budget and the suppression
+# rule have to agree, or the limit measures the wrong thing.
+# --------------------------------------------------------------------
+
+def _message(message_id, *, bulk=False, processed=False):
+    headers = [{"name": "Subject", "value": f"subject {message_id}"},
+               {"name": "From", "value": "person@example.test"}]
+    if bulk:
+        headers.append({"name": "List-Unsubscribe",
+                        "value": "<mailto:u@example.test>"})
+    return {
+        "id": message_id, "threadId": f"t{message_id}",
+        "labelIds": ["Label_Processed"] if processed else [],
+        "payload": {"mimeType": "text/plain", "headers": headers,
+                    "body": {"data": ""}},
+    }
+
+
+class _LimitGmail:
+    def __init__(self, messages):
+        self._messages = {m["id"]: m for m in messages}
+        self.fetched = []
+
+    def users(self):
+        return self
+
+    def messages(self):
+        return self
+
+    def get(self, userId, id, format=None, metadataHeaders=None):
+        self.fetched.append(id)
+        return _LimitCall(self._messages[id])
+
+
+class _LimitCall:
+    def __init__(self, result):
+        self._result = result
+
+    def execute(self):
+        return self._result
+# --------------------------------------------------------------------
+# A dry run must show the wording it would create.
+#
+# The whole purpose of a dry run is deciding whether to authorize real
+# drafts. A "Draft: yes" column cannot support that decision - the first
+# live dry run reported one draft without ever showing what it said.
+# --------------------------------------------------------------------
+
+def _plan_with_draft(subject, category, body, source="ai"):
+    return {
+        "category": category,
+        "template": body,
+        "draft_source": source,
+        "email": {"subject": subject, "from": "someone@example.test",
+                  "reply_address": "someone@example.test"},
+    }
+
+
+def test_preview_shows_the_full_generated_wording():
+    from daily_triage import render_draft_preview
+
+    body = ("AI-DRAFTED - UNREVIEWED WORDING\n\n"
+            "Thanks for reaching out. I will take a look and follow up.")
+    text = render_draft_preview([_plan_with_draft("A job for you",
+                                                  "job_opportunities", body)])
+
+    assert "Thanks for reaching out" in text
+    assert "AI-DRAFTED" in text
+    assert "job_opportunities" in text
+    assert "A job for you" in text
+
+
+def test_preview_shows_every_draft_not_only_the_first():
+    from daily_triage import render_draft_preview
+
+    plans = [
+        _plan_with_draft("s1", "job_opportunities", "first body text"),
+        _plan_with_draft("s2", "shopping_and_discounts", "second body text"),
+        _plan_with_draft("s3", "financial_services", "third body text"),
+    ]
+    text = render_draft_preview(plans)
+
+    for fragment in ("first body text", "second body text", "third body text"):
+        assert fragment in text
+    assert "all 3 draft(s)" in text
+
+
+def test_preview_omits_plans_that_would_not_draft():
+    from daily_triage import render_draft_preview
+
+    plans = [
+        _plan_with_draft("drafted", "job_opportunities", "real body"),
+        {"category": "sports_recruiting", "template": None,
+         "draft_source": None, "email": {"subject": "not drafted"}},
+    ]
+    text = render_draft_preview(plans)
+
+    assert "real body" in text
+    assert "not drafted" not in text
+    assert "all 1 draft(s)" in text
+
+
+def test_preview_is_empty_when_nothing_would_draft():
+    from daily_triage import render_draft_preview
+
+    plans = [{"category": "x", "template": None, "email": {"subject": "s"}}]
+    assert render_draft_preview(plans) == ""
+
+
+def test_preview_is_suppressed_in_scheduled_runs():
+    """Unattended output must stay free of subjects and message-derived
+    text; the preview is an interactive review aid only."""
+    from daily_triage import render_draft_preview
+
+    plans = [_plan_with_draft("private subject", "job_opportunities",
+                              "private body")]
+    text = render_draft_preview(plans, scheduled=True)
+
+    assert text == ""
+    assert "private subject" not in text
+    assert "private body" not in text
+
+
+def test_dry_run_actually_calls_the_preview():
+    """Wiring: rendering exists but is useless if the run never prints it."""
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse(Path("daily_triage.py").read_text(encoding="utf-8"))
+    calls = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "render_draft_preview"
+    ]
+    assert calls, (
+        "daily_triage never calls render_draft_preview; a dry run would "
+        "again report drafts without showing their wording"
+    )
+    for call in calls:
+        keywords = {kw.arg for kw in call.keywords}
+        assert "scheduled" in keywords, (
+            "the preview call must pass the scheduled flag, or unattended "
+            "runs would print message-derived text"
+        )
+
+
+def test_saving_state_makes_every_new_parent_private(tmp_path):
+    """A nested state_dir must not leave a world-listable parent.
+
+    The live account uses triage-state/<account>. mkdir's mode covers only
+    the leaf, so the real run created triage-state at 0755, publishing which
+    accounts are being triaged to any local user.
+    """
+    import os
+    import stat
+    from daily_triage import DailyState
+
+    state = DailyState(tmp_path / "triage-state" / "someone" / "daily.json")
+    state.save()
+
+    for path in (tmp_path / "triage-state",
+                 tmp_path / "triage-state" / "someone"):
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+        assert mode == 0o700, f"{path} is mode {mode:03o}, expected 700"
+# --------------------------------------------------------------------
+# End to end: a real run that drafts nothing must leave draft-logs/ clean.
+# --------------------------------------------------------------------
+
+def test_apply_run_with_no_drafts_writes_no_draft_log(
+        monkeypatch, tmp_path, capsys):
+    """The live case that motivated this: drafting off for every category,
+    so the run labels normally and creates no drafts. Before, each such run
+    dropped a header-only file into draft-logs/."""
+    import campaign
+
+    service = _MainFakeGmail()
+    monkeypatch.setattr(daily_triage, "get_gmail_service",
+                        lambda **_kwargs: service)
+    log_dir = tmp_path / "draft-logs"
+    monkeypatch.setattr(campaign, "DRAFT_LOG_DIR", str(log_dir))
+    templates = tmp_path / "templates"
+    templates.mkdir()
+
+    result = daily_triage.main([
+        "initial", "--state-path", str(tmp_path / "state" / "daily.json"),
+        "--templates", str(templates), "--apply", "--yes",
+    ], classifier=_high_recruit)
+
+    assert result == 0
+    assert service.create_calls == [], "no draft should have been created"
+    written = sorted(p.name for p in log_dir.glob("*.log")) if \
+        log_dir.exists() else []
+    assert written == [], f"zero-draft run left log files: {written}"
+    assert "Draft-id log:" not in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------
+# --limit N is a budget of Gmail WRITES: label adds plus drafts, N total.
+#
+# It used to bound classification only. A measured --limit 15 run wrote up
+# to 182 labels across 158 messages, so the flag an operator reaches for to
+# keep a pilot small did not bound what the pilot changed.
+# --------------------------------------------------------------------
+
+def _plan(labels, draft=False, needs_review=False):
+    from gmail_labeler import LabelDecision
+
+    return {
+        "decision": LabelDecision(add=list(labels)),
+        "template": "body" if draft else None,
+        "needs_review": needs_review,
+        "email": {"subject": "s", "message_id": "m", "thread_id": "t"},
+        "processed_label": "Processed",
+    }
+
+
+def _total_writes(plans):
+    from daily_triage import plan_write_cost
+
+    return sum(plan_write_cost(p) for p in plans)
+
+
+def test_write_cost_counts_labels_the_processed_label_and_the_draft():
+    from daily_triage import plan_write_cost
+
+    assert plan_write_cost(_plan([])) == 1                   # processed only
+    assert plan_write_cost(_plan(["A"])) == 2                # + one label
+    assert plan_write_cost(_plan(["A", "B"])) == 3
+    assert plan_write_cost(_plan(["A"], draft=True)) == 3     # + the draft
+
+
+def test_a_limited_run_never_exceeds_n_total_writes():
+    """The guarantee: label adds plus drafts, combined, stay within --limit."""
+    from daily_triage import plans_within_write_budget
+
+    plans = [_plan(["Cat", "Review"], draft=True) for _ in range(20)]  # 4 each
+
+    for limit in range(1, 30):
+        admitted, deferred = plans_within_write_budget(plans, limit)
+        writes = _total_writes(admitted)
+        assert writes <= limit, (
+            f"--limit {limit} admitted {writes} writes across "
+            f"{len(admitted)} plan(s)"
+        )
+        assert len(admitted) + len(deferred) == len(plans)
+
+
+def test_the_bound_holds_for_mixed_plan_shapes():
+    from daily_triage import plans_within_write_budget
+
+    plans = [
+        _plan([]),                          # 1 write
+        _plan(["A"]),                       # 2
+        _plan(["A", "B"], draft=True),      # 4
+        _plan(["A"], draft=True),           # 3
+        _plan(["A", "B", "C"]),             # 4
+    ]
+    for limit in range(1, 20):
+        admitted, _ = plans_within_write_budget(plans, limit)
+        assert _total_writes(admitted) <= limit
+
+
+def test_admission_is_by_whole_plan_never_a_partial_message():
+    """Stopping mid-plan would label a message without marking it processed,
+    so the next run would see it as new work."""
+    from daily_triage import plans_within_write_budget
+
+    plans = [_plan(["A", "B"], draft=True)] * 3          # 4 writes each
+    admitted, deferred = plans_within_write_budget(plans, 7)
+
+    assert len(admitted) == 1, "a second plan was partially admitted"
+    assert _total_writes(admitted) == 4
+    assert len(deferred) == 2
+
+
+def test_a_limit_too_small_for_any_plan_admits_nothing():
+    from daily_triage import plans_within_write_budget
+
+    admitted, deferred = plans_within_write_budget(
+        [_plan(["A", "B"], draft=True)], 2
+    )
+    assert admitted == []
+    assert len(deferred) == 1
+
+
+def test_no_limit_admits_every_plan():
+    from daily_triage import plans_within_write_budget
+
+    plans = [_plan(["A"], draft=True) for _ in range(5)]
+    admitted, deferred = plans_within_write_budget(plans, None)
+    assert len(admitted) == 5 and deferred == []
+
+
+def test_selection_caps_candidates_because_each_costs_a_write():
+    """Every touched message costs at least the processed label, so more
+    than `limit` candidates can never be afforded."""
+    from daily_triage import select_candidates
+
+    messages = [{"id": f"m{n}"} for n in range(50)]
+    candidates, skipped = select_candidates(
+        messages, 5, already_processed=lambda m: False
+    )
+    assert len(candidates) == 5
+    assert skipped == 0
+
+
+def test_selection_still_skips_already_processed_messages():
+    from daily_triage import select_candidates
+
+    messages = [{"id": f"done{n}"} for n in range(4)]
+    messages += [{"id": f"new{n}"} for n in range(3)]
+    candidates, skipped = select_candidates(
+        messages, 3,
+        already_processed=lambda m: m["id"].startswith("done"),
+    )
+    assert skipped == 4
+    assert [m["id"] for m in candidates] == ["new0", "new1", "new2"]
+
+
+def test_the_run_applies_the_budget_before_previewing():
+    """Wiring. If the executor applied the budget alone, every bounded dry
+    run would overstate the writes an --apply run performs."""
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse(Path("daily_triage.py").read_text(encoding="utf-8"))
+    calls = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        and n.func.id == "plans_within_write_budget"
+    ]
+    assert calls, "daily_triage never applies the write budget"
+    for call in calls:
+        names = {a.id for a in call.args if isinstance(a, ast.Name)}
+        assert "plans" in names, "the budget must be applied to the real plans"
+        assert any(
+            isinstance(a, ast.Attribute) and a.attr == "limit" for a in call.args
+        ), "the budget must be given the real --limit, not a constant"
+
+
+class _CountingGmail(_MainFakeGmail):
+    """Multi-message fake that tallies real Gmail write operations."""
+
+    def __init__(self, message_count=12):
+        super().__init__()
+        self._messages = []
+        for n in range(message_count):
+            copy = json.loads(json.dumps(self.message))
+            copy["id"] = f"msg-{n}"
+            copy["threadId"] = f"thread-{n}"
+            self._messages.append(copy)
+        self._by_id = {m["id"]: m for m in self._messages}
+
+    def list(self, **kwargs):
+        if self.resource == "messages":
+            return _Call({"messages": [{"id": m["id"]} for m in self._messages]})
+        return super().list(**kwargs)
+
+    def get(self, **kwargs):
+        message_id = kwargs.get("id")
+        if self.resource == "messages" and message_id in self._by_id:
+            return _Call(self._by_id[message_id])
+        return super().get(**kwargs)
+
+    def create(self, **kwargs):
+        self.create_calls.append(kwargs)
+        return _Call({"id": f"d{len(self.create_calls)}"})
+
+    @property
+    def label_adds(self):
+        return sum(len(c["body"].get("addLabelIds", [])) for c in self.modify_calls)
+
+    @property
+    def total_writes(self):
+        return self.label_adds + len(self.create_calls)
+
+
+def test_end_to_end_apply_run_never_writes_more_than_the_limit(
+        monkeypatch, tmp_path):
+    """The guarantee measured against real Gmail calls, not the planner.
+
+    Counts every addLabelIds entry across every modify call, plus every
+    draft create, and asserts the total stays within --limit.
+    """
+    import campaign
+
+    for limit in (1, 2, 3, 5, 8):
+        service = _CountingGmail(message_count=12)
+        bound = service
+        monkeypatch.setattr(daily_triage, "get_gmail_service",
+                            lambda **_k: bound)
+        monkeypatch.setattr(campaign, "DRAFT_LOG_DIR",
+                            str(tmp_path / f"logs-{limit}"))
+        templates = tmp_path / f"templates-{limit}"
+        templates.mkdir()
+
+        result = daily_triage.main([
+            "initial",
+            "--state-path", str(tmp_path / f"state-{limit}" / "daily.json"),
+            "--templates", str(templates),
+            "--limit", str(limit), "--apply", "--yes",
+        ], classifier=_high_recruit)
+
+        assert result == 0, f"--limit {limit} exited {result}"
+        assert service.total_writes <= limit, (
+            f"--limit {limit} performed {service.total_writes} writes "
+            f"({service.label_adds} label adds + "
+            f"{len(service.create_calls)} drafts)"
+        )
+
+
+def test_deferred_work_does_not_mark_the_day_complete(monkeypatch, tmp_path):
+    """A budget-truncated daily run must not set the same-day guard, or the
+    remainder would be hidden until tomorrow."""
+    import campaign
+
+    service = _CountingGmail(message_count=12)
+    monkeypatch.setattr(daily_triage, "get_gmail_service",
+                        lambda **_k: service)
+    monkeypatch.setattr(campaign, "DRAFT_LOG_DIR", str(tmp_path / "logs"))
+    templates = tmp_path / "templates"
+    templates.mkdir()
+    state_path = tmp_path / "state" / "daily.json"
+
+    result = daily_triage.main([
+        "daily", "--state-path", str(state_path),
+        "--templates", str(templates),
+        # 5 admits exactly one 4-write plan and defers the rest.
+        "--limit", "5", "--apply", "--yes",
+    ], classifier=_high_recruit)
+
+    assert result == 0
+    assert service.total_writes <= 5
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    assert saved["messages"], "nothing was processed, so the test is vacuous"
+    assert saved["last_daily_date"] is None, (
+        "the day was marked complete while work was still deferred"
+    )
+
+
+def test_an_unlimited_daily_run_still_marks_the_day_complete(
+        monkeypatch, tmp_path):
+    """Control for the test above: without deferral the guard must still be
+    set, or the same-day protection is simply gone."""
+    import campaign
+
+    service = _CountingGmail(message_count=2)
+    monkeypatch.setattr(daily_triage, "get_gmail_service", lambda **_k: service)
+    monkeypatch.setattr(campaign, "DRAFT_LOG_DIR", str(tmp_path / "logs2"))
+    templates = tmp_path / "templates2"
+    templates.mkdir()
+    state_path = tmp_path / "state2" / "daily.json"
+
+    result = daily_triage.main([
+        "daily", "--state-path", str(state_path),
+        "--templates", str(templates), "--apply", "--yes",
+    ], classifier=_high_recruit)
+
+    assert result == 0
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    assert saved["last_daily_date"] is not None
+
+
+def test_a_budget_that_admits_nothing_does_not_mark_the_day_complete(
+        monkeypatch, tmp_path):
+    """The all-deferred case takes the "nothing eligible" early return, which
+    is a separate mark_daily_complete call site from the normal one. If it
+    sets the guard, a limit too small to make progress silently burns the
+    day: the remaining mail stays hidden until tomorrow, every day.
+
+    No state is written when nothing is processed, so the journal is seeded
+    first and checked for an unchanged last_daily_date.
+    """
+    import campaign
+
+    service = _CountingGmail(message_count=6)
+    monkeypatch.setattr(daily_triage, "get_gmail_service", lambda **_k: service)
+    monkeypatch.setattr(campaign, "DRAFT_LOG_DIR", str(tmp_path / "logs"))
+    templates = tmp_path / "templates"
+    templates.mkdir()
+    state_path = tmp_path / "state" / "daily.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(json.dumps(
+        {"version": 1, "last_daily_date": None, "messages": {}}
+    ), encoding="utf-8")
+
+    # Each plan here costs 4 writes, so a budget of 2 admits none of them.
+    result = daily_triage.main([
+        "daily", "--state-path", str(state_path),
+        "--templates", str(templates),
+        "--limit", "2", "--apply", "--yes",
+    ], classifier=_high_recruit)
+
+    assert result == 0
+    assert service.total_writes == 0, "writes happened despite admitting nothing"
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    assert saved["last_daily_date"] is None, (
+        "a run that processed nothing marked the day complete, hiding the "
+        "deferred work behind the same-day guard"
+    )

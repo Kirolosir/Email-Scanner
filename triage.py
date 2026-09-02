@@ -854,12 +854,27 @@ def execute_plan(service, plan, account_labels, throttle, draft_log):
     return labels_applied, draft_created, errors
 
 
-def fetch_messages(service, message_ids, throttle):
+def fetch_messages(service, message_ids, throttle, limit=None,
+                   is_candidate=None):
     """Fetch full messages, attaching resolved label names for the
-    labeler's 'already labeled?' checks."""
+    labeler's 'already labeled?' checks.
+
+    ``limit`` bounds the GMAIL READ, not just what the caller keeps. Once
+    ``limit`` fetched messages have satisfied ``is_candidate``, fetching
+    stops. Without this a ``--limit 15`` run downloaded the full body of
+    every message in the window and discarded all but fifteen - slow, and an
+    unnecessary read of thousands of messages' contents.
+
+    ``is_candidate`` decides which fetched messages count toward the limit,
+    so messages skipped as already-processed do not consume the budget. When
+    it is omitted every fetched message counts.
+    """
     messages = []
     failures = []
+    selected = 0
     for message_id in message_ids:
+        if limit is not None and selected >= limit:
+            break
         throttle.consume(UNITS_MESSAGES_GET)
         try:
             message = service.users().messages().get(
@@ -869,6 +884,8 @@ def fetch_messages(service, message_ids, throttle):
             failures.append((message_id, type(exc).__name__))
             continue
         messages.append(message)
+        if is_candidate is None or is_candidate(message):
+            selected += 1
     return messages, failures
 
 
@@ -1123,7 +1140,7 @@ def main(argv=None):
         f"undo with: python campaign.py --undo {log_path}",
     ]
 
-    print(f"\nLogging draft ids to {log_path}\n")
+    print(f"\nDraft ids will be logged to {log_path} if any are created\n")
     applied = created = 0
     with DraftLog(log_path, header) as draft_log:
         try:
@@ -1146,7 +1163,8 @@ def main(argv=None):
             return 130
 
     print(f"\nDone. Applied {applied} labels, created {created} drafts.")
-    print(f"Roll back with: python campaign.py --undo {log_path}")
+    if created:
+        print(f"Roll back with: python campaign.py --undo {log_path}")
     return 0
 
 

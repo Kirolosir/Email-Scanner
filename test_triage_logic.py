@@ -230,3 +230,126 @@ def test_dynamic_account_evidence_gate_applies_its_configured_year_label():
 
     assert plan["classification"]["local_grad_year"] == "2031"
     assert plan["decision"].add == ["Triage/Prospect", "Prospects/2031"]
+
+
+# --------------------------------------------------------------------
+# --limit must bound the Gmail read, not only the post-fetch count.
+#
+# A live --limit 15 dry run spent 17 minutes downloading the full body of
+# every message in a two-month window (5,770 messages) before discarding all
+# but fifteen. The candidate loop stopped at the limit; the fetch did not.
+# That is both a long read and an unnecessary retrieval of thousands of
+# messages' contents.
+# --------------------------------------------------------------------
+
+class _CountingGmail:
+    """Records how many full-message fetches actually happen."""
+
+    def __init__(self, ids, processed_ids=()):
+        self.ids = ids
+        self.processed_ids = set(processed_ids)
+        self.fetched = []
+
+    def users(self):
+        return self
+
+    def messages(self):
+        return self
+
+    def get(self, userId, id, format=None, metadataHeaders=None):
+        self.fetched.append(id)
+        label_ids = ["Label_Processed"] if id in self.processed_ids else []
+        return _CountingCall({
+            "id": id, "threadId": f"t{id}", "labelIds": label_ids,
+            "payload": {"mimeType": "text/plain",
+                        "headers": [{"name": "Subject", "value": "s"},
+                                    {"name": "From", "value": "a@b.test"}],
+                        "body": {"data": ""}},
+        })
+
+
+class _CountingCall:
+    def __init__(self, result):
+        self._result = result
+
+    def execute(self):
+        return self._result
+
+
+def test_fetch_messages_stops_fetching_once_the_limit_is_reached():
+    from gmail_common import QuotaThrottle
+    from triage import fetch_messages
+
+    ids = [f"m{i}" for i in range(500)]
+    service = _CountingGmail(ids)
+
+    messages, failures = fetch_messages(
+        service, ids, QuotaThrottle(units_per_second=10**6), limit=15
+    )
+
+    assert failures == []
+    assert len(service.fetched) == 15, (
+        f"fetched {len(service.fetched)} messages for a limit of 15; the "
+        "Gmail read is not bounded by --limit"
+    )
+    assert len(messages) == 15
+
+
+def test_fetch_without_a_limit_still_fetches_everything():
+    """Control: the bound must be opt-in, not a silent truncation."""
+    from gmail_common import QuotaThrottle
+    from triage import fetch_messages
+
+    ids = [f"m{i}" for i in range(25)]
+    service = _CountingGmail(ids)
+    fetch_messages(service, ids, QuotaThrottle(units_per_second=10**6))
+
+    assert len(service.fetched) == 25
+
+
+def test_skipped_messages_do_not_consume_the_fetch_budget():
+    """Already-processed messages must not count toward the limit, or a run
+    could stop before finding any real work."""
+    from gmail_common import QuotaThrottle
+    from triage import fetch_messages
+
+    ids = [f"m{i}" for i in range(60)]
+    already_done = {f"m{i}" for i in range(0, 40)}
+    service = _CountingGmail(ids, processed_ids=already_done)
+
+    def is_candidate(message):
+        return message["id"] not in already_done
+
+    fetch_messages(service, ids, QuotaThrottle(units_per_second=10**6),
+                   limit=5, is_candidate=is_candidate)
+
+    # 40 skipped + 5 real candidates = 45 fetched, then it stops.
+    assert len(service.fetched) == 45, len(service.fetched)
+
+
+def test_daily_triage_passes_limit_into_the_gmail_fetch():
+    """The recurring failure in this codebase is a correct check whose call
+    site never supplies the real value. fetch_messages growing a limit
+    parameter is useless if daily_triage keeps calling it without one."""
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse(Path("daily_triage.py").read_text(encoding="utf-8"))
+    calls = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "fetch_messages"
+    ]
+    assert calls, "daily_triage.py no longer calls fetch_messages"
+
+    for call in calls:
+        keywords = {kw.arg: kw.value for kw in call.keywords}
+        assert "limit" in keywords, (
+            f"daily_triage.py:{call.lineno} calls fetch_messages without a "
+            "limit; the Gmail read would be unbounded again"
+        )
+        assert not isinstance(keywords["limit"], ast.Constant), (
+            f"daily_triage.py:{call.lineno} passes a literal limit instead of "
+            "the runtime --limit value"
+        )
