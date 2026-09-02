@@ -59,8 +59,8 @@ def test_launchd_plist_invocation_still_parses():
 
 def test_campaign_cli_is_unchanged():
     """Migration and per-account config do not touch the campaign CLI."""
-    args = campaign.parse_args(["2027B", "body.txt", "--limit", "3"])
-    assert args.label == "2027B" and args.limit == 3
+    args = campaign.parse_args(["YEAR_LABEL", "body.txt", "--limit", "3"])
+    assert args.label == "YEAR_LABEL" and args.limit == 3
 
 
 # --------------------------------------------------------------------
@@ -104,7 +104,7 @@ def test_migration_reproduces_the_existing_setup():
     assert document["timezone"] == LEGACY_PROFILE.timezone
     slugs = {entry["slug"] for entry in document["taxonomy"]}
     assert slugs == set(LEGACY_PROFILE.categories)
-    assert [entry["label"] for entry in document["protected_labels"]] == ["2027B"]
+    assert [entry["label"] for entry in document["protected_labels"]] == ["YEAR_LABEL"]
     assert document["evidence_gated_labels"][0]["expected_value"] == "2027"
 
 
@@ -177,7 +177,7 @@ def test_written_config_is_owner_only(tmp_path):
 
 def test_migration_folds_in_a_reviewed_label_config():
     label_config = {
-        "years": {"2027": "2027B"},
+        "years": {"2027": "YEAR_LABEL"},
         "categories": {"parent": "Example/Triage/Parent"},
         "system": {"needs_review": "Example/Triage/Needs Review",
                    "processed": "Example/Triage/Processed"},
@@ -376,7 +376,7 @@ def test_account_config_loads_dynamic_year_gate_system_labels_and_ai_guidance(
 
 def test_migration_carries_reviewed_system_labels_into_account_config():
     label_config = {
-        "years": {"2027": "2027B"},
+        "years": {"2027": "YEAR_LABEL"},
         "categories": dict(LEGACY_PROFILE.category_labels),
         "system": {
             "needs_review": "Custom/Needs Review",

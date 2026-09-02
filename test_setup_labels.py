@@ -11,7 +11,7 @@ from setup_labels import apply_label_setup, plan_label_setup
 
 def _config():
     return TriageLabelConfig(
-        years={"2027": "2027B"},
+        years={"2027": "YEAR_LABEL"},
         categories={
             "parent": "Example/Triage/Parent",
             "other": "Example/Triage/Other",
@@ -51,17 +51,17 @@ class _FakeGmail:
 
 def test_reviewed_config_has_exact_campaign_and_triage_labels():
     config = load_triage_label_config("label-config.example.json")
-    assert config.years == {"2027": "2027B"}
+    assert config.years == {"2027": "YEAR_LABEL"}
     assert config.system["processed"] == "Example/Triage/Processed"
     assert "Example/Triage/Parent" in config.creatable_names
 
 
 def test_config_rejects_wrong_2027_label_and_unreviewed_categories(tmp_path):
     source = json.loads(Path("label-config.example.json").read_text(encoding="utf-8"))
-    source["years"]["2027"] = "Almost 2027B"
+    source["years"]["2027"] = "Almost YEAR_LABEL"
     path = tmp_path / "bad-year.json"
     path.write_text(json.dumps(source), encoding="utf-8")
-    with pytest.raises(ValueError, match="exactly '2027B'"):
+    with pytest.raises(ValueError, match="exactly 'YEAR_LABEL'"):
         load_triage_label_config(path)
 
     source = json.loads(Path("label-config.example.json").read_text(encoding="utf-8"))
@@ -74,12 +74,12 @@ def test_config_rejects_wrong_2027_label_and_unreviewed_categories(tmp_path):
 def test_setup_plan_is_idempotent_and_never_creates_campaign_label():
     config = _config()
     plan = plan_label_setup(
-        {"2027B": "Y", "Example/Triage/Parent": "P"}, config
+        {"YEAR_LABEL": "Y", "Example/Triage/Parent": "P"}, config
     )
-    assert plan["required_existing"] == ["2027B"]
+    assert plan["required_existing"] == ["YEAR_LABEL"]
     assert plan["required_missing"] == []
     assert plan["already_present"] == ["Example/Triage/Parent"]
-    assert "2027B" not in plan["create"]
+    assert "YEAR_LABEL" not in plan["create"]
 
     complete_account = {name: name for name in config.all_names}
     assert plan_label_setup(complete_account, config)["create"] == []
@@ -87,7 +87,7 @@ def test_setup_plan_is_idempotent_and_never_creates_campaign_label():
 
 def test_dry_run_makes_no_writes_and_processed_label_is_hidden():
     config = _config()
-    plan = plan_label_setup({"2027B": "Y"}, config)
+    plan = plan_label_setup({"YEAR_LABEL": "Y"}, config)
     service = _FakeGmail()
 
     created, failures = apply_label_setup(service, config, plan, dry_run=True)
@@ -106,7 +106,7 @@ def test_dry_run_makes_no_writes_and_processed_label_is_hidden():
 
 def test_label_creation_isolates_failures():
     config = _config()
-    plan = plan_label_setup({"2027B": "Y"}, config)
+    plan = plan_label_setup({"YEAR_LABEL": "Y"}, config)
     service = _FakeGmail(fail_name="Example/Triage/Other")
     created, failures = apply_label_setup(service, config, plan)
     assert len(created) == len(plan["create"]) - 1

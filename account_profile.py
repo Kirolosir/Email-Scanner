@@ -72,7 +72,7 @@ class AccountProfile:
         default_factory=lambda: MappingProxyType({})
     )
 
-    # Evidence-gated labelling (generalizes the 2027B gate)
+    # Evidence-gated labelling (generalizes the YEAR_LABEL gate)
     evidence_categories: frozenset = frozenset()
     evidence_sender_types: frozenset = frozenset()
     supported_years: frozenset = frozenset()
@@ -168,7 +168,7 @@ LEGACY_PROFILE = AccountProfile(
     timezone="America/New_York",
     categories=_LEGACY_CATEGORIES,
     category_sender_types=_LEGACY_CATEGORY_SENDER_TYPES,
-    protected_labels=frozenset({"2027B"}),
+    protected_labels=frozenset({"YEAR_LABEL"}),
     year_labels=_LEGACY_YEAR_LABELS,
     category_labels=_LEGACY_CATEGORY_LABELS,
     system_labels=MappingProxyType({
@@ -182,7 +182,7 @@ LEGACY_PROFILE = AccountProfile(
     supported_years=frozenset({"2026", "2027", "2028", "2029", "2030"}),
     evidence_expected_value="2027",
     evidence_rules=({
-        "label": "2027B",
+        "label": "YEAR_LABEL",
         "expected_value": "2027",
         "require_sender_type": frozenset({"recruit"}),
         "require_categories": frozenset({
@@ -198,7 +198,7 @@ LEGACY_PROFILE = AccountProfile(
 # The label a reviewed 2027 mapping must resolve to for this profile. Kept
 # here rather than asserted as a literal inside triage_config, which is what
 # made that validator single-tenant.
-LEGACY_REVIEWED_YEAR_LABEL = ("2027", "2027B")
+LEGACY_REVIEWED_YEAR_LABEL = ("2027", "YEAR_LABEL")
 
 
 ACCOUNT_CONFIG_VERSION = 1

@@ -2,7 +2,7 @@
 
 Pass one of the multi-inbox generalization collapsed 24 hardcoded sites across
 six modules down to one. This test is what keeps them collapsed - without it,
-the next edit that reintroduces `"recruit_intro"` or `"2027B"` into a pipeline
+the next edit that reintroduces `"recruit_intro"` or `"YEAR_LABEL"` into a pipeline
 module passes silently and the generalization quietly rots back.
 
 The forbidden vocabulary is derived from the profile at test time rather than
@@ -145,7 +145,7 @@ def test_forbidden_vocabulary_is_non_empty():
         "the literal guards would pass without checking anything"
     )
     # Spot-check that the values that actually matter are in scope.
-    for expected in ("2027B", "recruit_intro", "America/New_York"):
+    for expected in ("YEAR_LABEL", "recruit_intro", "America/New_York"):
         assert expected in vocabulary, (
             f"{expected!r} is no longer guarded against reintroduction"
         )
@@ -172,7 +172,7 @@ def test_profile_module_is_the_one_place_literals_live():
     describing code that deleted the data."""
     text = (ROOT / PROFILE_MODULE).read_text(encoding="utf-8")
 
-    for expected in ("2027B", "recruit_intro", "America/New_York",
+    for expected in ("YEAR_LABEL", "recruit_intro", "America/New_York",
                      "Triage/Recruit Intro"):
         assert expected in text, (
             f"{expected!r} is missing from {PROFILE_MODULE}; the profile is "

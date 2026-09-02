@@ -22,7 +22,7 @@ import pytest
 
 from triage import TemplateApprovals, plan_message
 
-YEAR_LABELS = {"2027": "2027B"}
+YEAR_LABELS = {"2027": "YEAR_LABEL"}
 CATEGORY_LABELS = {
     "recruit_intro": "Triage/Recruit Intro",
     "parent": "Triage/Parent",
@@ -171,7 +171,7 @@ def test_two_conflicting_years_in_body_block_the_year_label_and_draft():
         body="I am in the Class of 2027, though my brother is a 2028 recruit.",
     )
 
-    assert "2027B" not in plan["decision"].add, (
+    assert "YEAR_LABEL" not in plan["decision"].add, (
         "ambiguous year evidence must not produce a year label"
     )
     assert plan["template"] is None
@@ -185,7 +185,7 @@ def test_vague_body_with_confident_year_claim_still_gets_no_year_label():
     deterministic year evidence, so the year label must not be applied."""
     plan = _plan(_result())
 
-    assert "2027B" not in plan["decision"].add
+    assert "YEAR_LABEL" not in plan["decision"].add
     assert plan["template"] is None
 
 

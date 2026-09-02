@@ -24,7 +24,7 @@ from private_runtime import ExclusiveRunLock, LOCKED_EXIT_CODE
 
 
 CONFIG = TriageLabelConfig(
-    years={"2027": "2027B"},
+    years={"2027": "YEAR_LABEL"},
     categories={
         "recruit_intro": "Intro",
         "parent": "Parent",
@@ -34,7 +34,7 @@ CONFIG = TriageLabelConfig(
     system={"needs_review": "Needs Review", "processed": "Processed"},
 )
 ACCOUNT_LABELS = {
-    "2027B": "Y27", "Intro": "C1", "Parent": "C2", "Coach": "C3",
+    "YEAR_LABEL": "Y27", "Intro": "C1", "Parent": "C2", "Coach": "C3",
     "Other": "C4", "Needs Review": "NR", "Processed": "DONE",
 }
 
@@ -79,14 +79,14 @@ def test_queries_include_archived_received_mail_and_exclude_unsafe_mailboxes(
         assert clause in query
 
 
-def test_only_actual_recruit_gets_2027b():
+def test_only_actual_recruit_gets_the_year_label():
     templates = {
         "recruit_intro_2027": "approved recruit reply",
         "parent": "approved parent reply",
         "other_coach": "approved coach reply",
     }
     cases = [
-        ("recruit_intro", "recruit", {"Intro", "2027B"}),
+        ("recruit_intro", "recruit", {"Intro", "YEAR_LABEL"}),
         ("parent", "parent", {"Parent"}),
         ("other_coach", "coach", {"Coach"}),
     ]
@@ -185,7 +185,7 @@ class _Log:
 def _execution_plan():
     return {
         "email": _email(),
-        "decision": LabelDecision(add=["Intro", "2027B"]),
+        "decision": LabelDecision(add=["Intro", "YEAR_LABEL"]),
         "template": "approved reply",
         "processed_label": "Processed",
     }

@@ -135,7 +135,7 @@ def _pl_config(tmp_path, generic=("recruiting",)):
             {"slug": "marketing", "description": "promos", "examples": ["s"],
              "label": "Triage/Marketing", "drafting": {"mode": "off"}},
         ],
-        "protected_labels": [{"label": "2027B"}],
+        "protected_labels": [{"label": "YEAR_LABEL"}],
     }
     path = tmp_path / "account.json"
     path.write_text(json.dumps(document))

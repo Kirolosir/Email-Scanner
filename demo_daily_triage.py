@@ -27,7 +27,7 @@ class _Call:
 class _FakeGmail:
     def __init__(self):
         self.resource = None
-        self.labels_by_name = {"2027B": "Label_2027B"}
+        self.labels_by_name = {"YEAR_LABEL": "Label_YEAR_LABEL"}
         self.modify_calls = []
         self.draft_calls = []
 
@@ -146,15 +146,15 @@ def run_demo():
 
     recruit_labels = set(plans[0]["decision"].add)
     parent_labels = set(plans[1]["decision"].add)
-    assert "2027B" in recruit_labels
-    assert "2027B" not in parent_labels
+    assert "YEAR_LABEL" in recruit_labels
+    assert "YEAR_LABEL" not in parent_labels
     assert config.system["needs_review"] in parent_labels
     assert config.system["needs_review"] in plans[2]["decision"].add
 
     print("Offline daily-triage demonstration passed:")
     print(f"  configured labels created: {len(created)}")
-    print("  actual 2027 recruit received 2027B")
-    print("  parent mentioning 2027 did not receive 2027B")
+    print("  actual 2027 recruit received YEAR_LABEL")
+    print("  parent mentioning 2027 did not receive YEAR_LABEL")
     print("  missing/unknown replies routed to Needs Review")
     print("  one synthetic draft created; restart created zero duplicates")
     print("  Gmail, Gemini, OAuth, and network calls: 0")

@@ -219,9 +219,9 @@ def test_account_is_required_in_the_artifact(tmp_path):
 
 
 def test_label_scoped_approval_matches_only_that_label(tmp_path):
-    path = _artifact(tmp_path, label="2027B")
+    path = _artifact(tmp_path, label="YEAR_LABEL")
 
-    assert load_template_approval(path, ACCOUNT, "2027B")
+    assert load_template_approval(path, ACCOUNT, "YEAR_LABEL")
     with pytest.raises(ValueError, match="label does not match"):
         load_template_approval(path, ACCOUNT, "Other")
 
@@ -229,7 +229,7 @@ def test_label_scoped_approval_matches_only_that_label(tmp_path):
 def test_label_scoped_approval_refuses_a_run_with_no_single_label(tmp_path):
     """The daily processor scans a query, not one label. An artifact scoped
     to a label must be refused there rather than silently widened."""
-    path = _artifact(tmp_path, label="2027B")
+    path = _artifact(tmp_path, label="YEAR_LABEL")
     with pytest.raises(ValueError, match="does not target a single label"):
         load_template_approval(path, ACCOUNT, None)
 

@@ -176,16 +176,16 @@ def test_automated_and_unsafe_reply_messages_never_call_classifier():
         )
         assert calls == []
         assert plan["template"] is None
-        assert "2027B" not in plan["decision"].add
+        assert "YEAR_LABEL" not in plan["decision"].add
 
 
-def test_2027b_requires_local_evidence_high_confidence_and_recruit_sender():
+def test_year_label_requires_local_evidence_high_confidence_and_recruit_sender():
     def plan(body, result):
         email = message_to_email(_message(body))
         email["message_id"] = "m1"
         return plan_message(
             email, {"recruit_intro_2027": "approved"},
-            {"2027": "2027B"}, {"recruit_intro": "Intro", "parent": "Parent"},
+            {"2027": "YEAR_LABEL"}, {"recruit_intro": "Intro", "parent": "Parent"},
             False, classifier=lambda _email: result,
             template_approvals=TemplateApprovals(
                 name_only={"recruit_intro_2027"}
@@ -193,11 +193,11 @@ def test_2027b_requires_local_evidence_high_confidence_and_recruit_sender():
         )
 
     verified = plan("I am in the Class of 2027.", _result())
-    assert set(verified["decision"].add) == {"Intro", "2027B"}
+    assert set(verified["decision"].add) == {"Intro", "YEAR_LABEL"}
     assert verified["template"] == "approved"
 
     unrelated = plan("The schedule ends in 2027.", _result())
-    assert "2027B" not in unrelated["decision"].add
+    assert "YEAR_LABEL" not in unrelated["decision"].add
     assert unrelated["template"] is None
 
     for confidence in ("low", "medium"):
@@ -210,31 +210,31 @@ def test_2027b_requires_local_evidence_high_confidence_and_recruit_sender():
         _result(category="parent", sender="parent"),
     )
     assert parent["decision"].add == ["Parent"]
-    assert "2027B" not in parent["decision"].add
+    assert "YEAR_LABEL" not in parent["decision"].add
 
     coach = plan(
         "I coach a Class of 2027 recruit.",
         _result(category="other_coach", sender="coach"),
     )
-    assert "2027B" not in coach["decision"].add
+    assert "YEAR_LABEL" not in coach["decision"].add
 
 
 def test_model_and_local_year_disagreement_blocks_year_and_draft():
     email = message_to_email(_message("I am in the Class of 2028."))
     email["message_id"] = "m1"
     plan = plan_message(
-        email, {"recruit_intro_2027": "approved"}, {"2027": "2027B"},
+        email, {"recruit_intro_2027": "approved"}, {"2027": "YEAR_LABEL"},
         {"recruit_intro": "Intro"}, False,
         classifier=lambda _email: _result(year="2027"),
     )
-    assert "2027B" not in plan["decision"].add
+    assert "YEAR_LABEL" not in plan["decision"].add
     assert plan["template"] is None
     assert plan["year_evidence_conflict"] is True
 
 
 def test_bounce_senders_never_draft_or_receive_a_year_label():
     """A bounce must be suppressed before classification, so it can receive
-    neither a drafted reply nor the 2027B label - even when its body would
+    neither a drafted reply nor the YEAR_LABEL label - even when its body would
     otherwise read as a confident 2027 recruit introduction."""
     from triage import TemplateApprovals, plan_message
 
@@ -248,7 +248,7 @@ def test_bounce_senders_never_draft_or_receive_a_year_label():
             "thread_id": "t1", "rfc_message_id": "<m1@mail>", "label_names": [],
         }
         return plan_message(
-            email, templates, {"2027": "2027B"}, {"recruit_intro": "Intro"},
+            email, templates, {"2027": "YEAR_LABEL"}, {"recruit_intro": "Intro"},
             no_label=False,
             classifier=lambda _e: {
                 "category": "recruit_intro", "grad_year": "2027",
@@ -266,15 +266,15 @@ def test_bounce_senders_never_draft_or_receive_a_year_label():
             f"{sender} was sent to the classifier despite being automated"
         )
         assert result["template"] is None, f"{sender} produced a draft"
-        assert "2027B" not in result["decision"].add, (
-            f"{sender} received the 2027B recruit label"
+        assert "YEAR_LABEL" not in result["decision"].add, (
+            f"{sender} received the YEAR_LABEL recruit label"
         )
 
     # Control: a real recruit with the same body must still draft and label,
     # so the assertions above cannot pass because drafting is broken.
     control = plan("recruit@example.test")
     assert control["template"] is not None
-    assert "2027B" in control["decision"].add
+    assert "YEAR_LABEL" in control["decision"].add
 
 
 def test_bouncer_is_not_mistaken_for_a_bounce_address():

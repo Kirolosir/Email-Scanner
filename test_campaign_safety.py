@@ -12,14 +12,14 @@ from campaign import (
 from campaign_audit import audit_entry, build_report, write_report
 
 
-def test_protected_2027b_real_run_refuses_before_gmail(monkeypatch, tmp_path):
+def test_protected_label_real_run_refuses_before_gmail(monkeypatch, tmp_path):
     body = tmp_path / "body.txt"
     body.write_text("Coach-approved final body https://example.test")
     contacted = []
     monkeypatch.setattr(
         campaign, "get_gmail_service", lambda **_kwargs: contacted.append(True)
     )
-    assert campaign.main(["2027B", str(body), "--yes"]) == 2
+    assert campaign.main(["YEAR_LABEL", str(body), "--yes"]) == 2
     assert contacted == []
 
 
@@ -28,28 +28,28 @@ def test_campaign_approval_is_account_label_bound_private_and_deduplicated(tmp_p
     path.write_text(json.dumps({
         "version": 1,
         "account": "coach@example.edu",
-        "label": "2027B",
+        "label": "YEAR_LABEL",
         "approved_recipients": ["Recruit <r@example.test>"],
     }))
     assert load_campaign_approval(
-        path, "2027B", "coach@example.edu"
+        path, "YEAR_LABEL", "coach@example.edu"
     ) == {"r@example.test"}
     assert (path.stat().st_mode & 0o777) == 0o600
 
     with pytest.raises(ValueError, match="account"):
-        load_campaign_approval(path, "2027B", "other@example.edu")
+        load_campaign_approval(path, "YEAR_LABEL", "other@example.edu")
     with pytest.raises(ValueError, match="label"):
         load_campaign_approval(path, "Other", "coach@example.edu")
 
     path.write_text(json.dumps({
         "version": 1,
         "account": "coach@example.edu",
-        "label": "2027B",
+        "label": "YEAR_LABEL",
         "approved_recipients": ["old@example.test", "new@example.test"],
     }))
     with pytest.raises(ValueError, match="duplicate canonical"):
         load_campaign_approval(
-            path, "2027B", "coach@example.edu",
+            path, "YEAR_LABEL", "coach@example.edu",
             aliases={"old@example.test": "new@example.test"},
         )
 
@@ -96,7 +96,7 @@ def test_audit_report_is_private_and_never_contains_message_content(tmp_path):
         "email": {"body": body_marker},
     }
     entry = audit_entry(record, plan)
-    report = build_report("coach@example.edu", "2027B", [entry])
+    report = build_report("coach@example.edu", "YEAR_LABEL", [entry])
     path = tmp_path / "reports" / "audit.json"
     write_report(path, report)
     text = path.read_text(encoding="utf-8")

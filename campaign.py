@@ -825,8 +825,8 @@ def main(argv=None):
             print("\nDry run - no drafts created.")
         if protected_unreviewed:
             print(
-                "Real writes remain BLOCKED until the 2027B population is "
-                "audited and a reviewed --approval artifact is supplied."
+                f"Real writes remain BLOCKED until the {args.label} population "
+                "is audited and a reviewed --approval artifact is supplied."
             )
         return 0
 
