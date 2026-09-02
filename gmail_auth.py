@@ -35,6 +35,10 @@ TOKEN_PATH = DEFAULT_TOKEN_PATH
 logger = logging.getLogger(__name__)
 
 
+class TokenUnavailableError(RuntimeError):
+    """A usable token was absent where OAuth is not permitted to run."""
+
+
 def ensure_private_file(path):
     """Restrict a local secret file to its owner without reading it.
 
@@ -79,8 +83,22 @@ def _write_token(creds, token_path):
 
 
 def get_credentials(credentials_path=None, token_path=None,
-                    force_authorize=False, login_hint=None, persist=True):
-    """Load one account's token, or explicitly authorize it into a new file."""
+                    force_authorize=False, login_hint=None, persist=True,
+                    allow_interactive=False):
+    """Load one account's token, or explicitly authorize it into a new file.
+
+    Google's sign-in flow opens only when the caller asked for it, via
+    ``allow_interactive`` or ``force_authorize``. Both mean "the operator
+    typed --authorize"; neither is reachable from a pipeline command.
+
+    A pipeline command pointed at a token path that does not exist used to
+    fall through to run_local_server(), mint a brand-new credential for
+    whichever account the machine's browser session happened to hold, and
+    persist it at that path. The scheduled 6 PM job is exactly this case: it
+    pins --token-path so an unattended run cannot use the wrong mailbox, and
+    a typo in that path turned the guarantee inside out. An unattended run
+    must fail closed instead, which is what refusing here does.
+    """
     credentials_path = credentials_path or DEFAULT_CREDENTIALS_PATH
     token_path = token_path or DEFAULT_TOKEN_PATH
     creds = None
@@ -92,6 +110,13 @@ def get_credentials(credentials_path=None, token_path=None,
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
+        elif not (allow_interactive or force_authorize):
+            raise TokenUnavailableError(
+                f"{token_path} is missing or unusable, and this command will "
+                "not open Google's sign-in flow. Authorize it deliberately "
+                f"with: python gmail_auth.py --authorize --token-path "
+                f"{token_path}"
+            )
         else:
             if not os.path.exists(credentials_path):
                 raise FileNotFoundError(
@@ -122,8 +147,14 @@ def get_credentials(credentials_path=None, token_path=None,
 
 
 def get_gmail_service(credentials_path=None, token_path=None):
-    """Return an authorized Gmail API service object."""
-    creds = get_credentials(credentials_path, token_path)
+    """Return an authorized Gmail API service object.
+
+    Never opens Google's sign-in flow. Pipeline commands call this, and one
+    of them is the unattended 6 PM job; authorization is a deliberate,
+    separate step via gmail_auth.py --authorize.
+    """
+    creds = get_credentials(credentials_path, token_path,
+                            allow_interactive=False)
     return build("gmail", "v1", credentials=creds)
 
 
@@ -165,6 +196,9 @@ def main(argv=None):
         force_authorize=True,
         login_hint=args.expected_account,
         persist=False,
+        # The one place interactive OAuth is allowed: the operator typed
+        # --authorize.
+        allow_interactive=True,
     )
     if args.expected_account:
         service = build("gmail", "v1", credentials=creds)
