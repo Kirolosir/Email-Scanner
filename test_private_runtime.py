@@ -59,3 +59,43 @@ def test_status_is_atomic_private_and_contains_no_pii(tmp_path):
     assert mode(path.parent) == 0o700
     assert mode(path) == 0o600
     assert not list(path.parent.glob(f".{path.name}.*"))
+
+
+# --------------------------------------------------------------------
+# mkdir(parents=True, mode=0o700) applies the mode to the LAST component
+# only; parents get the umask, 0755 in practice. A nested state_dir such
+# as triage-state/<account> therefore produced a world-listable parent
+# holding a private leaf, exposing which accounts are being triaged. This
+# happened on the live pilot account, not just in theory.
+# --------------------------------------------------------------------
+
+def test_every_directory_created_on_the_way_is_private(tmp_path):
+    import os
+    import stat
+    from private_runtime import ensure_private_directory
+
+    leaf = tmp_path / "triage-state" / "someone" / "locks"
+    ensure_private_directory(leaf)
+
+    for path in (tmp_path / "triage-state",
+                 tmp_path / "triage-state" / "someone",
+                 leaf):
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+        assert mode == 0o700, f"{path} is mode {mode:03o}, expected 700"
+
+
+def test_a_pre_existing_ancestor_is_left_alone(tmp_path):
+    """Permissions on a directory this call did not create are not ours to
+    change; chmod on a shared parent we do not own raises EPERM."""
+    import os
+    import stat
+    from private_runtime import ensure_private_directory
+
+    shared = tmp_path / "shared"
+    shared.mkdir(mode=0o755)
+    os.chmod(shared, 0o755)
+
+    ensure_private_directory(shared / "private")
+
+    assert stat.S_IMODE(os.stat(shared).st_mode) == 0o755
+    assert stat.S_IMODE(os.stat(shared / "private").st_mode) == 0o700

@@ -15,8 +15,30 @@ LOCKED_EXIT_CODE = 75
 
 
 def ensure_private_directory(path):
+    """Create ``path`` privately, including every directory made on the way.
+
+    ``mkdir(parents=True, mode=0o700)`` applies the mode to the LAST component
+    only; intermediate directories are created with the process umask, which
+    is 0755 in practice. A nested state_dir like ``triage-state/<account>``
+    therefore produced a world-listable ``triage-state`` holding a private
+    leaf, and the account names inside it were readable by any local user.
+
+    Only directories this call creates are tightened. A pre-existing ancestor
+    (the repo checkout, /tmp, a shared parent) is left alone: chmod on a
+    directory the caller does not own raises EPERM, and its permissions were
+    never this function's to decide.
+    """
     directory = Path(path)
+    created = []
+    probe = directory
+    while not probe.exists():
+        created.append(probe)
+        if probe.parent == probe:
+            break
+        probe = probe.parent
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for made in created:
+        os.chmod(made, 0o700)
     os.chmod(directory, 0o700)
     return directory
 
