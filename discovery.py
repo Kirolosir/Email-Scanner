@@ -27,6 +27,7 @@ from gmail_common import UNITS_MESSAGES_GET, UNITS_MESSAGES_LIST
 from gmail_reader import get_header
 from message_safety import assess_delivery_headers, opaque_id
 from taxonomy import build_taxonomy, render_review_sheet
+from gmail_retry import gmail_execute
 
 # Hard ceiling regardless of what a caller asks for: discovery is a survey,
 # not a full read of the mailbox.
@@ -95,17 +96,17 @@ def sample_inbox(service, query, throttle, max_messages=DEFAULT_SAMPLE,
     limit = max(1, min(int(max_messages), MAX_SAMPLE))
 
     throttle.consume(UNITS_MESSAGES_LIST)
-    listing = service.users().messages().list(
+    listing = gmail_execute(service.users().messages().list(
         userId="me", q=query, maxResults=limit
-    ).execute()
+    ))
 
     samples = []
     for stub in (listing.get("messages") or [])[:limit]:
         throttle.consume(UNITS_MESSAGES_GET)
-        message = service.users().messages().get(
+        message = gmail_execute(service.users().messages().get(
             userId="me", id=stub["id"], format="metadata",
             metadataHeaders=SAMPLE_HEADERS,
-        ).execute()
+        ))
         delivery = assess_delivery_headers(
             {name.lower(): get_header(message, name)
              for name in SAMPLE_HEADERS},

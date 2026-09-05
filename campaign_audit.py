@@ -27,6 +27,7 @@ from gmail_labeler import fetch_account_labels
 from message_safety import DEFAULT_MAX_BODY_CHARS, opaque_id, validate_max_body_chars
 from private_runtime import atomic_write_json
 from triage import fetch_messages, message_to_email, plan_message
+from gmail_retry import gmail_execute
 
 
 REPORT_VERSION = 1
@@ -192,7 +193,7 @@ def main(argv=None, classifier=None):
     service = get_gmail_service(token_path=args.token_path)
     throttle = QuotaThrottle()
     account = normalize_address(
-        service.users().getProfile(userId="me").execute().get("emailAddress", "")
+        gmail_execute(service.users().getProfile(userId="me")).get("emailAddress", "")
     )
     # A read validates that label resolution will use the current account.
     fetch_account_labels(service, throttle)

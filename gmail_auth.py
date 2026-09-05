@@ -21,6 +21,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+from gmail_retry import gmail_execute
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
@@ -202,7 +203,7 @@ def main(argv=None):
     )
     if args.expected_account:
         service = build("gmail", "v1", credentials=creds)
-        actual = service.users().getProfile(userId="me").execute().get(
+        actual = gmail_execute(service.users().getProfile(userId="me")).get(
             "emailAddress", ""
         )
         if actual.casefold() != args.expected_account.casefold():

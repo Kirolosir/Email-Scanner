@@ -58,6 +58,7 @@ from account_profile import (
 from taxonomy import TaxonomyConfirmation as _TaxonomyConfirmation
 from taxonomy import load_taxonomy_confirmation as _load_taxonomy_confirmation
 from gmail_auth import get_gmail_service
+from gmail_retry import describe_failure, gmail_execute
 
 _PROFILE = _load_profile()
 # Confirms nothing; the fail-closed default for the taxonomy gate.
@@ -843,9 +844,9 @@ def execute_plan(service, plan, account_labels, throttle, draft_log):
         }
         throttle.consume(UNITS_DRAFTS_CREATE)
         try:
-            draft = service.users().drafts().create(
+            draft = gmail_execute(service.users().drafts().create(
                 userId="me", body=build_draft_body(record, plan["template"])
-            ).execute()
+            ))
             draft_log.record(draft["id"])
             draft_created = True
         except Exception as e:
@@ -877,11 +878,14 @@ def fetch_messages(service, message_ids, throttle, limit=None,
             break
         throttle.consume(UNITS_MESSAGES_GET)
         try:
-            message = service.users().messages().get(
+            message = gmail_execute(service.users().messages().get(
                 userId="me", id=message_id, format="full"
-            ).execute()
+            ))
         except Exception as exc:
-            failures.append((message_id, type(exc).__name__))
+            # Record the real status, not just 'HttpError'. A transient
+            # rate limit and a permanent permission error read identically
+            # otherwise, which is how 143 retryable failures looked fatal.
+            failures.append((message_id, describe_failure(exc)))
             continue
         messages.append(message)
         if is_candidate is None or is_candidate(message):
@@ -896,12 +900,15 @@ def fetch_message_metadata(service, message_ids, throttle):
     for message_id in message_ids:
         throttle.consume(UNITS_MESSAGES_GET)
         try:
-            message = service.users().messages().get(
+            message = gmail_execute(service.users().messages().get(
                 userId="me", id=message_id, format="metadata",
                 metadataHeaders=list(SAFETY_HEADERS),
-            ).execute()
+            ))
         except Exception as exc:
-            failures.append((message_id, type(exc).__name__))
+            # Record the real status, not just 'HttpError'. A transient
+            # rate limit and a permanent permission error read identically
+            # otherwise, which is how 143 retryable failures looked fatal.
+            failures.append((message_id, describe_failure(exc)))
             continue
         messages.append(message)
     return messages, failures
@@ -1039,7 +1046,7 @@ def main(argv=None):
     throttle = QuotaThrottle()
 
     own_address = normalize_address(
-        service.users().getProfile(userId="me").execute().get("emailAddress", "")
+        gmail_execute(service.users().getProfile(userId="me")).get("emailAddress", "")
     )
 
     # Now that the authenticated account is known, enforce every binding.

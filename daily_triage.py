@@ -27,6 +27,7 @@ from drafting import (
 )
 from gmail_auth import get_gmail_service
 from taxonomy import load_taxonomy_confirmation
+from gmail_retry import gmail_execute
 
 _PROFILE = _load_profile()
 from gmail_common import (
@@ -391,17 +392,17 @@ def list_existing_draft_threads(service, throttle):
     page_token = None
     while True:
         throttle.consume(UNITS_DRAFTS_LIST)
-        response = service.users().drafts().list(
+        response = gmail_execute(service.users().drafts().list(
             userId="me", maxResults=LIST_PAGE_SIZE, pageToken=page_token
-        ).execute()
+        ))
         for draft in response.get("drafts", []):
             message = draft.get("message", {})
             thread_id = message.get("threadId")
             if not thread_id:
                 throttle.consume(UNITS_DRAFTS_GET)
-                detail = service.users().drafts().get(
+                detail = gmail_execute(service.users().drafts().get(
                     userId="me", id=draft["id"], format="minimal"
-                ).execute()
+                ))
                 thread_id = detail.get("message", {}).get("threadId")
             if thread_id:
                 threads.setdefault(thread_id, draft["id"])
@@ -421,9 +422,9 @@ def _create_reply_draft(service, plan, throttle):
         "thread_id": email["thread_id"],
     }
     throttle.consume(UNITS_DRAFTS_CREATE)
-    return service.users().drafts().create(
+    return gmail_execute(service.users().drafts().create(
         userId="me", body=build_draft_body(record, plan["template"])
-    ).execute()
+    ))
 
 
 def execute_daily_plan(service, plan, account_labels, throttle, draft_log,
@@ -657,7 +658,7 @@ def _run_locked(args, classifier, config, templates, state, status):
     service = get_gmail_service(token_path=args.token_path)
     throttle = QuotaThrottle()
     own_address = normalize_address(
-        service.users().getProfile(userId="me").execute().get("emailAddress", "")
+        gmail_execute(service.users().getProfile(userId="me")).get("emailAddress", "")
     )
     # The daily processor scans an inbox query, not one label, so no label
     # name is passed; an artifact scoped to a label is refused outright.

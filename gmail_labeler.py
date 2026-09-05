@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 
 import account_profile as _PROFILE_MOD
 from account_profile import load_profile as _load_profile
+from gmail_retry import gmail_execute
 
 _PROFILE = _load_profile()
 
@@ -70,7 +71,7 @@ def fetch_account_labels(service, throttle=None):
     """
     if throttle is not None:
         throttle.consume(UNITS_LABELS_LIST)
-    labels = service.users().labels().list(userId="me").execute().get("labels", [])
+    labels = gmail_execute(service.users().labels().list(userId="me")).get("labels", [])
     return {label["name"]: label["id"] for label in labels}
 
 
@@ -251,9 +252,9 @@ def apply_labels(service, message_id, label_names, account_labels,
 
     if throttle is not None:
         throttle.consume(UNITS_MESSAGES_MODIFY)
-    service.users().messages().modify(
+    gmail_execute(service.users().messages().modify(
         userId="me", id=message_id, body={"addLabelIds": label_ids}
-    ).execute()
+    ))
     return label_ids
 
 

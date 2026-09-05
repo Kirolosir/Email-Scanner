@@ -11,6 +11,7 @@ from email.message import EmailMessage
 from email.utils import parseaddr
 
 from gmail_reader import get_label_id
+from gmail_retry import gmail_execute
 
 # Gmail API quota costs, in units, per
 # https://developers.google.com/gmail/api/reference/quota
@@ -27,7 +28,6 @@ QUOTA_UNITS_PER_SECOND = 90
 
 # Gmail returns at most 500 message ids per list page.
 LIST_PAGE_SIZE = 500
-
 
 class QuotaThrottle:
     """Smooth throttle over Gmail's per-minute user quota.
@@ -76,12 +76,12 @@ def list_all_message_ids(service, label_name, throttle, max_scan=None,
     page_token = None
     while True:
         throttle.consume(UNITS_MESSAGES_LIST)
-        response = service.users().messages().list(
+        response = gmail_execute(service.users().messages().list(
             userId="me",
             labelIds=[label_id],
             maxResults=LIST_PAGE_SIZE,
             pageToken=page_token,
-        ).execute()
+        ))
 
         message_ids.extend(m["id"] for m in response.get("messages", []))
         if progress:
@@ -116,12 +116,12 @@ def list_message_ids_by_query(service, query, throttle, max_scan=None,
     page_token = None
     while True:
         throttle.consume(UNITS_MESSAGES_LIST)
-        response = service.users().messages().list(
+        response = gmail_execute(service.users().messages().list(
             userId="me",
             q=query,
             maxResults=LIST_PAGE_SIZE,
             pageToken=page_token,
-        ).execute()
+        ))
         message_ids.extend(item["id"] for item in response.get("messages", []))
 
         if progress:

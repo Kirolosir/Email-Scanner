@@ -4,6 +4,7 @@ clean plain-text body from a message (handling base64url encoding and
 nested multipart MIME structures). No write or send calls live here."""
 import base64
 import re
+from gmail_retry import gmail_execute
 
 
 def get_label_id(service, label_name):
@@ -11,7 +12,7 @@ def get_label_id(service, label_name):
 
     Raises ValueError if no label with that name exists.
     """
-    labels = service.users().labels().list(userId="me").execute().get("labels", [])
+    labels = gmail_execute(service.users().labels().list(userId="me")).get("labels", [])
     for label in labels:
         if label["name"].lower() == label_name.lower():
             return label["id"]
@@ -22,17 +23,17 @@ def get_label_id(service, label_name):
 def list_message_ids(service, label_name, max_results=10):
     """Return message ids for messages under the given label name."""
     label_id = get_label_id(service, label_name)
-    response = service.users().messages().list(
+    response = gmail_execute(service.users().messages().list(
         userId="me", labelIds=[label_id], maxResults=max_results
-    ).execute()
+    ))
     return [m["id"] for m in response.get("messages", [])]
 
 
 def get_message(service, message_id):
     """Fetch one full message resource by id."""
-    return service.users().messages().get(
+    return gmail_execute(service.users().messages().get(
         userId="me", id=message_id, format="full"
-    ).execute()
+    ))
 
 
 def get_header(message, name):

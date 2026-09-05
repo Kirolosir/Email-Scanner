@@ -35,6 +35,7 @@ from googleapiclient.errors import HttpError
 
 from account_profile import load_profile as _load_profile
 from gmail_auth import get_gmail_service
+from gmail_retry import gmail_execute
 
 _PROFILE = _load_profile()
 # Shared with triage.py. Re-exported from this module so existing callers
@@ -345,12 +346,12 @@ def fetch_metadata(service, message_ids, throttle, own_address="", progress=True
     for message_id in failed_ids:
         throttle.consume(UNITS_MESSAGES_GET)
         try:
-            response = service.users().messages().get(
+            response = gmail_execute(service.users().messages().get(
                 userId="me",
                 id=message_id,
                 format="metadata",
                 metadataHeaders=METADATA_HEADERS,
-            ).execute()
+            ))
         except Exception:
             still_failed.append(message_id)
             continue
@@ -462,9 +463,9 @@ def create_drafts(service, targets, body_text, throttle, draft_log):
     for i, record in enumerate(targets, start=1):
         throttle.consume(UNITS_DRAFTS_CREATE)
         try:
-            draft = service.users().drafts().create(
+            draft = gmail_execute(service.users().drafts().create(
                 userId="me", body=build_draft_body(record, body_text)
-            ).execute()
+            ))
         except Exception as e:
             error_name = type(e).__name__
             failures.append((record["sender"], error_name))
@@ -510,9 +511,9 @@ def trash_drafts(service, draft_ids, throttle, trashed_log=None):
         # Resolve draft -> underlying message id.
         throttle.consume(UNITS_DRAFTS_GET)
         try:
-            draft = service.users().drafts().get(
+            draft = gmail_execute(service.users().drafts().get(
                 userId="me", id=draft_id, format="minimal"
-            ).execute()
+            ))
         except Exception as e:
             if _is_not_found(e):
                 missing += 1
@@ -529,9 +530,9 @@ def trash_drafts(service, draft_ids, throttle, trashed_log=None):
 
         throttle.consume(UNITS_MESSAGES_TRASH)
         try:
-            service.users().messages().trash(
+            gmail_execute(service.users().messages().trash(
                 userId="me", id=message_id
-            ).execute()
+            ))
         except Exception as e:
             if _is_not_found(e):
                 missing += 1
@@ -752,7 +753,7 @@ def main(argv=None):
     exclusions.update(label_exclusions)
 
     own_address = normalize_address(
-        service.users().getProfile(userId="me").execute().get("emailAddress", "")
+        gmail_execute(service.users().getProfile(userId="me")).get("emailAddress", "")
     )
     try:
         approved = load_campaign_approval(

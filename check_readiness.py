@@ -15,6 +15,7 @@ import urllib.request
 from pathlib import Path
 
 import readiness
+from gmail_retry import gmail_execute
 
 
 def parse_args(argv=None):
@@ -90,7 +91,7 @@ def _read_live_gmail_metadata(token_path):
 
     service = _build_read_only_gmail_service(token_path)
     account = normalize_address(
-        service.users().getProfile(userId="me").execute().get(
+        gmail_execute(service.users().getProfile(userId="me")).get(
             "emailAddress", ""
         )
     )

@@ -46,6 +46,7 @@ PIPELINE_MODULES = [
     "gemini_client.py",
     "gmail_auth.py",
     "gmail_common.py",
+    "gmail_retry.py",
     "gmail_labeler.py",
     "gmail_reader.py",
     "message_safety.py",
