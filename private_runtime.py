@@ -5,13 +5,126 @@ import datetime as dt
 import fcntl
 import json
 import os
+import re
 import tempfile
+import traceback
 from pathlib import Path
 
 from message_safety import opaque_id
 
 
 LOCKED_EXIT_CODE = 75
+
+# Diagnostics for a failed run. The status file stays a PII-free summary for
+# casual viewing; this is the private trail for the case that summary cannot
+# serve - an unattended run that failed with nothing else to go on.
+FAILURE_LOG_NAME = "failures.log"
+MAX_FAILURE_LOG_BYTES = 512 * 1024
+MAX_DETAIL_CHARS = 4000
+
+# Exception MESSAGES are the PII risk here, not the frames. A KeyError can
+# carry a subject, an HttpError a URL with a message id, a ValueError an
+# address. Frames themselves are source code and file paths, which are not
+# message-derived, so they are kept verbatim - losing them would defeat the
+# point of the log.
+_EMAIL_RE = re.compile(
+    r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+    r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,}"
+)
+_SECRET_RE = re.compile(
+    r"(?:ya29\.[A-Za-z0-9_.\-]{10,}"
+    r"|GOCSPX-[A-Za-z0-9_\-]{10,}"
+    r"|1//0[A-Za-z0-9_\-]{10,}"
+    r"|(?i:bearer)\s+[A-Za-z0-9._\-]{10,})"
+)
+
+
+def scrub_diagnostic_text(text):
+    """Remove the PII classes a traceback can carry, keeping it readable.
+
+    Addresses become a stable opaque id so two occurrences can still be
+    correlated without revealing who they are. Credential-shaped strings are
+    dropped outright rather than hashed; nothing about them is worth keeping.
+    """
+    scrubbed = _SECRET_RE.sub("<redacted-credential>", str(text or ""))
+    scrubbed = _EMAIL_RE.sub(
+        lambda m: f"<address:{opaque_id(m.group(0).casefold(), 8)}>", scrubbed
+    )
+    return scrubbed
+
+
+def failure_log_path(status_path):
+    """The private diagnostic log that sits beside a run's status file."""
+    return Path(status_path).with_name(FAILURE_LOG_NAME)
+
+
+def record_failure_diagnostic(status_path, exc, *, mode="", exit_code=None,
+                              now=None):
+    """Append one scrubbed diagnostic entry for a failed run.
+
+    Returns True when written. Never raises: this runs inside an exception
+    handler, and a logging failure must not replace the original error.
+    """
+    try:
+        path = failure_log_path(status_path)
+        ensure_private_directory(path.parent)
+        stamp = (now or dt.datetime.now(dt.timezone.utc)).isoformat(
+            timespec="seconds"
+        )
+        detail = "".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__)
+        )
+        entry = (
+            f"===== {stamp} mode={mode or 'unknown'} "
+            f"exit={exit_code if exit_code is not None else 'n/a'} =====\n"
+            f"exception: {type(exc).__name__}\n"
+            f"message:   {_head_and_tail(scrub_diagnostic_text(exc))}\n"
+            f"{_head_and_tail(scrub_diagnostic_text(detail))}\n"
+        )
+        _rotate_if_oversized(path)
+        descriptor = os.open(
+            path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600
+        )
+        with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
+            handle.write(entry)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(path, 0o600)
+        return True
+    except Exception:  # noqa: BLE001 - never mask the failure being recorded
+        return False
+
+
+def _head_and_tail(text, limit=MAX_DETAIL_CHARS):
+    """Truncate from the middle, keeping both ends.
+
+    A deep library stack buries the actual raise site at the BOTTOM, and our
+    own frames sit at the top. Keeping only the head loses the cause; keeping
+    only the tail loses which of our calls led there. The first real
+    truncation proved it - a BrokenPipeError traceback was cut mid-frame in
+    ssl.py, discarding exactly the line that raised.
+    """
+    text = str(text or "")
+    if len(text) <= limit:
+        return text
+    keep = max(1, (limit - 40) // 2)
+    omitted = len(text) - (keep * 2)
+    return (
+        text[:keep]
+        + f"\n... [{omitted} characters omitted] ...\n"
+        + text[-keep:]
+    )
+
+
+def _rotate_if_oversized(path):
+    """Keep one previous generation so the log cannot grow without bound."""
+    try:
+        if path.exists() and path.stat().st_size >= MAX_FAILURE_LOG_BYTES:
+            previous = path.with_suffix(path.suffix + ".1")
+            os.replace(path, previous)
+            os.chmod(previous, 0o600)
+    except OSError:
+        pass
 
 
 def ensure_private_directory(path):

@@ -52,6 +52,7 @@ PIPELINE_MODULES = [
     "message_safety.py",
     "migrate_account.py",
     "private_runtime.py",
+    "local_notifier.py",
     "setup_labels.py",
     "taxonomy.py",
     "triage.py",

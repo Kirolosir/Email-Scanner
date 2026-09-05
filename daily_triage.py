@@ -65,8 +65,11 @@ from message_safety import (
     opaque_id,
     validate_max_body_chars,
 )
+from local_notifier import notify_failure
 from private_runtime import (
     LOCKED_EXIT_CODE,
+    failure_log_path,
+    record_failure_diagnostic,
     AlreadyRunningError,
     ExclusiveRunLock,
     RunStatus,
@@ -578,6 +581,10 @@ def parse_args(argv=None):
               "--limit, and --max-drafts"),
     )
     parser.add_argument(
+        "--notify-on-failure", action="store_true",
+        help="Show a PII-free local macOS notification when a scheduled run fails",
+    )
+    parser.add_argument(
         "--force", action="store_true",
         help="Permit another daily scan today; idempotency checks still apply",
     )
@@ -596,6 +603,8 @@ def parse_args(argv=None):
         )
     except ValueError as exc:
         parser.error(str(exc))
+    if args.notify_on_failure and not args.scheduled:
+        parser.error("--notify-on-failure requires --scheduled")
     if args.yes and not args.apply:
         parser.error("--yes is meaningful only with --apply")
     if args.scheduled and args.apply and not args.yes:
@@ -925,8 +934,7 @@ def _run_locked(args, classifier, config, templates, state, status):
     return done(1 if counts["failures"] else 0, error_codes)
 
 
-def main(argv=None, classifier=None):
-    args = parse_args(argv)
+def _main_with_args(args, classifier=None):
     logging.basicConfig(
         level=logging.WARNING if args.scheduled else logging.INFO,
         format="%(levelname)s %(message)s",
@@ -972,12 +980,49 @@ def main(argv=None, classifier=None):
                 return _run_locked(args, classifier, config, templates, state, status)
             except Exception as exc:
                 print(f"Daily triage stopped safely ({type(exc).__name__}).")
+                # The status file stays a PII-free summary. The type name
+                # alone is not enough to debug an unattended failure, so the
+                # scrubbed traceback goes to a private log beside it.
+                if record_failure_diagnostic(
+                    args.status_path, exc, mode=args.mode, exit_code=1
+                ):
+                    print(f"Diagnostic written to {failure_log_path(args.status_path)}")
                 status.finish(False, {"failures": 1}, ["unexpected_run_failure"])
                 return 1
     except AlreadyRunningError:
         print("Another triage run is already active for this target; nothing contacted or changed.")
         status.finish(False, {"skipped": 1}, ["lock_already_held"], lock_held=True)
         return LOCKED_EXIT_CODE
+
+
+def _status_document(path):
+    try:
+        return RunStatus(path).data
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+
+
+def main(argv=None, classifier=None):
+    args = parse_args(argv)
+    try:
+        code = _main_with_args(args, classifier=classifier)
+    except Exception as exc:
+        print(f"Daily triage stopped safely ({type(exc).__name__}).")
+        code = 1
+        if record_failure_diagnostic(
+            args.status_path, exc, mode=getattr(args, "mode", ""), exit_code=1
+        ):
+            print(f"Diagnostic written to {failure_log_path(args.status_path)}")
+        try:
+            status = RunStatus(args.status_path)
+            if not status.data.get("last_run"):
+                status.start("unexpected")
+            status.finish(False, {"failures": 1}, ["unexpected_run_failure"])
+        except OSError:
+            pass
+    if args.notify_on_failure and code != 0:
+        notify_failure(code, _status_document(args.status_path))
+    return code
 
 
 if __name__ == "__main__":
