@@ -75,6 +75,10 @@ from private_runtime import (
     RunStatus,
     ensure_private_directory,
 )
+from review_report import (
+    ReviewReportReservation,
+    build_review_report,
+)
 from triage_limits import (
     plans_within_draft_limit,
     requires_new_draft,
@@ -450,6 +454,7 @@ def execute_daily_plan(service, plan, account_labels, throttle, draft_log,
     errors = []
     added = []
     draft_id = ""
+    plan["new_draft_created"] = False
 
     try:
         if plan["decision"].add:
@@ -478,6 +483,7 @@ def execute_daily_plan(service, plan, account_labels, throttle, draft_log,
                 # and cannot create a second draft for the source message.
                 state.record_draft(message_id, thread_id, draft_id)
                 draft_threads[thread_id] = draft_id
+                plan["new_draft_created"] = True
             except Exception as exc:
                 errors.append(f"draft failed ({type(exc).__name__})")
 
@@ -585,6 +591,10 @@ def parse_args(argv=None):
         help="Show a PII-free local macOS notification when a scheduled run fails",
     )
     parser.add_argument(
+        "--review-report", metavar="PATH",
+        help="Write a private PII-minimized JSON review report without overwriting",
+    )
+    parser.add_argument(
         "--force", action="store_true",
         help="Permit another daily scan today; idempotency checks still apply",
     )
@@ -680,8 +690,16 @@ def _run_locked(args, classifier, config, templates, state, status):
         "needs_review": 0, "skipped": 0, "failures": 0,
         "deferred_draft_limit": 0, "deferred_write_limit": 0,
     }
+    report_plans = []
+    deferred_reasons = {}
 
     def done(code, error_codes=()):
+        args._review_context = {
+            "plans": list(report_plans),
+            "counts": dict(counts),
+            "deferred_reasons": dict(deferred_reasons),
+            "error_codes": list(error_codes),
+        }
         status.finish(code == 0, counts, error_codes=error_codes)
         return code
 
@@ -842,6 +860,13 @@ def _run_locked(args, classifier, config, templates, state, status):
     deferred = list(deferred_drafts) + list(deferred_write)
     counts["deferred_write_limit"] = len(deferred_write)
     counts["deferred_draft_limit"] = len(deferred_drafts)
+    deferred_reasons.update(
+        {id(plan): "write_limit_reached" for plan in deferred_write}
+    )
+    deferred_reasons.update(
+        {id(plan): "draft_limit_reached" for plan in deferred_drafts}
+    )
+    report_plans.extend(list(plans) + deferred)
 
     if not args.scheduled:
         print("\nInteractive preview: subjects and message metadata may be visible below.")
@@ -912,6 +937,7 @@ def _run_locked(args, classifier, config, templates, state, status):
                     service, plan, account_labels, throttle, draft_log,
                     state, draft_threads,
                 )
+                plan["_applied_labels"] = list(labels)
                 counts["labeled"] += len(labels)
             except Exception as exc:
                 plan_errors = [f"unexpected failure ({type(exc).__name__})"]
@@ -919,6 +945,7 @@ def _run_locked(args, classifier, config, templates, state, status):
                 counts["failures"] += 1
                 code = _safe_error_code(error)
                 error_codes.append(code)
+                plan.setdefault("_execution_error_codes", []).append(code)
                 display_id = (
                     opaque_id(plan["email"]["message_id"])
                     if args.scheduled else plan["email"]["message_id"]
@@ -1002,8 +1029,48 @@ def _status_document(path):
         return {}
 
 
+def _finalize_review_report(args, reporter, code):
+    if reporter is None:
+        return code
+    context = getattr(args, "_review_context", {}) or {}
+    counts = context.get("counts")
+    if not counts:
+        last_run = (_status_document(args.status_path).get("last_run") or {})
+        counts = last_run.get("counts") or {"failures": 1 if code else 0}
+    try:
+        document = build_review_report(
+            context.get("plans", ()),
+            counts,
+            mode=args.mode,
+            applied=args.apply,
+            outcome="success" if code == 0 else "failed",
+            deferred_reasons=context.get("deferred_reasons", {}),
+        )
+        reporter.finalize(document)
+    except Exception as exc:
+        print(f"Review report could not be finalized ({type(exc).__name__}).")
+        status = RunStatus(args.status_path)
+        prior = (status.data.get("last_run") or {}).get("counts") or {}
+        failed_counts = dict(prior)
+        failed_counts["failures"] = int(failed_counts.get("failures", 0)) + 1
+        status.finish(False, failed_counts, ["review_report_failed"])
+        return code or 1
+    return code
+
+
 def main(argv=None, classifier=None):
     args = parse_args(argv)
+    reporter = None
+    if args.review_report:
+        try:
+            reporter = ReviewReportReservation(args.review_report).reserve()
+        except (OSError, ValueError) as exc:
+            print(f"Review report error ({type(exc).__name__}); no Gmail contact occurred.")
+            code = 2
+            if args.notify_on_failure:
+                notify_failure(code, {})
+            return code
+
     try:
         code = _main_with_args(args, classifier=classifier)
     except Exception as exc:
@@ -1020,6 +1087,7 @@ def main(argv=None, classifier=None):
             status.finish(False, {"failures": 1}, ["unexpected_run_failure"])
         except OSError:
             pass
+    code = _finalize_review_report(args, reporter, code)
     if args.notify_on_failure and code != 0:
         notify_failure(code, _status_document(args.status_path))
     return code

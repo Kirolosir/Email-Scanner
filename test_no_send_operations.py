@@ -30,6 +30,9 @@ PRODUCTION = [
     ROOT / "drafting.py",
     ROOT / "migrate_account.py",
     ROOT / "account_profile.py",
+    ROOT / "triage_limits.py",
+    ROOT / "local_notifier.py",
+    ROOT / "review_report.py",
 ]
 
 GMAIL_WRITE_METHODS = {

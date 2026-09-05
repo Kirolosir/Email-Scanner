@@ -872,6 +872,48 @@ def test_end_to_end_apply_run_never_writes_more_than_the_limit(
         )
 
 
+def test_end_to_end_apply_run_never_creates_more_than_max_drafts(
+        monkeypatch, tmp_path):
+    """Measure the independent cap at the real drafts().create boundary."""
+    import campaign
+
+    service = _CountingGmail(message_count=8)
+    monkeypatch.setattr(daily_triage, "get_gmail_service", lambda **_k: service)
+    monkeypatch.setattr(campaign, "DRAFT_LOG_DIR", str(tmp_path / "logs"))
+    templates = tmp_path / "templates"
+    templates.mkdir()
+    (templates / "recruit_intro_2027.txt").write_text(
+        "Reviewed offline reply", encoding="utf-8"
+    )
+    state_path = tmp_path / "state" / "daily.json"
+    report_path = tmp_path / "review" / "pilot.json"
+
+    result = daily_triage.main([
+        "initial", "--state-path", str(state_path),
+        "--templates", str(templates),
+        "--templates-approved", "recruit_intro_2027",
+        "--limit", "100", "--max-drafts", "2", "--apply", "--yes",
+        "--review-report", str(report_path),
+    ], classifier=_high_recruit)
+
+    assert result == 0
+    assert len(service.create_calls) == 2
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    assert len(saved["messages"]) == 2, (
+        "draft-limited messages were partially labeled or marked processed"
+    )
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["counts"]["deferred_draft_limit"] == 6
+    assert sum(item["draft_created"] for item in report["messages"]) == 2
+    assert len(report["messages"]) == 8
+    report_text = report_path.read_text(encoding="utf-8")
+    for private in (
+        "PRIVATE SUBJECT MARKER", "private-sender@example.test",
+        "PRIVATE BODY MARKER", "private-message-id", "thread-",
+    ):
+        assert private not in report_text
+
+
 def test_dry_run_models_max_drafts_without_writing(monkeypatch, tmp_path, capsys):
     service = _CountingGmail(message_count=6)
     monkeypatch.setattr(daily_triage, "get_gmail_service", lambda **_k: service)
