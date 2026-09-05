@@ -114,7 +114,8 @@ class RunStatus:
     VERSION = 1
     COUNT_KEYS = {
         "scanned", "classified", "labeled", "drafted", "needs_review",
-        "skipped", "failures",
+        "skipped", "failures", "deferred_draft_limit",
+        "deferred_write_limit",
     }
 
     def __init__(self, path):

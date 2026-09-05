@@ -407,6 +407,7 @@ def test_scheduled_dry_run_redacts_message_data_and_writes_private_status(
     result = daily_triage.main([
         "initial", "--state-path", str(state_path),
         "--templates", str(templates), "--scheduled", "--dry-run",
+        "--max-scan", "25", "--limit", "25", "--max-drafts", "5",
     ], classifier=_high_recruit)
     assert result == 0
     output = capsys.readouterr().out
@@ -430,6 +431,7 @@ def test_estimate_only_calls_no_classifier_or_gmail_writes(
     result = daily_triage.main([
         "initial", "--state-path", str(tmp_path / "state.json"),
         "--estimate-only", "--scheduled",
+        "--max-scan", "25", "--limit", "25", "--max-drafts", "5",
     ], classifier=lambda email: calls.append(email))
     assert result == 0
     assert calls == []
@@ -868,6 +870,29 @@ def test_end_to_end_apply_run_never_writes_more_than_the_limit(
             f"({service.label_adds} label adds + "
             f"{len(service.create_calls)} drafts)"
         )
+
+
+def test_dry_run_models_max_drafts_without_writing(monkeypatch, tmp_path, capsys):
+    service = _CountingGmail(message_count=6)
+    monkeypatch.setattr(daily_triage, "get_gmail_service", lambda **_k: service)
+    templates = tmp_path / "templates"
+    templates.mkdir()
+    (templates / "recruit_intro_2027.txt").write_text(
+        "Reviewed offline reply", encoding="utf-8"
+    )
+
+    result = daily_triage.main([
+        "initial", "--state-path", str(tmp_path / "state" / "daily.json"),
+        "--templates", str(templates),
+        "--templates-approved", "recruit_intro_2027",
+        "--limit", "100", "--max-drafts", "1", "--dry-run",
+    ], classifier=_high_recruit)
+
+    assert result == 0
+    assert service.create_calls == [] and service.modify_calls == []
+    output = capsys.readouterr().out
+    assert "Drafts:       up to 1" in output
+    assert "candidate(s) deferred by --max-drafts" in output
 
 
 def test_deferred_work_does_not_mark_the_day_complete(monkeypatch, tmp_path):

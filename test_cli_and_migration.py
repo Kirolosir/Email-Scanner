@@ -51,6 +51,7 @@ def test_launchd_plist_invocation_still_parses():
     args = daily_triage.parse_args([
         "daily", "--apply", "--yes", "--scheduled",
         "--token-path", "tokens/coach.json",
+        "--max-scan", "25", "--limit", "25", "--max-drafts", "5",
     ])
 
     assert args.apply is True and args.yes is True and args.scheduled is True

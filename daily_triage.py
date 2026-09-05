@@ -72,6 +72,12 @@ from private_runtime import (
     RunStatus,
     ensure_private_directory,
 )
+from triage_limits import (
+    plans_within_draft_limit,
+    requires_new_draft,
+    validate_max_drafts,
+    validate_scheduled_limits,
+)
 
 
 DEFAULT_STATE_PATH = _PROFILE.state_path
@@ -360,6 +366,11 @@ def reconcile_existing_drafts(plans, state, draft_threads, config):
         existing_id = draft_threads.get(email["thread_id"], "")
         recorded_id = record.get("draft_id", "")
         recorded_status = record.get("status")
+        plan["draft_already_owned"] = bool(
+            recorded_status in {"draft_created", "complete"}
+            and recorded_id
+            and recorded_id == existing_id
+        )
         external = bool(existing_id and not (
             recorded_status in {"draft_created", "complete"}
             and recorded_id == existing_id
@@ -538,6 +549,10 @@ def parse_args(argv=None):
     parser.add_argument("--max-scan", type=int)
     parser.add_argument("--limit", type=int)
     parser.add_argument(
+        "--max-drafts", type=int,
+        help="Maximum number of new Gmail drafts this run may create",
+    )
+    parser.add_argument(
         "--max-body-chars", type=int, default=DEFAULT_MAX_BODY_CHARS,
         help=f"Maximum cleaned current-message characters sent to Gemini "
              f"(default: {DEFAULT_MAX_BODY_CHARS})",
@@ -559,7 +574,8 @@ def parse_args(argv=None):
     parser.add_argument("--yes", action="store_true")
     parser.add_argument(
         "--scheduled", action="store_true",
-        help="Redact unattended output to counts and safe error codes",
+        help=("Redact unattended output; requires explicit --max-scan, "
+              "--limit, and --max-drafts"),
     )
     parser.add_argument(
         "--force", action="store_true",
@@ -570,8 +586,23 @@ def parse_args(argv=None):
         value = getattr(args, name)
         if value is not None and value <= 0:
             parser.error(f"--{name.replace('_', '-')} must be greater than zero")
+    try:
+        validate_max_drafts(args.max_drafts)
+        validate_scheduled_limits(
+            args.scheduled,
+            max_scan=args.max_scan,
+            limit=args.limit,
+            max_drafts=args.max_drafts,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.yes and not args.apply:
         parser.error("--yes is meaningful only with --apply")
+    if args.scheduled and args.apply and not args.yes:
+        parser.error(
+            "scheduled --apply requires --yes; one-time account activation "
+            "remains a separate typed approval"
+        )
     if args.estimate_only and args.apply:
         parser.error("--estimate-only cannot be combined with --apply")
     try:
@@ -638,6 +669,7 @@ def _run_locked(args, classifier, config, templates, state, status):
     counts = {
         "scanned": 0, "classified": 0, "labeled": 0, "drafted": 0,
         "needs_review": 0, "skipped": 0, "failures": 0,
+        "deferred_draft_limit": 0, "deferred_write_limit": 0,
     }
 
     def done(code, error_codes=()):
@@ -794,7 +826,13 @@ def _run_locked(args, classifier, config, templates, state, status):
     # The write budget is applied HERE, before the preview, so a dry run
     # reports exactly what an --apply run would do. Computing it in the
     # executor alone would make the preview overstate every bounded run.
-    plans, deferred = plans_within_write_budget(plans, args.limit)
+    plans, deferred_drafts = plans_within_draft_limit(
+        plans, args.max_drafts
+    )
+    plans, deferred_write = plans_within_write_budget(plans, args.limit)
+    deferred = list(deferred_drafts) + list(deferred_write)
+    counts["deferred_write_limit"] = len(deferred_write)
+    counts["deferred_draft_limit"] = len(deferred_drafts)
 
     if not args.scheduled:
         print("\nInteractive preview: subjects and message metadata may be visible below.")
@@ -806,7 +844,7 @@ def _run_locked(args, classifier, config, templates, state, status):
         if preview:
             print(preview)
     label_count = sum(len(plan["decision"].add) + 1 for plan in plans)
-    draft_count = sum(plan["template"] is not None for plan in plans)
+    draft_count = sum(requires_new_draft(plan) for plan in plans)
     review_count = sum(plan["needs_review"] for plan in plans)
     counts["needs_review"] = review_count
     print(f"\nCandidates:   {len(plans)}")
@@ -819,8 +857,11 @@ def _run_locked(args, classifier, config, templates, state, status):
     if deferred:
         print(f"Deferred:     {len(deferred)} candidate(s) left for the next "
               "run; they were not marked processed")
-    if not plans and deferred:
-        cheapest = min(plan_write_cost(plan) for plan in deferred)
+    if deferred_drafts:
+        print(f"Draft cap:    {len(deferred_drafts)} candidate(s) deferred by "
+              "--max-drafts")
+    if not plans and deferred_write:
+        cheapest = min(plan_write_cost(plan) for plan in deferred_write)
         print(f"\n--limit {args.limit} is too small to process any message; "
               f"the cheapest pending one needs {cheapest} writes. "
               "Raise --limit to make progress.")

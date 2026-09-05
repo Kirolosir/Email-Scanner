@@ -85,6 +85,7 @@ from message_safety import (
     clean_current_message,
     extract_grad_year_evidence,
 )
+from triage_limits import plans_within_draft_limit, validate_max_drafts
 
 DEFAULT_TEMPLATE_DIR = _PROFILE.template_dir
 # Sourced from the account profile; previously duplicated in gmail_labeler.py.
@@ -982,6 +983,10 @@ def parse_args(argv=None):
                         "unsent drafts; does not bind exact wording"))
     parser.add_argument("--limit", type=int, metavar="N",
                         help="Process at most N messages")
+    parser.add_argument(
+        "--max-drafts", type=int, metavar="N",
+        help="Create at most N new Gmail drafts; zero disables drafting",
+    )
     parser.add_argument("--token-path", help=(
                         "Separate Gmail token file for this account"))
     parser.add_argument("--dry-run", action="store_true",
@@ -993,6 +998,10 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     if args.limit is not None and args.limit <= 0:
         parser.error("--limit must be greater than zero")
+    try:
+        validate_max_drafts(args.max_drafts)
+    except ValueError as exc:
+        parser.error(str(exc))
     return args
 
 
@@ -1116,6 +1125,10 @@ def main(argv=None):
                          ai_drafting_approvals=ai_drafting_approvals)
         )
 
+    plans, deferred_drafts = plans_within_draft_limit(
+        plans, args.max_drafts
+    )
+
     print()
     print_plan_table(plans)
     print()
@@ -1129,6 +1142,9 @@ def main(argv=None):
     print(f"Labels:    {label_count}")
     print(f"Drafts:    {draft_count}")
     print(f"Conflicts: {conflicts} (left for manual review)")
+    if deferred_drafts:
+        print(f"Deferred:  {len(deferred_drafts)} message(s) because "
+              "--max-drafts was reached; no labels were applied to them")
 
     if args.dry_run:
         print("\nDry run - nothing changed.")
