@@ -21,7 +21,14 @@
     <string>/ABSOLUTE/PATH/TO/CHECKOUT/tokens/owner.json</string>
     <string>--apply</string>
     <string>--yes</string>
+    <string>--max-scan</string>
+    <string>25</string>
+    <string>--limit</string>
+    <string>25</string>
+    <string>--max-drafts</string>
+    <string>5</string>
     <string>--scheduled</string>
+    <string>--notify-on-failure</string>
   </array>
 
   <key>WorkingDirectory</key>
