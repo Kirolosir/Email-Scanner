@@ -85,7 +85,8 @@ def run_demo():
     setup_plan = plan_label_setup(service.labels_by_name, config)
     created, failures = apply_label_setup(service, config, setup_plan)
     assert not failures
-    assert len(created) == len(config.creatable_names)
+    assert len(created) == len(setup_plan["create"])
+    assert set(config.all_names) <= set(service.labels_by_name)
 
     years, categories = build_label_index(
         service.labels_by_name, config.years, config.categories

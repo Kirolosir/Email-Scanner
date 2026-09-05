@@ -575,13 +575,10 @@ def test_every_production_gmail_call_goes_through_the_retry_layer():
     import ast
     from pathlib import Path
 
-    # setup_labels.py is deliberately excluded: its own gmail_execute
-    # wrapping still sits uncommitted, tied to an unrelated in-progress
-    # rewrite of that file. Add it back once that lands.
     modules = [
         "discovery.py", "gmail_labeler.py", "triage.py", "daily_triage.py",
         "gmail_common.py", "gmail_reader.py", "campaign.py",
-        "campaign_audit.py", "gmail_auth.py",
+        "campaign_audit.py", "gmail_auth.py", "setup_labels.py",
         "check_readiness.py",
     ]
     # `request` is the parameter inside gmail_execute itself; `batch` is a

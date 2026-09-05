@@ -29,12 +29,16 @@ class TriageLabelConfig:
 
     @property
     def creatable_names(self) -> list[str]:
-        """Exact triage labels setup may create (year labels are existing-only)."""
-        return sorted(set(self.categories.values()) | set(self.system.values()))
+        """Every exact reviewed label the one-time setup may create.
+
+        Creating an evidence-gated label does not apply it to any message; the
+        independent evidence gate still controls that later mutation.
+        """
+        return self.all_names
 
     @property
     def required_existing_names(self) -> list[str]:
-        return sorted(set(self.years.values()))
+        return []
 
     @property
     def all_names(self) -> list[str]:
