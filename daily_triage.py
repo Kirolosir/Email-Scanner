@@ -334,11 +334,24 @@ def plans_within_write_budget(plans, limit):
     return admitted, []
 
 
-def add_daily_review_policy(plan, config):
-    """Route every unsafe/no-draft outcome to the reviewed review label."""
-    if plan.get("suppression_code") == "automated_message":
-        # Deterministically identified automated mail is a safe terminal case:
-        # category it as Administrative and never draft or call Gemini.
+def add_daily_review_policy(plan, config, profile=None):
+    """Route every unsafe/no-draft outcome to the reviewed review label.
+
+    Deterministically identified automated mail stays a terminal case for a
+    per-category account: filed as processed, never drafted, and not routed
+    to review, exactly as before. Account-wide drafting is the one mode that
+    surfaces it instead, because there the owner approved drafting for every
+    replyable message, so a message the run refused to draft is a decision
+    worth showing rather than filing silently.
+
+    An absent profile means no account-wide policy is in force, so the
+    per-category behavior is the default.
+    """
+    global_drafting = bool(
+        getattr(profile, "draft_all_replyable_messages", False)
+    )
+    if (plan.get("suppression_code") == "automated_message"
+            and not global_drafting):
         plan["needs_review"] = False
         plan["review_reasons"] = []
         return plan
@@ -353,6 +366,8 @@ def add_daily_review_policy(plan, config):
         review_reasons.append("existing labels conflict with classification")
     if plan["draft_skip"]:
         review_reasons.append(plan["draft_skip"])
+    if plan.get("draft_fallback_used"):
+        review_reasons.append("safe acknowledgement fallback was used")
 
     review_name = config.system["needs_review"]
     current = set(plan["email"].get("label_names", []))
@@ -531,7 +546,7 @@ def parse_args(argv=None):
     parser.add_argument("--templates", default=DEFAULT_TEMPLATE_DIR)
     parser.add_argument("--account-config", metavar="FILE", help=(
                         "Per-account config selecting taxonomy, labels, and "
-                        "per-category drafting modes"))
+                        "drafting policy"))
     parser.add_argument("--taxonomy-confirmation", metavar="FILE", help=(
                         "Private artifact recording which categories the "
                         "account owner has reviewed"))
@@ -542,8 +557,8 @@ def parse_args(argv=None):
                         "Comma-separated template keys approved for this "
                         "supervised run (per-category; does NOT pin wording)"))
     parser.add_argument("--ai-drafting-approval", metavar="FILE", help=(
-                        "Private account/category approval for AI-generated "
-                        "unsent drafts; does not bind exact wording"))
+                        "Private account-wide or legacy category approval for "
+                        "AI-generated unsent drafts"))
     parser.add_argument("--state-path", default=DEFAULT_STATE_PATH)
     parser.add_argument("--status-path", default=DEFAULT_STATUS_PATH,
                         help="Private PII-free atomic run-status JSON")
@@ -731,7 +746,8 @@ def _run_locked(args, classifier, config, templates, state, status):
         own_address,
     )
     args.ai_drafting_approvals = load_ai_drafting_approval(
-        args.ai_drafting_approval, own_address, args.profile.categories
+        args.ai_drafting_approval, own_address, args.profile.categories,
+        profile=args.profile,
     )
 
     account_labels = fetch_account_labels(service, throttle)
@@ -766,11 +782,15 @@ def _run_locked(args, classifier, config, templates, state, status):
         )
         counts["failures"] = len(failures)
         candidate_count = estimate["gemini_candidates"]
-        generic_enabled = any(
+        global_drafting = bool(
+            getattr(args.profile, "draft_all_replyable_messages", False)
+        )
+        generic_enabled = global_drafting or any(
             mode == MODE_GENERIC
             for mode in getattr(args.profile, "drafting_modes", {}).values()
         )
-        maximum_model_calls = candidate_count * (2 if generic_enabled else 1)
+        draft_attempts = 2 if global_drafting else (1 if generic_enabled else 0)
+        maximum_model_calls = candidate_count * (1 + draft_attempts)
         minimum_seconds = max(0, candidate_count - 1) * THROTTLE_SECONDS
         maximum_spacing = max(0, maximum_model_calls - 1) * THROTTLE_SECONDS
         print("\nEstimate only (metadata reads; zero Gemini calls; zero Gmail writes):")
@@ -837,7 +857,7 @@ def _run_locked(args, classifier, config, templates, state, status):
                 args, "ai_drafting_approvals", None
             ),
         )
-        add_daily_review_policy(plan, config)
+        add_daily_review_policy(plan, config, getattr(args, "profile", None))
         plan["processed_label"] = processed_name
         plans.append(plan)
 

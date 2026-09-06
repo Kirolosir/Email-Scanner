@@ -51,6 +51,21 @@ gitignored. On POSIX systems token and state files are mode 0600 and their
 private directories are 0700. Changing OAuth scopes forces a deliberate
 re-authorization, so don't do it in the middle of a campaign run.
 
+## No-send boundary
+
+Google's `gmail.modify` scope technically permits sending email. This project
+does not send, and the boundary is enforced by code review and tests rather
+than by the OAuth permission. Production code contains no Gmail send call.
+The static source/AST audit rejects direct, dynamic, aliased, and obscured send
+operations and audits every production module.
+
+The only permitted Gmail mutations are `drafts().create()`, add-only
+`messages().modify()` label changes, `labels().create()` inside the dedicated
+onboarding command, and `messages().trash()` during explicit campaign rollback.
+Everything else is rejected. Triage never removes a label, modifies an existing
+draft, or sends a draft. Every generated reply remains an ordinary editable,
+unsent Gmail draft until the account owner acts on it manually.
+
 ## Urgent campaign
 
 `YEAR_LABEL` is the exact campaign label. Deduplication works on the normalized
@@ -164,8 +179,14 @@ proposals under `review/` are private and gitignored.
 **What reaches Gemini.** Classification sends the safe reply metadata, the
 subject, and at most 8,000 characters of the cleaned current top-posted
 message. Quoted history, common signatures, and attachment contents are left
-out. Automated, bulk, bounce, no-reply, malformed, and unsafe-Reply-To
-messages are stopped before Gemini and are never drafted.
+out. Automated and bulk mail is stopped before Gemini and is never drafted,
+in every drafting mode: a `List-Unsubscribe` header, a `bulk`, `list`, or
+`junk` `Precedence`, an `Auto-Submitted` header, `X-Auto-Response-Suppress`,
+or a `no-reply`/`bounce`/`mailer-daemon`/`postmaster` sender each mark a
+message automated on its own, and an automated message is given no reply
+address at all. Account-wide drafting does not loosen this. Self-replies,
+malformed addresses, ambiguous Reply-To values, and messages with no safe
+reply path likewise never get a draft.
 
 Gemini returns category, graduation year, sender type, confidence, evidence,
 and a short reason, in a strict format. Anything unsupported or malformed
@@ -174,7 +195,59 @@ Approval to touch Gmail doesn't cover any of this: sending message content to
 a third-party model is a separate institutional decision, and you need it
 before enabling classification.
 
-Each configured category gets exactly one drafting mode:
+### One-time account-wide drafting activation
+
+For the seamless workflow, put these reviewed settings in the account profile:
+
+```json
+{
+  "draft_all_replyable_messages": true,
+  "fallback_category": "other"
+}
+```
+
+The boolean expresses intent but grants nothing by itself. `approve_account.py`
+creates a separate version 2 approval bound to the exact Gmail account and a
+SHA-256 digest of the taxonomy, labels, category guidance, signature, account
+guidance, fallback category, evidence rules, and protected-label permission.
+Changing any of those settings invalidates the activation.
+
+Preview the exact taxonomy and grant without writing anything:
+
+```sh
+.venv/bin/python approve_account.py \
+  --account-config accounts/owner.json \
+  --taxonomy-output accounts/owner-taxonomy.json \
+  --ai-output accounts/owner-ai.json \
+  --dry-run
+```
+
+Remove `--dry-run` when the owner is ready. The owner personally types the full
+sentence printed by the command. It explicitly names the account and states the
+grant the code actually implements: unsent drafts for every message with a safe
+reply address, excluding automated and bulk mail. The sentence deliberately
+does not promise more than that - a confirmation broader than the behavior
+would pre-authorize a later loosening of the delivery-header policy without
+ever asking the owner again. There is no `--yes` option for this activation. It
+is needed once during onboarding, not for every message or scheduled run.
+
+Every generated draft carries the hardcoded
+`AI-DRAFTED - UNREVIEWED WORDING - NOT SENT` banner. Unknown, low-confidence,
+or conflicting classifications use the configured `Other` label, also receive
+`Needs Review`, and get a neutral acknowledgement when the return path is
+safe. Generation gets at most two attempts. If both fail validation or error,
+the system uses the hardcoded fact-free `Thank you for your message.` plus the
+configured signature and banner. It never fabricates a recipient.
+
+Protected-label drafting remains a separate, larger permission. Add
+`--allow-protected-labels` only when intended; the confirmation then adds the
+exact clause `including messages under protected labels`. That grant does not
+loosen the independent evidence rules for applying the label.
+
+### Legacy category drafting modes
+
+Existing profiles remain compatible. When account-wide drafting is off, each
+configured category gets exactly one drafting mode:
 
 - `off`: classification and add-only labels still run, but no reply is
   generated.
@@ -185,12 +258,12 @@ Each configured category gets exactly one drafting mode:
   `AI-DRAFTED - UNREVIEWED WORDING - NOT SENT` banner, and the account owner
   has to review, edit, or discard it.
 
-Miss either the mode or the approval and drafting stays off. An unapproved
+Miss either the legacy mode or its approval and drafting stays off. An unapproved
 generic path is rejected before generation, so no message content reaches the
 generation call at all. Generic drafting never sends mail, and it never gets a
 vote on whether a protected year label applies.
 
-Once you've reviewed the profile, create the taxonomy and generic-drafting
+For a legacy per-category profile, create the taxonomy and generic-drafting
 approvals offline:
 
 ```sh
@@ -200,8 +273,8 @@ approvals offline:
   --ai-output accounts/owner-ai.json
 ```
 
-The owner types the exact sentence the command prints. Nobody else can type it
-for them. If generic categories should also be allowed to draft on messages
+The owner types the exact sentence the command prints. If generic categories
+should also be allowed to draft on messages
 carrying a protected label, add `--allow-protected-labels`, and the sentence
 they type changes to say `including messages under protected labels`. That's a
 strictly larger grant, but it doesn't loosen the local/model evidence
@@ -216,8 +289,10 @@ Templates resolve in this order:
 
 All 8 templates shipped in `templates/` are still placeholders.
 
-Anything unknown, ambiguous, conflicting, malformed, or missing a template gets
-`Needs Review` and no generated reply.
+In legacy mode, anything unknown, ambiguous, conflicting, malformed, or
+missing a template gets `Needs Review` and no generated reply. Account-wide
+mode instead uses the safe acknowledgement behavior above whenever the reply
+destination itself is safe.
 
 ### Two independent gates
 
@@ -334,34 +409,51 @@ year agrees with the model's. Dates, schedules, phone numbers, quoted history,
 and footers don't count as evidence. A parent, another coach, an administrator,
 an automated sender, a vendor, or a reporter doesn't get the label just because
 their text mentions a recruit of that year. Low or medium confidence, or
-evidence that contradicts itself, routes to Needs Review with no draft.
+evidence that contradicts itself, never applies the protected label. It routes
+to Needs Review; after valid account-wide activation it may still receive a
+neutral draft when its reply destination is safe.
 
-`label-config.example.json` holds the reviewed mapping:
+`label-config.example.json` or the account profile holds the reviewed mapping:
 
-- the year label, which must already exist
+- evidence-gated year labels
 - category labels under a configured prefix
 - a `Needs Review` label
 - a hidden `Processed` label
 
 Neither `triage.py` nor the daily processor ever creates a label. The bootstrap
 command is the only module allowed to, and only for the exact labels named in
-that config. Preview it on a test account first:
+that config. It is offline by default and first prints the complete configured
+set:
 
 ```sh
-GMAIL_TOKEN_PATH=token.json .venv/bin/python setup_labels.py \
-  --config label-config.example.json --dry-run
+.venv/bin/python setup_labels.py \
+  --account-config accounts/owner.json
 ```
 
-Then, once you've read the exact list it printed:
+Read-only comparison with Gmail requires `--live`:
 
 ```sh
-GMAIL_TOKEN_PATH=token.json .venv/bin/python setup_labels.py \
-  --config label-config.example.json
+.venv/bin/python setup_labels.py \
+  --account-config accounts/owner.json \
+  --token-path tokens/owner.json --live --dry-run
 ```
 
-Running it twice is harmless. It asks for typed confirmation, won't create
-`YEAR_LABEL`, won't accept a free-text label name, never reads classifier
-output, and never renames, removes, or deletes a label.
+Creation requires both `--live` and `--apply`:
+
+```sh
+.venv/bin/python setup_labels.py \
+  --account-config accounts/owner.json \
+  --token-path tokens/owner.json --live --apply
+```
+
+The command displays exact existing and missing matches, then requires an
+account-and-count-bound typed sentence covering the complete set. It creates at
+most 100 missing configured labels, including configured evidence-gated label
+names, and reuses exact existing matches. A case-only collision is refused.
+Running it twice is harmless. It accepts no free-text label name, never reads
+classifier output, and never renames, removes, deletes, or changes a Gmail
+system label. Creating a protected label name does not apply it to any message;
+the independent evidence gate still controls that later action.
 
 ## Two-month backfill and daily triage
 
@@ -373,7 +465,8 @@ This makes zero Gemini calls and zero Gmail writes:
   --account-config accounts/owner.json \
   --taxonomy-confirmation accounts/owner-taxonomy.json \
   --ai-drafting-approval accounts/owner-ai.json \
-  --token-path tokens/owner.json --estimate-only --scheduled
+  --token-path tokens/owner.json --estimate-only --scheduled \
+  --max-scan 25 --limit 25 --max-drafts 5
 ```
 
 The estimate breaks the window down into already-processed, automated,
@@ -390,25 +483,26 @@ GMAIL_TOKEN_PATH=token.json .venv/bin/python daily_triage.py initial \
   --account-config accounts/owner.json \
   --taxonomy-confirmation accounts/owner-taxonomy.json \
   --ai-drafting-approval accounts/owner-ai.json \
-  --max-scan 50 --limit 10 --dry-run
+  --max-scan 50 --limit 10 --max-drafts 3 \
+  --review-report review/initial-dry-run.json --dry-run
 ```
 
-Once you've reviewed a test-account preview, approved the templates, and run a
-small pilot, `--apply` is the explicit write gate:
+Once you've reviewed a test-account preview, completed the one-time activation,
+and run a small pilot, `--apply` is the explicit write gate:
 
 ```sh
 GMAIL_TOKEN_PATH=token.json .venv/bin/python daily_triage.py initial \
   --account-config accounts/owner.json \
   --taxonomy-confirmation accounts/owner-taxonomy.json \
   --ai-drafting-approval accounts/owner-ai.json \
-  --max-scan 50 --limit 10 --apply
+  --max-scan 50 --limit 10 --max-drafts 3 \
+  --review-report review/initial-pilot.json --apply
 ```
 
-All `--apply` does is authorize Gmail writes. It doesn't approve a template, an
-AI category, or a taxonomy. Template categories still need
-`--template-approval` and generic categories still need
-`--ai-drafting-approval`. A category missing its approval can still be labeled;
-it just won't draft.
+All `--apply` does is authorize Gmail writes. It does not create the taxonomy
+confirmation, global activation, legacy template approval, or protected-label
+permission. Those private artifacts must already validate. A missing or stale
+global activation fails closed before reply generation.
 
 **`--limit N` is a budget of N Gmail writes**, counting label adds and drafts
 together. Not N messages, and not N classifications. One message usually costs
@@ -439,10 +533,21 @@ than stalling silently. To bound the Gmail *read* instead, use `--max-scan`.
 This was previously a classification-only bound: a measured `--limit 15` run
 classified 15 messages but processed 158 and wrote up to 182 labels.
 
+`--max-drafts N` is a second, independent limit. It counts only new Gmail
+drafts created in the current run. A draft already recorded in the private
+journal and reconciled on restart does not spend this budget. When a new draft
+would exceed the cap, that whole message is deferred: it receives no labels and
+is not marked Processed. Non-drafting messages can continue within the regular
+write budget. `--max-drafts 0` guarantees zero new drafts. Whole replyable
+messages whose drafts do not fit are deferred without labels or a Processed
+marker; automated messages, which never draft, may still be labeled within the
+normal write budget.
+
 Daily mode searches a three-day overlap so late-arriving mail isn't missed:
 
 ```sh
-GMAIL_TOKEN_PATH=token.json .venv/bin/python daily_triage.py daily --dry-run
+GMAIL_TOKEN_PATH=token.json .venv/bin/python daily_triage.py daily \
+  --max-scan 25 --limit 25 --max-drafts 5 --dry-run
 ```
 
 Three terms that are easy to confuse:
@@ -480,13 +585,46 @@ doesn't throw away the rest of the plans. Labels are add-only. Drafts are
 replies inside existing threads, and they sit there unsent until someone reads
 them.
 
+### Private review reports
+
+`--review-report PATH` writes a versioned JSON report for either a dry run or an
+applied run. It contains only counts, opaque message identifiers, category and
+confidence, proposed or applied label names, draft eligibility and outcome,
+and allowlisted reason codes. It never stores subjects, bodies, addresses,
+draft wording, raw Gmail IDs, classifier evidence, exception text, OAuth data,
+or tokens. The directory is mode 0700 and the completed file is mode 0600.
+
+The requested path is reserved before Gmail contact and is never overwritten.
+Publication uses an exclusively created private temporary file and an atomic
+link. If the process is interrupted first, the clearly named
+`.in-progress` marker remains instead of a malformed completed report. Use a
+new filename for every run.
+
+### Untrusted email and prompt injection
+
+Classification and drafting prompts serialize the sender, subject, and cleaned
+body as `UNTRUSTED_EMAIL_JSON`. Instructions, role markers, fake delimiters, or
+JSON placed inside an email remain data. They cannot change the confirmed
+taxonomy, output schema, signature, word limit, approval state, protected-label
+evidence rule, or no-send boundary. Model output is still treated as untrusted:
+unsupported categories normalize to unknown, protected years need independent
+local evidence, and generated replies containing mail headers, account-action
+claims, internal prompt disclosures, or secret disclosures are rejected.
+
 ## Prepared 6 PM macOS schedule (not installed)
 
 `launchd/com.example.email.daily-triage.plist.example` is set up for 6:00 PM
 local time and contains no secrets. launchd needs absolute paths, so replace
 every `/ABSOLUTE/PATH/TO/CHECKOUT` in it with this checkout's real location
-before installing. It carries
-`--apply --yes`, so don't install it until every rollout gate below has passed.
+before installing. It carries `--apply --yes`, so don't install it until every
+rollout gate below has passed and the one-time account activation exists.
+`--yes` skips only the routine nightly write prompt; it cannot create or widen
+that activation.
+Scheduled mode now refuses to start unless `--max-scan`, the total-write
+`--limit`, and `--max-drafts` are all supplied explicitly. The prepared files
+use conservative values of 25 scanned messages, 25 Gmail writes, and five new
+drafts. This validation occurs before Gmail authentication, Gemini setup, or
+state changes, and `--yes` cannot bypass it.
 The machine has to be awake and online. Duplicate invocations are harmless,
 between the same-day guard and the processed journal. Its `--token-path`
 points at `tokens/owner.json` specifically, so a scheduled run against the
@@ -494,9 +632,14 @@ owner's mailbox can't quietly fall back to `token.json`. One thing to watch:
 18:00 only means the intended Eastern-time run while the Mac's system timezone
 stays America/New_York.
 
-The plist also passes `--scheduled`. Unattended output is limited to counts,
-label category names, opaque identifiers, timestamps, and safe error codes. No
-subjects, addresses, bodies, classifier reasoning, or secrets.
+The plist also passes `--scheduled --notify-on-failure`. Unattended output is
+limited to counts, label category names, opaque identifiers, timestamps, and
+safe error codes. No subjects, addresses, bodies, classifier reasoning, or
+secrets. A failed run asks macOS to display one local notification containing
+only the exit code, allowlisted counts and error codes, and a direction to read
+the private status file. It uses `/usr/bin/osascript` without a shell and makes
+no network call. Failure to display the notification is logged with fixed text
+and never replaces the triage run's original exit status.
 
 Before you ever activate it, create private scheduler logs:
 
@@ -768,12 +911,14 @@ labels`.
 9. Have the account owner review and explicitly approve the recipient allowlist.
 10. Run a one-to-three-draft campaign pilot and inspect every result.
 11. Test rollback only against the pilot's program-created draft log.
-12. Review the account taxonomy and select a drafting mode per category.
-    Template-mode categories require reviewed wording and a digest-bound
-    `--template-approval`; generic categories require an account/category-bound
-    `--ai-drafting-approval` and always carry the unreviewed-AI banner.
-13. Run a small daily-triage draft-only pilot and inspect every label/draft.
-14. Enable the 6:00 PM schedule only after explicit approval.
+12. Review the account taxonomy, set `draft_all_replyable_messages` and the
+    `Other` fallback, then have the owner create the one-time digest-bound
+    activation. Grant protected-label drafting separately, if appropriate.
+13. Run a small daily-triage draft-only pilot and inspect every label/draft,
+    including an unknown message, an ordinary human reply, and a suppressed
+    newsletter or bounce (which must receive no draft).
+14. Enable the 6:00 PM `--scheduled --apply --yes` run only after explicit
+    approval. Keep all three limits in the installed command.
 
 Before real-account writes, also confirm exclusion sources, exact campaign
 text, each enabled category's drafting approval, and the pilot size. Passing offline tests

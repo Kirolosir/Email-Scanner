@@ -1,7 +1,8 @@
-"""Per-category drafting opt-in: off / template / generic.
+"""Account-wide and legacy per-category approval for unsent drafting.
 
-Drafting is off for every category until the account owner turns it on for
-that specific category, and then must choose how:
+Drafting is off until the owner creates a separate account-bound approval.
+New profiles may request one-time drafting for every safely replyable message.
+Legacy profiles can still choose per category:
 
   * ``template`` - the owner supplies wording, which passes the existing
     wording-bound, account-bound template approval gate unchanged.
@@ -20,6 +21,7 @@ The banner is a code constant, never config. A config-supplied banner could
 be set to the empty string, which is precisely the failure the banner exists
 to prevent.
 """
+import hashlib
 import json
 import os
 import re
@@ -39,13 +41,43 @@ AI_BANNER = (
 )
 
 AI_DRAFTING_APPROVAL_VERSION = 1
+GLOBAL_DRAFTING_APPROVAL_VERSION = 2
 AI_DRAFTING_ACKNOWLEDGEMENT = (
     "I approve AI-generated unsent drafts for the listed categories and "
     "understand that every draft must be reviewed before sending."
 )
+GLOBAL_DRAFTING_ACKNOWLEDGEMENT = (
+    "I approve AI-generated unsent drafts for every message with a safe "
+    "reply address, understand that automated and bulk mail is never "
+    "drafted, and understand that every draft must be reviewed before "
+    "sending."
+)
 _SLUG = re.compile(r"^[a-z][a-z0-9_]*$")
+_HEADER_LINE = re.compile(
+    r"(?im)^\s*(?:to|from|cc|bcc|subject)\s*:"
+)
+_ACCOUNT_ACTION_CLAIM = re.compile(
+    r"(?i)\b(?:i|we)(?:'ve| have)?\s+(?:already\s+)?"
+    r"(?:sent|forwarded|deleted|labelled|labeled|authorized|approved)\b"
+)
+_INTERNAL_DISCLOSURE = re.compile(
+    r"(?i)\b(?:system prompt|developer instructions?|api key|access token|"
+    r"refresh token|internal classification)\b"
+)
+_SENSITIVE_DISCLOSURE = re.compile(
+    r"(?ix)(?:"
+    r"\b(?:one[- ]time|verification|authentication|security)\s+code\b"
+    r"|\b(?:password|passcode|pin)\b"
+    r"|\b(?:account|routing|card|invoice)\s*(?:number|no\.?|\#)?\s*"
+    r"(?:is\s*)?[:#-]?\s*\d"
+    r"|\b\d{3}-\d{2}-\d{4}\b"
+    r"|\b(?:\d[ -]?){13,19}\b"
+    r"|[$€£]\s*\d"
+    r")"
+)
 
 MAX_GENERATED_REPLY_CHARS = 12_000
+SAFE_FALLBACK_ACKNOWLEDGEMENT = "Thank you for your message."
 
 UNSAFE_BULK_PHRASE_TEMPLATE = (
     "I approve unreviewed AI drafting for all {count} categories on {account}"
@@ -65,13 +97,16 @@ class AiDraftingApprovals:
     receive an AI draft.
     """
 
-    def __init__(self, account="", categories=(), allow_protected_labels=False):
+    def __init__(self, account="", categories=(), allow_protected_labels=False,
+                 draft_all_replyable_messages=False, policy_digest=""):
         self.account = (account or "").strip().lower()
         self.categories = frozenset(categories or ())
         self.allow_protected_labels = bool(allow_protected_labels)
+        self.draft_all_replyable_messages = bool(draft_all_replyable_messages)
+        self.policy_digest = str(policy_digest or "")
 
     def check(self, category, carries_protected_label=False):
-        if category not in self.categories:
+        if not self.draft_all_replyable_messages and category not in self.categories:
             return False, (
                 f"AI drafting is not approved for category {category!r}; "
                 "not drafting"
@@ -84,14 +119,81 @@ class AiDraftingApprovals:
         return True, ""
 
     def describe(self):
-        if not self.categories:
+        if self.draft_all_replyable_messages:
+            prefix = "all replyable messages"
+        elif not self.categories:
             return "none (AI-generated draft creation is blocked)"
+        else:
+            prefix = ", ".join(sorted(self.categories))
         suffix = (
             "; protected-label messages approved"
             if self.allow_protected_labels
             else "; protected-label messages blocked"
         )
-        return ", ".join(sorted(self.categories)) + suffix
+        return prefix + suffix
+
+
+def drafting_policy_digest(profile, allow_protected_labels=False):
+    """Bind global activation to every setting that can shape a draft.
+
+    The digest contains normalized configuration only, never message data or
+    secrets. A taxonomy, label, guidance, signature, fallback, evidence, or
+    protected-permission change therefore invalidates the activation.
+    """
+    taxonomy = [
+        {
+            "slug": entry["slug"],
+            "digest": entry.get("digest", ""),
+            "label": entry.get("label"),
+            "mode": (getattr(profile, "drafting_modes", {}) or {}).get(
+                entry["slug"], MODE_OFF
+            ),
+            "guidance": (getattr(profile, "drafting_guidance", {}) or {}).get(
+                entry["slug"], ""
+            ),
+        }
+        for entry in sorted(getattr(profile, "taxonomy", ()) or (),
+                            key=lambda item: item["slug"])
+    ]
+    evidence = [
+        {
+            "label": rule.get("label", ""),
+            "expected_value": rule.get("expected_value", ""),
+            "require_sender_type": sorted(rule.get("require_sender_type", ())),
+            "require_categories": sorted(rule.get("require_categories", ())),
+            "min_confidence": rule.get("min_confidence", ""),
+        }
+        for rule in sorted(getattr(profile, "evidence_rules", ()) or (),
+                           key=lambda item: (item.get("label", ""),
+                                             item.get("expected_value", "")))
+    ]
+    document = {
+        "account": (getattr(profile, "account", "") or "").strip().lower(),
+        "timezone": getattr(profile, "timezone", "") or "",
+        "draft_all_replyable_messages": bool(
+            getattr(profile, "draft_all_replyable_messages", False)
+        ),
+        "fallback_category": getattr(profile, "fallback_category", "") or "",
+        "taxonomy": taxonomy,
+        "ai_drafting": dict(sorted(
+            (getattr(profile, "ai_drafting", {}) or {}).items()
+        )),
+        "category_sender_types": dict(sorted(
+            (getattr(profile, "category_sender_types", {}) or {}).items()
+        )),
+        "system_labels": dict(sorted(
+            (getattr(profile, "system_labels", {}) or {}).items()
+        )),
+        "protected_labels": sorted(
+            getattr(profile, "protected_labels", ()) or ()
+        ),
+        "allow_protected_labels": bool(allow_protected_labels),
+        "evidence_rules": evidence,
+    }
+    payload = json.dumps(
+        document, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _parse_ai_drafting_approval(path):
@@ -104,9 +206,9 @@ def _parse_ai_drafting_approval(path):
         document = json.load(handle)
     if not isinstance(document, dict):
         raise DraftingConfigError("AI drafting approval must be an object")
-    allowed = {
-        "version", "account", "approved_categories",
-        "allow_protected_labels", "acknowledgement",
+    version = document.get("version")
+    common = {
+        "version", "account", "allow_protected_labels", "acknowledgement",
         # "_comment" only. Strictness is kept for every other unknown key so
         # a typo fails loudly instead of being silently ignored; this single
         # documented exception matches template-approval.example.json and
@@ -114,46 +216,66 @@ def _parse_ai_drafting_approval(path):
         # actually looking at.
         "_comment",
     }
+    if version == AI_DRAFTING_APPROVAL_VERSION:
+        allowed = common | {"approved_categories"}
+    elif version == GLOBAL_DRAFTING_APPROVAL_VERSION:
+        allowed = common | {
+            "draft_all_replyable_messages", "policy_digest",
+        }
+    else:
+        raise DraftingConfigError(
+            "AI drafting approval must be a supported version 1 or 2 object"
+        )
     unexpected = sorted(set(document) - allowed)
     if unexpected:
         raise DraftingConfigError(
             "unsupported AI drafting approval keys: " + ", ".join(unexpected)
-        )
-    if document.get("version") != AI_DRAFTING_APPROVAL_VERSION:
-        raise DraftingConfigError(
-            "AI drafting approval must be a version 1 object"
         )
     account = str(document.get("account", "")).strip().lower()
     if not account or "@" not in account:
         raise DraftingConfigError(
             "AI drafting approval must name the Gmail account"
         )
-    categories = document.get("approved_categories")
-    if not isinstance(categories, list) or not categories:
-        raise DraftingConfigError(
-            "AI drafting approval must list at least one approved category"
-        )
-    normalized = []
-    for category in categories:
-        if not isinstance(category, str) or not _SLUG.fullmatch(category):
-            raise DraftingConfigError(
-                f"invalid AI drafting category {category!r}"
-            )
-        if category in normalized:
-            raise DraftingConfigError(
-                f"duplicate AI drafting category {category!r}"
-            )
-        normalized.append(category)
     protected = document.get("allow_protected_labels", False)
     if not isinstance(protected, bool):
         raise DraftingConfigError(
             "allow_protected_labels must be true or false"
         )
-    if document.get("acknowledgement") != AI_DRAFTING_ACKNOWLEDGEMENT:
+    if version == AI_DRAFTING_APPROVAL_VERSION:
+        categories = document.get("approved_categories")
+        if not isinstance(categories, list) or not categories:
+            raise DraftingConfigError(
+                "AI drafting approval must list at least one approved category"
+            )
+        normalized = []
+        for category in categories:
+            if not isinstance(category, str) or not _SLUG.fullmatch(category):
+                raise DraftingConfigError(
+                    f"invalid AI drafting category {category!r}"
+                )
+            if category in normalized:
+                raise DraftingConfigError(
+                    f"duplicate AI drafting category {category!r}"
+                )
+            normalized.append(category)
+        if document.get("acknowledgement") != AI_DRAFTING_ACKNOWLEDGEMENT:
+            raise DraftingConfigError(
+                "AI drafting acknowledgement does not match the required text"
+            )
+        return account, frozenset(normalized), protected, False, ""
+
+    if document.get("draft_all_replyable_messages") is not True:
         raise DraftingConfigError(
-            "AI drafting acknowledgement does not match the required text"
+            "global drafting approval must explicitly enable all replyable messages"
         )
-    return account, frozenset(normalized), protected
+    digest = document.get("policy_digest")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise DraftingConfigError("global drafting policy digest is invalid")
+    if document.get("acknowledgement") != GLOBAL_DRAFTING_ACKNOWLEDGEMENT:
+        raise DraftingConfigError(
+            "global drafting acknowledgement does not match the required text"
+        )
+    return account, frozenset(), protected, True, digest
 
 
 def precheck_ai_drafting_approval(path):
@@ -162,11 +284,14 @@ def precheck_ai_drafting_approval(path):
         _parse_ai_drafting_approval(path)
 
 
-def load_ai_drafting_approval(path, actual_account, valid_categories):
+def load_ai_drafting_approval(path, actual_account, valid_categories,
+                              profile=None):
     """Load and bind AI-drafting permission to the authenticated mailbox."""
     if not path:
         return AiDraftingApprovals(account=actual_account)
-    account, categories, protected = _parse_ai_drafting_approval(path)
+    account, categories, protected, global_policy, digest = (
+        _parse_ai_drafting_approval(path)
+    )
     if account != (actual_account or "").strip().lower():
         raise DraftingConfigError(
             "AI drafting approval account does not match the authenticated "
@@ -178,7 +303,25 @@ def load_ai_drafting_approval(path, actual_account, valid_categories):
             "AI drafting approval names categories outside the account "
             "taxonomy: " + ", ".join(unknown)
         )
-    return AiDraftingApprovals(account, categories, protected)
+    if global_policy:
+        if profile is None:
+            raise DraftingConfigError(
+                "global drafting approval requires the loaded account profile"
+            )
+        if not getattr(profile, "draft_all_replyable_messages", False):
+            raise DraftingConfigError(
+                "global drafting approval cannot activate a disabled account policy"
+            )
+        expected = drafting_policy_digest(profile, protected)
+        if digest != expected:
+            raise DraftingConfigError(
+                "global drafting approval no longer matches the account configuration"
+            )
+    return AiDraftingApprovals(
+        account, categories, protected,
+        draft_all_replyable_messages=global_policy,
+        policy_digest=digest,
+    )
 
 
 def resolve_mode(profile, slug):
@@ -291,13 +434,24 @@ def confirm_bulk_at_runtime(account, category_count, reader=input,
     return typed.strip() == expected
 
 
-def build_generic_body(model_text):
+def build_generic_body(model_text, max_words=None):
     """Prefix model-written wording with the non-negotiable banner."""
-    clean = validate_generated_reply(model_text)
+    clean = validate_generated_reply(model_text, max_words=max_words)
     return AI_BANNER + clean + "\n"
 
 
-def validate_generated_reply(model_text):
+def build_safe_fallback_body(profile):
+    """Return a fact-free acknowledgement after two rejected model attempts."""
+    signature = str(
+        (getattr(profile, "ai_drafting", {}) or {}).get("signature", "")
+    ).strip()
+    text = SAFE_FALLBACK_ACKNOWLEDGEMENT
+    if signature:
+        text += "\n\n" + signature
+    return build_generic_body(text)
+
+
+def validate_generated_reply(model_text, max_words=None):
     """Accept plain reply-body text only; reject empty or malformed output."""
     if not isinstance(model_text, str) or not model_text.strip():
         raise DraftingConfigError("AI draft generation returned no reply text")
@@ -310,10 +464,28 @@ def validate_generated_reply(model_text):
         raise DraftingConfigError(
             "AI draft generation exceeded the maximum reply length"
         )
-    first = text.splitlines()[0].strip().casefold()
-    if first.startswith(("to:", "from:", "subject:", "cc:", "bcc:")):
+    if max_words is not None:
+        if not isinstance(max_words, int) or max_words <= 0:
+            raise DraftingConfigError("AI draft word limit is invalid")
+        if len(re.findall(r"\b\w+\b", text, re.UNICODE)) > max_words:
+            raise DraftingConfigError(
+                "AI draft generation exceeded the configured word limit"
+            )
+    if _HEADER_LINE.search(text):
         raise DraftingConfigError(
             "AI draft generation returned email headers instead of body text"
+        )
+    if _ACCOUNT_ACTION_CLAIM.search(text):
+        raise DraftingConfigError(
+            "AI draft generation claimed an account action"
+        )
+    if _INTERNAL_DISCLOSURE.search(text):
+        raise DraftingConfigError(
+            "AI draft generation attempted to expose internal or secret data"
+        )
+    if _SENSITIVE_DISCLOSURE.search(text):
+        raise DraftingConfigError(
+            "AI draft generation attempted to repeat sensitive data"
         )
     if carries_banner(text):
         raise DraftingConfigError(

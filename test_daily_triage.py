@@ -1,8 +1,11 @@
 """Offline daily-triage tests using only fake Gmail and stub classifiers."""
+import ast
 import datetime as dt
 import base64
 import json
 import os
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -96,6 +99,57 @@ def test_only_actual_recruit_gets_the_year_label():
             classifier=lambda _email, c=category, s=sender_type: _classification(c, s),
         )
         assert set(plan["decision"].add) == expected
+
+
+def _automated_plan():
+    """A plan shaped exactly as plan_message leaves suppressed automated mail."""
+    return {
+        "email": {"message_id": "m1", "label_names": []},
+        "category": "unknown",
+        "sender_type": "unknown",
+        "classification": {"valid": True},
+        "classification_error": None,
+        "decision": LabelDecision(add=[]),
+        "draft_skip": "bounce or unsafe automated return path; not drafting",
+        "suppression_code": "automated_message",
+    }
+
+
+def test_automated_mail_is_filed_without_review_for_a_per_category_account():
+    """Newsletters and bounces must not flood Needs Review on an account
+    that never enabled account-wide drafting."""
+    plan = add_daily_review_policy(_automated_plan(), CONFIG)
+
+    assert plan["needs_review"] is False
+    assert plan["review_reasons"] == []
+    assert "Needs Review" not in plan["decision"].add
+
+
+def test_automated_mail_is_surfaced_for_review_under_account_wide_drafting():
+    """With drafting approved for every replyable message, a message the run
+    refused to draft is a decision the owner should see, not file silently."""
+    profile = SimpleNamespace(draft_all_replyable_messages=True)
+    plan = add_daily_review_policy(_automated_plan(), CONFIG, profile)
+
+    assert plan["needs_review"] is True
+    assert "Needs Review" in plan["decision"].add
+    assert any("automated return path" in reason
+               for reason in plan["review_reasons"])
+
+
+def test_runtime_passes_the_real_profile_to_the_daily_review_policy():
+    """A hardcoded or omitted profile would silently pick one policy for
+    every account."""
+    tree = ast.parse(Path("daily_triage.py").read_text(encoding="utf-8"))
+    calls = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "add_daily_review_policy"
+    ]
+    assert len(calls) == 1
+    assert len(calls[0].args) == 3, "the review policy is not given a profile"
+    assert "profile" in ast.unparse(calls[0].args[2])
 
 
 def test_unknown_or_missing_template_routes_to_needs_review_without_draft():

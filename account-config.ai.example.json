@@ -2,6 +2,8 @@
   "version": 1,
   "account": "owner@example.edu",
   "timezone": "America/New_York",
+  "draft_all_replyable_messages": true,
+  "fallback_category": "other",
   "taxonomy": [
     {
       "slug": "recruit_intro",
@@ -11,7 +13,7 @@
       "label": "Recruiting/Triage/Recruit Introduction",
       "expected_sender": "recruit",
       "drafting": {
-        "mode": "generic",
+        "mode": "off",
         "guidance": "Thank the recruit for reaching out. Acknowledge only details actually present and avoid making an evaluation or recruiting promise."
       }
     },
@@ -23,7 +25,7 @@
       "label": "Recruiting/Triage/Recruit Update",
       "expected_sender": "recruit",
       "drafting": {
-        "mode": "generic",
+        "mode": "off",
         "guidance": "Acknowledge the update without promising attendance, evaluation, or follow-up by a particular date."
       }
     },
@@ -35,7 +37,7 @@
       "label": "Recruiting/Triage/Video Update",
       "expected_sender": "recruit",
       "drafting": {
-        "mode": "generic",
+        "mode": "off",
         "guidance": "Thank the sender for the film without claiming it has already been watched or evaluated."
       }
     },
@@ -47,7 +49,7 @@
       "label": "Recruiting/Triage/Parent",
       "expected_sender": "parent",
       "drafting": {
-        "mode": "generic",
+        "mode": "off",
         "guidance": "Be courteous and neutral. Do not disclose private recruiting information or make commitments about the student."
       }
     },
@@ -59,7 +61,7 @@
       "label": "Recruiting/Triage/Other Coach",
       "expected_sender": "coach",
       "drafting": {
-        "mode": "generic",
+        "mode": "off",
         "guidance": "Acknowledge the coach professionally without making recruiting or scheduling commitments."
       }
     },
@@ -71,7 +73,7 @@
       "label": "Recruiting/Triage/Camp Inquiry",
       "expected_sender": "other",
       "drafting": {
-        "mode": "generic",
+        "mode": "off",
         "guidance": "Answer only from facts contained in the email or owner guidance. If details are missing, say the owner will confirm rather than inventing them."
       }
     },
@@ -83,8 +85,8 @@
       "label": "Recruiting/Triage/Administrative",
       "expected_sender": "administrative",
       "drafting": {
-        "mode": "generic",
-        "guidance": "Draft only a neutral acknowledgement when the message is from a human. Automated and bulk messages are suppressed before drafting."
+        "mode": "off",
+        "guidance": "Draft a neutral acknowledgement for a human-sent administrative message. Automated and bulk mail never reaches drafting: mailing-list, bulk-precedence, auto-submitted, no-reply, and bounce messages are suppressed before classification, in every drafting mode."
       }
     },
     {
@@ -95,7 +97,7 @@
       "label": "Recruiting/Triage/Other",
       "expected_sender": "other",
       "drafting": {
-        "mode": "generic",
+        "mode": "off",
         "guidance": "Write a brief acknowledgement without inventing an answer. The owner will edit or discard it."
       }
     }

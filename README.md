@@ -22,21 +22,25 @@ the rollback command moves only those drafts to Trash.
 `triage.py` and `daily_triage.py` handle regular inbox mail. The first run can
 look back about two months. Later runs use a three-day overlap and a local
 journal so delayed mail is still found without creating another draft for a
-message that was already handled.
+message that was already handled. Scheduled runs require explicit scan, write,
+and draft caps and can produce a private, content-free review report.
 
-Triage assigns human messages to categories configured for that account, then
-adds the matching Gmail labels. Existing labels are left alone. Mailing lists,
-bounces, automatic replies, unsafe reply addresses, and malformed messages are
-filtered before classification when the headers make that possible. Messages
-with uncertain or conflicting results go to the Needs Review label.
+Triage assigns messages to categories configured for that account, then adds
+the matching Gmail labels. Existing labels are left alone. A one-time,
+account-bound activation can enable an unsent AI draft for every message with a
+safe, unambiguous reply address. Automated and bulk mail is never drafted, in
+any mode: mailing-list, bulk-precedence, auto-submitted, no-reply, and bounce
+messages are suppressed before classification, and account-wide drafting does
+not change that. Self-replies, missing or ambiguous addresses, and malformed
+reply metadata never get a draft either. Uncertain messages receive the
+configured Other and Needs Review labels plus a neutral acknowledgement draft.
 
-Drafting is configured one category at a time. A category may use an approved
-fixed template, allow a new reply to be generated from the current message, or
-create no draft. Fixed templates are approved by content hash, so changing the
-text cancels the old approval. Generated replies require a separate approval
-for the Gmail account and category. They also include a warning for the account
-owner to review the wording. If an approval file is missing or does not match,
-the tool stops before generating a reply.
+The activation is off by default and tied to a digest of the account settings.
+The account owner must type the full confirmation; `--yes` cannot create it.
+Every generated draft carries a fixed warning and remains in Gmail for the
+owner to review, edit, send manually, or discard. Failed or rejected generation
+is retried once, then replaced with a fact-free acknowledgement. Older
+category-specific and fixed-template approvals remain supported for migration.
 
 Recruiting-year labels have their own check. A classification alone cannot add
 one. The sender must be a recruit, the category must be relevant, confidence

@@ -50,6 +50,8 @@ APPROVAL_BINDINGS = {
             "to a hardcoded mailbox"),
         2: ("runtime taxonomy", "a literal would approve categories outside "
             "the account configuration"),
+        3: ("runtime account profile", "a literal or omitted profile would "
+            "leave a global approval unbound from its configuration digest"),
     },
 }
 
@@ -75,11 +77,13 @@ PARAMETER_NAMES = {
         0: "approval_path", 2: "actual_account",
     },
     "load_ai_drafting_approval": {
-        0: "path", 1: "actual_account", 2: "valid_categories",
+        0: "path", 1: "actual_account", 2: "valid_categories", 3: "profile",
     },
 }
 
-PRODUCTION_FILES = ["campaign.py", "triage.py", "daily_triage.py"]
+PRODUCTION_FILES = [
+    "campaign.py", "triage.py", "daily_triage.py", "readiness.py",
+]
 
 # Arguments that must never acquire a default value at the definition site.
 # A default of "" or None would let a caller omit the binding silently.
@@ -117,8 +121,16 @@ def _calls_to(tree, name, aliases=None):
     return [
         node for node in ast.walk(tree)
         if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and aliases.get(node.func.id, node.func.id) == name
+        and (
+            (
+                isinstance(node.func, ast.Name)
+                and aliases.get(node.func.id, node.func.id) == name
+            )
+            or (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == name
+            )
+        )
     ]
 
 
@@ -256,4 +268,7 @@ def test_every_production_file_binding_is_actually_inspected():
     )
     assert "load_ai_drafting_approval" in seen.get("daily_triage.py", set()), (
         "daily_triage.py's AI drafting binding is not being inspected"
+    )
+    assert "load_ai_drafting_approval" in seen.get("readiness.py", set()), (
+        "readiness.py's AI drafting binding is not being inspected"
     )

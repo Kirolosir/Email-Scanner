@@ -49,6 +49,7 @@ from drafting import resolve_mode as _resolve_drafting_mode
 from drafting import (
     AiDraftingApprovals as _AiDraftingApprovals,
     build_generic_body as _build_generic_body,
+    build_safe_fallback_body as _build_safe_fallback_body,
     load_ai_drafting_approval as _load_ai_drafting_approval,
     precheck_ai_drafting_approval as _precheck_ai_drafting_approval,
 )
@@ -470,6 +471,8 @@ def _drafting_block(category, profile):
     unrecognized mode resolves to off rather than to anything that drafts.
     """
     profile = profile if profile is not None else _PROFILE
+    if getattr(profile, "draft_all_replyable_messages", False):
+        return None
     mode = _resolve_drafting_mode(profile, category)
     if mode is None:
         # Profile does not use per-category drafting control.
@@ -480,6 +483,33 @@ def _drafting_block(category, profile):
             "labeling only, not drafting"
         )
     return None
+
+
+def _generate_global_reply(email, classification, profile, draft_generator):
+    """Try at most two generated bodies, then return the fact-free fallback."""
+    last_error = None
+    max_words = int(
+        (getattr(profile, "ai_drafting", {}) or {}).get("max_words", 180)
+    )
+    for attempt in range(2):
+        try:
+            generated = (
+                draft_generator(email, classification, profile)
+                if draft_generator is not None
+                else generate_reply(
+                    email, classification, profile=profile, max_retries=1
+                )
+            )
+            return (
+                _build_generic_body(generated, max_words=max_words),
+                attempt + 1, None, False,
+            )
+        except Exception as exc:
+            last_error = type(exc).__name__
+    try:
+        return _build_safe_fallback_body(profile), 2, last_error, True
+    except Exception as exc:
+        return None, 2, type(exc).__name__, False
 
 
 def _taxonomy_block(category, confirmation, profile):
@@ -527,6 +557,12 @@ def plan_message(email, templates, year_labels, category_labels, no_label,
     template body (or None), and a reason when no draft is possible.
     """
     effective_profile = profile if profile is not None else _PROFILE
+    # This is account-owner policy loaded from the reviewed profile, never a
+    # classifier/model decision.  Keep the real runtime value visibly wired to
+    # every global-drafting branch so omission fails closed.
+    global_drafting = bool(
+        getattr(effective_profile, "draft_all_replyable_messages", False)
+    )
     classification_error = None
     delivery = email.get("delivery_safety") or assess_delivery_headers(
         {"from": email.get("from", ""), "reply-to": email.get("reply_to", "")},
@@ -664,6 +700,13 @@ def plan_message(email, templates, year_labels, category_labels, no_label,
             classification, category="unknown", grad_year="unknown",
             sender_type="unknown",
         )
+        fallback_category = getattr(
+            _effective_profile, "fallback_category", ""
+        )
+        if global_drafting and fallback_category:
+            label_classification = dict(
+                label_classification, category=fallback_category
+            )
     matching_rule = next(
         (
             rule for rule in (_effective_profile.evidence_rules or ())
@@ -725,33 +768,38 @@ def plan_message(email, templates, year_labels, category_labels, no_label,
     template = template_key = None
     draft_source = None
     draft_generation_called = False
+    draft_generation_attempts = 0
     draft_generation_error = None
+    draft_fallback_used = False
     draft_skip = None
-    if classification_error:
-        draft_skip = "classification failed; not drafting"
-    elif suppression_code == "automated_message":
-        draft_skip = "automated/bulk message suppressed; not drafting"
+    if suppression_code == "automated_message":
+        draft_skip = "bounce or unsafe automated return path; not drafting"
     elif suppression_code == "unsafe_reply_metadata":
         draft_skip = "unsafe or ambiguous reply metadata; not drafting"
-    elif suppression_code == "empty_cleaned_body":
+    elif suppression_code == "empty_cleaned_body" and not global_drafting:
         draft_skip = "no meaningful current-message text; not drafting"
-    elif not classification_valid:
-        draft_skip = "classification was invalid or ambiguous; not drafting"
-    elif confidence != "high":
-        draft_skip = "classification confidence is not high; not drafting"
-    elif year_evidence_conflict:
-        draft_skip = "graduation-year evidence requires manual review; not drafting"
-    elif not email.get("reply_address") or not email.get("thread_id"):
-        draft_skip = "malformed message missing sender or thread id; not drafting"
-    elif decision.conflicts:
-        draft_skip = "label classification conflict requires manual review; not drafting"
-    elif _taxonomy_block(category, taxonomy_confirmation, profile):
-        draft_skip = _taxonomy_block(category, taxonomy_confirmation, profile)
-    elif _drafting_block(category, profile):
-        draft_skip = _drafting_block(category, profile)
-    else:
-        mode = _resolve_drafting_mode(_effective_profile, category)
-        if mode == _DRAFTING.MODE_GENERIC:
+    elif (not email.get("reply_address") or not email.get("thread_id")
+          or not email.get("rfc_message_id")):
+        draft_skip = "malformed message missing safe reply metadata; not drafting"
+    elif global_drafting:
+        needs_generic_fallback = bool(
+            classification_error
+            or not classification_valid
+            or confidence != "high"
+            or year_evidence_conflict
+            or decision.conflicts
+            or suppression_code == "empty_cleaned_body"
+        )
+        draft_category = (
+            getattr(_effective_profile, "fallback_category", "")
+            if needs_generic_fallback else category
+        )
+        taxonomy_block = _taxonomy_block(
+            draft_category, taxonomy_confirmation, profile
+        )
+        if taxonomy_block:
+            draft_skip = taxonomy_block
+        else:
             approvals = (
                 ai_drafting_approvals
                 if ai_drafting_approvals is not None
@@ -763,36 +811,123 @@ def plan_message(email, templates, year_labels, category_labels, no_label,
                 ) & set(_effective_profile.protected_labels)
             )
             approved, reason = approvals.check(
-                category, carries_protected_label=protected
+                draft_category, carries_protected_label=protected
             )
             if not approved:
                 draft_skip = reason
             else:
-                try:
-                    draft_generation_called = True
-                    generated = (
-                        draft_generator(email, classification, _effective_profile)
-                        if draft_generator is not None
-                        else generate_reply(
-                            email, classification, profile=_effective_profile
-                        )
+                generation_classification = dict(
+                    classification,
+                    category=draft_category,
+                    grad_year=(
+                        "unknown" if needs_generic_fallback else grad_year
+                    ),
+                )
+                draft_generation_called = True
+                template, draft_generation_attempts, draft_generation_error, \
+                    draft_fallback_used = _generate_global_reply(
+                        email, generation_classification, _effective_profile,
+                        draft_generator,
                     )
-                    template = _build_generic_body(generated)
-                    template_key = f"ai:{category}"
-                    draft_source = "ai"
-                except Exception as exc:
-                    draft_generation_error = type(exc).__name__
+                if template is None:
                     draft_skip = (
-                        "AI draft generation failed safely; not drafting"
+                        "AI draft generation and safe fallback failed; "
+                        "not drafting"
                     )
+                else:
+                    template_key = (
+                        f"fallback:{draft_category}"
+                        if draft_fallback_used else f"ai:{draft_category}"
+                    )
+                    draft_source = "fallback" if draft_fallback_used else "ai"
+    else:
+        if classification_error:
+            draft_skip = "classification failed; not drafting"
+        elif not classification_valid:
+            draft_skip = "classification was invalid or ambiguous; not drafting"
+        elif confidence != "high":
+            draft_skip = "classification confidence is not high; not drafting"
+        elif year_evidence_conflict:
+            draft_skip = "graduation-year evidence requires manual review; not drafting"
+        elif decision.conflicts:
+            draft_skip = "label classification conflict requires manual review; not drafting"
+        elif _taxonomy_block(category, taxonomy_confirmation, profile):
+            draft_skip = _taxonomy_block(category, taxonomy_confirmation, profile)
+        elif _drafting_block(category, profile):
+            draft_skip = _drafting_block(category, profile)
         else:
-            template, template_key, draft_skip = resolve_template(
-                templates, category, grad_year, templates_dir,
-                approvals=template_approvals,
-                valid_categories=_effective_profile.valid_categories,
-            )
-            if template is not None:
-                draft_source = "template"
+            mode = _resolve_drafting_mode(_effective_profile, category)
+            if mode == _DRAFTING.MODE_GENERIC:
+                approvals = (
+                    ai_drafting_approvals
+                    if ai_drafting_approvals is not None
+                    else _AiDraftingApprovals()
+                )
+                protected = bool(
+                    (
+                        set(email.get("label_names", ())) | set(decision.add)
+                    ) & set(_effective_profile.protected_labels)
+                )
+                approved, reason = approvals.check(
+                    category, carries_protected_label=protected
+                )
+                if not approved:
+                    draft_skip = reason
+                else:
+                    try:
+                        draft_generation_called = True
+                        draft_generation_attempts = 1
+                        generated = (
+                            draft_generator(email, classification, _effective_profile)
+                            if draft_generator is not None
+                            else generate_reply(
+                                email, classification, profile=_effective_profile
+                            )
+                        )
+                        template = _build_generic_body(
+                            generated,
+                            max_words=int(
+                                (_effective_profile.ai_drafting or {}).get(
+                                    "max_words", 180
+                                )
+                            ),
+                        )
+                        template_key = f"ai:{category}"
+                        draft_source = "ai"
+                    except Exception as exc:
+                        draft_generation_error = type(exc).__name__
+                        draft_skip = (
+                            "AI draft generation failed safely; not drafting"
+                        )
+            else:
+                template, template_key, draft_skip = resolve_template(
+                    templates, category, grad_year, templates_dir,
+                    approvals=template_approvals,
+                    valid_categories=_effective_profile.valid_categories,
+                )
+                if template is not None:
+                    draft_source = "template"
+
+    # Account-wide mode keeps technically unsafe, uncertain, or fallback
+    # cases visible to the owner even though it never invents a reply target.
+    # This is part of the shared planner so on-demand and scheduled paths use
+    # the same policy.
+    if global_drafting and not no_label:
+        requires_review = bool(
+            draft_skip
+            or draft_fallback_used
+            or not classification_actionable
+            or year_evidence_conflict
+            or decision.conflicts
+        )
+        review_label = _effective_profile.system_labels.get("needs_review", "")
+        if (
+            requires_review
+            and review_label
+            and review_label not in email.get("label_names", ())
+            and review_label not in decision.add
+        ):
+            decision.add.append(review_label)
 
     return {
         "email": email,
@@ -807,7 +942,9 @@ def plan_message(email, templates, year_labels, category_labels, no_label,
         "draft_source": draft_source,
         "draft_skip": draft_skip,
         "draft_generation_called": draft_generation_called,
+        "draft_generation_attempts": draft_generation_attempts,
         "draft_generation_error": draft_generation_error,
+        "draft_fallback_used": draft_fallback_used,
         "classification_error": classification_error,
         "classification_called": classification_called,
         "suppression_code": suppression_code,
@@ -968,7 +1105,7 @@ def parse_args(argv=None):
                         "JSON mapping of years/categories to existing label names"))
     parser.add_argument("--account-config", metavar="FILE", help=(
                         "Per-account config selecting the taxonomy, labels, "
-                        "and per-category drafting modes for this inbox"))
+                        "and drafting policy for this inbox"))
     parser.add_argument("--taxonomy-confirmation", metavar="FILE", help=(
                         "Private artifact recording which discovered "
                         "categories the account owner has reviewed"))
@@ -979,8 +1116,8 @@ def parse_args(argv=None):
                         "Comma-separated template keys approved for this "
                         "supervised run (per-category; does NOT pin wording)"))
     parser.add_argument("--ai-drafting-approval", metavar="FILE", help=(
-                        "Private account/category approval for AI-generated "
-                        "unsent drafts; does not bind exact wording"))
+                        "Private account-wide or legacy category approval for "
+                        "AI-generated unsent drafts"))
     parser.add_argument("--limit", type=int, metavar="N",
                         help="Process at most N messages")
     parser.add_argument(
@@ -1065,7 +1202,8 @@ def main(argv=None):
             args.taxonomy_confirmation, own_address
         )
         ai_drafting_approvals = _load_ai_drafting_approval(
-            args.ai_drafting_approval, own_address, profile.categories
+            args.ai_drafting_approval, own_address, profile.categories,
+            profile=profile,
         )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"Account/taxonomy binding error: {exc}")

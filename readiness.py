@@ -144,6 +144,23 @@ def check_drafting_approvals(profile, ai_approval_path, bound_account):
     def run():
         if profile is None:
             return False, "no profile loaded"
+        if getattr(profile, "draft_all_replyable_messages", False):
+            approvals = drafting.load_ai_drafting_approval(
+                ai_approval_path, bound_account, profile.valid_categories,
+                profile=profile,
+            )
+            if not approvals.draft_all_replyable_messages:
+                return False, (
+                    "account requests all-replyable drafting but the global "
+                    "activation is missing"
+                )
+            detail = "global drafting activated for all replyable messages"
+            detail += (
+                "; protected-label messages approved"
+                if approvals.allow_protected_labels
+                else "; protected-label messages blocked"
+            )
+            return True, detail
         generic = sorted(
             slug for slug, mode in (profile.drafting_modes or {}).items()
             if mode == drafting.MODE_GENERIC
@@ -151,7 +168,8 @@ def check_drafting_approvals(profile, ai_approval_path, bound_account):
         if not generic:
             return True, "no category uses generated wording"
         approvals = drafting.load_ai_drafting_approval(
-            ai_approval_path, bound_account, profile.valid_categories
+            ai_approval_path, bound_account, profile.valid_categories,
+            profile=profile,
         )
         protected_categories = protected_drafting_categories(profile)
         missing = []

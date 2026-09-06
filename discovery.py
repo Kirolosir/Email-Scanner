@@ -115,6 +115,9 @@ def sample_inbox(service, query, throttle, max_messages=DEFAULT_SAMPLE,
         samples.append({
             "id": opaque_id(stub["id"]),
             "subject": redact_subject(get_header(message, "Subject")),
+            # Discovery keeps the coarse historic tag for taxonomy quality.
+            # It is metadata only: triage no longer treats this tag as a
+            # universal drafting suppression rule.
             "automated": delivery["status"] == "automated",
         })
     return samples

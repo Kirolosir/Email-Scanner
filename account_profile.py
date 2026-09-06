@@ -24,8 +24,9 @@ DECISION RECORD:
   * Generic drafting never requires exact template wording. It is separately
     approved by account and category, and protected-label messages require an
     explicit acknowledgement in that approval artifact.
-  * The separate AI-drafting approval is the durable acknowledgement for
-    generic categories. It is account/category-bound and works unattended.
+  * The separate AI-drafting approval is the durable acknowledgement. New
+    profiles can bind one account-wide activation to the full configuration;
+    legacy category-bound approvals remain readable during migration.
 """
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -90,8 +91,8 @@ class AccountProfile:
     # confirm. A migrated config always carries a taxonomy with confirmation
     # absent, so migration does not inherit approval from history.
     taxonomy: tuple = ()
-    # slug -> "off" | "template" | "generic". Empty means the profile does
-    # not use per-category drafting control; the loader always populates it.
+    # Legacy slug -> "off" | "template" | "generic" controls. Account-wide
+    # drafting supersedes these after its separate activation validates.
     drafting_modes: MappingProxyType = field(
         default_factory=lambda: MappingProxyType({})
     )
@@ -101,6 +102,10 @@ class AccountProfile:
     ai_drafting: MappingProxyType = field(
         default_factory=lambda: MappingProxyType({})
     )
+    # One-time account policy. The config expresses intent only; a separate
+    # account/config-digest-bound approval artifact activates it.
+    draft_all_replyable_messages: bool = False
+    fallback_category: str = ""
     unreviewed_bulk_acknowledgement: object = None
 
     # Private per-account paths
@@ -263,7 +268,8 @@ def _load_account_config(path):
     allowed = {
         "version", "account", "timezone", "taxonomy", "protected_labels",
         "evidence_gated_labels", "system_labels", "ai_drafting", "paths",
-        "unreviewed_bulk_acknowledgement",
+        "unreviewed_bulk_acknowledgement", "draft_all_replyable_messages",
+        "fallback_category",
         # "_comment" only, matching template-approval and ai-drafting-approval.
         # A prepared-but-unactivated config needs to explain itself in the file
         # someone will actually open. Every other unknown key stays rejected so
@@ -330,6 +336,26 @@ def _load_account_config(path):
             ),
         })
     _require(entries, "account config taxonomy must not be empty")
+
+    draft_all_replyable = document.get("draft_all_replyable_messages", False)
+    _require(isinstance(draft_all_replyable, bool),
+             "draft_all_replyable_messages must be true or false")
+    fallback_category = str(document.get("fallback_category", "")).strip()
+    if fallback_category:
+        fallback_category = taxonomy_module.sanitize_slug(fallback_category)
+        _require(fallback_category in slugs,
+                 "fallback_category must name a category in the taxonomy")
+        _require(fallback_category in labels,
+                 "fallback_category must have a configured Gmail label")
+    if draft_all_replyable:
+        _require(fallback_category,
+                 "draft_all_replyable_messages requires fallback_category")
+        missing_labels = sorted(slugs - set(labels))
+        _require(
+            not missing_labels,
+            "draft_all_replyable_messages requires a configured Gmail label "
+            "for every category: " + ", ".join(missing_labels),
+        )
 
     protected = document.get("protected_labels") or []
     _require(isinstance(protected, list),
@@ -411,6 +437,12 @@ def _load_account_config(path):
     if system_labels:
         _require(set(system_labels) == SYSTEM_LABEL_KEYS,
                  "system_labels must define needs_review and processed")
+    if draft_all_replyable:
+        _require(
+            set(system_labels) == SYSTEM_LABEL_KEYS,
+            "draft_all_replyable_messages requires needs_review and processed "
+            "system labels",
+        )
 
     raw_ai = document.get("ai_drafting") or {}
     _require(isinstance(raw_ai, dict), "ai_drafting must be an object")
@@ -445,8 +477,8 @@ def _load_account_config(path):
     acknowledgement = document.get("unreviewed_bulk_acknowledgement")
     # Backward compatibility for configs created before the dedicated
     # AI-drafting approval existed. New configs do not need this duplicate
-    # acknowledgement; runtime drafting still fails closed without the new
-    # account/category-bound artifact.
+    # acknowledgement; runtime drafting still fails closed without a separate
+    # account-bound activation artifact.
     if acknowledgement is not None:
         drafting_module.validate_bulk_acknowledgement(
             acknowledgement, account, len(modes)
@@ -475,6 +507,8 @@ def _load_account_config(path):
         drafting_modes=MappingProxyType(modes),
         drafting_guidance=MappingProxyType(guidance),
         ai_drafting=MappingProxyType(ai_drafting),
+        draft_all_replyable_messages=draft_all_replyable,
+        fallback_category=fallback_category,
         unreviewed_bulk_acknowledgement=acknowledgement,
         state_dir=str(paths.get("state_dir", "triage-state")),
         draft_log_dir=str(paths.get("draft_log_dir", "draft-logs")),
