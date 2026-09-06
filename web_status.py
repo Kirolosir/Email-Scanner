@@ -38,8 +38,10 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import html
 import json
+import re
 import sys
 from pathlib import Path
 from wsgiref.simple_server import make_server
@@ -73,6 +75,44 @@ MAX_REPORTS = 25
 # still shown - stale information beats a blank panel when you are debugging -
 # but it is labelled, so nobody reads a week-old PASS as today's state.
 READINESS_STALE_AFTER_HOURS = 24
+
+MAX_DRAFTS = 100
+
+# The complete set of fields that may ever be rendered for a draft. This is
+# the whole of G5: a source document may carry anything at all - a subject, a
+# body, a generated reply, a sender - and none of it can reach the page,
+# because _draft_rows copies nothing that is not named here.
+DRAFT_STATE_FIELDS = ("status", "thread_id", "draft_id")
+DRAFT_REPORT_FIELDS = (
+    "category", "confidence", "drafting_mode", "reason_codes",
+    "draft_created", "draft_planned",
+)
+
+# Gmail ids are opaque and alphanumeric. Anything else is not put in a URL,
+# even though the source is a local private file: a value that cannot be
+# validated is a value that does not become a link.
+GMAIL_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+# review_report.opaque_id truncates a sha256 hex digest. Reproduced here with
+# hashlib rather than imported, so this module keeps zero project imports.
+OPAQUE_ID_LENGTH = 16
+
+
+def _opaque_id(value, length=OPAQUE_ID_LENGTH):
+    return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()[:length]
+
+
+def _gmail_url(account_index, thread_id=None):
+    """A link to one thread, or to the Drafts folder when the id is unusable.
+
+    The thread-id fragment is the usual Gmail shape but is not guaranteed to
+    match the API threadId in every case, so the Drafts fallback exists and
+    the raw id is always shown alongside for a manual search.
+    """
+    base = f"https://mail.google.com/mail/u/{int(account_index)}/"
+    if thread_id and GMAIL_ID.match(str(thread_id)):
+        return f"{base}#all/{thread_id}", True
+    return f"{base}#drafts", False
 
 
 def _read_json(path):
@@ -117,13 +157,18 @@ class StatusSource:
     input, so there is no traversal surface to defend.
     """
 
-    def __init__(self, status_path, review_dir, readiness_path=None):
+    def __init__(self, status_path, review_dir, readiness_path=None,
+                 state_path=None, gmail_account_index=0):
         self.status_path = Path(status_path).expanduser().resolve()
         self.review_dir = Path(review_dir).expanduser().resolve()
         self.readiness_path = (
             Path(readiness_path).expanduser().resolve()
             if readiness_path else None
         )
+        self.state_path = (
+            Path(state_path).expanduser().resolve() if state_path else None
+        )
+        self.gmail_account_index = int(gmail_account_index)
 
     def status(self):
         return _read_json(self.status_path)
@@ -132,6 +177,17 @@ class StatusSource:
         if self.readiness_path is None:
             return None
         return _read_json(self.readiness_path)
+
+    def drafts(self):
+        """Draft journal entries, joined to the newest report for context."""
+        if self.state_path is None:
+            return None
+        state = _read_json(self.state_path)
+        if state is None:
+            return []
+        newest = self.reports()
+        report = newest[0][1] if newest else None
+        return _draft_rows(state, report)
 
     def reports(self):
         """Most recent review reports, newest first."""
@@ -273,6 +329,93 @@ def _render_readiness(document):
     """
 
 
+def _draft_rows(state_document, report_document, limit=MAX_DRAFTS):
+    """Project state and report documents into a fixed, content-free shape.
+
+    Only DRAFT_STATE_FIELDS and DRAFT_REPORT_FIELDS are copied, and the
+    message id is hashed the way the review report already hashes it, so the
+    raw id is used for joining and linking but never displayed.
+    """
+    messages = (state_document or {}).get("messages")
+    messages = messages if isinstance(messages, dict) else {}
+
+    by_opaque = {}
+    items = (report_document or {}).get("messages")
+    if isinstance(items, list):
+        for item in items:
+            if isinstance(item, dict):
+                key = item.get("opaque_message_id")
+                if isinstance(key, str):
+                    by_opaque[key] = item
+
+    rows = []
+    for raw_id, record in list(messages.items())[:limit]:
+        if not isinstance(raw_id, str) or not isinstance(record, dict):
+            continue
+        row = {"opaque_id": _opaque_id(raw_id)}
+        for field in DRAFT_STATE_FIELDS:
+            value = record.get(field)
+            row[field] = value if isinstance(value, str) else ""
+        context = by_opaque.get(row["opaque_id"], {})
+        for field in DRAFT_REPORT_FIELDS:
+            row[field] = context.get(field)
+        labels = context.get("labels")
+        names = labels.get("names") if isinstance(labels, dict) else None
+        row["labels"] = [n for n in names if isinstance(n, str)] if isinstance(names, list) else []
+        row["matched"] = bool(context)
+        rows.append(row)
+    return rows
+
+
+def _render_drafts(rows, account_index):
+    if not rows:
+        return (
+            '<p class="empty">No drafts recorded yet. They appear here once a '
+            'run creates one and writes its journal entry.</p>'
+        )
+    blocks = []
+    for row in rows:
+        url, exact = _gmail_url(account_index, row.get("thread_id"))
+        pending = row.get("status") == "draft_created"
+        codes = row.get("reason_codes")
+        codes = [c for c in codes if isinstance(c, str)] if isinstance(codes, list) else []
+        codes_html = "".join(
+            f'<span class="code neutral">{html.escape(c)}</span>' for c in codes
+        )
+        labels_html = "".join(
+            f'<span class="lab">{html.escape(n)}</span>' for n in row.get("labels", [])
+        )
+        mode = row.get("drafting_mode")
+        mode_html = (
+            f'<span class="meta">via <b>{_text(mode)}</b></span>' if mode else ""
+        )
+        context_html = (
+            f'<span class="meta">category <b>{_text(row.get("category"), "-")}</b></span>'
+            f'<span class="meta">confidence <b>{_text(row.get("confidence"), "-")}</b></span>'
+            f'{mode_html}'
+            if row.get("matched")
+            else '<span class="meta">no report context for this draft</span>'
+        )
+        link_note = "" if exact else ' <span class="meta">(folder \u2014 id below)</span>'
+        blocks.append(f"""
+          <article class="draft">
+            <header>
+              <span class="pill {"warn" if pending else "ok"}">{_text(row.get("status"), "unknown")}</span>
+              {context_html}
+              <a class="glink" href="{html.escape(url)}" target="_blank" rel="noopener noreferrer">open in Gmail</a>{link_note}
+            </header>
+            <div class="ids">
+              <span>message <code>{html.escape(row["opaque_id"])}</code></span>
+              <span>thread <code>{html.escape(str(row.get("thread_id") or "-"))}</code></span>
+              <span>draft <code>{html.escape(str(row.get("draft_id") or "-"))}</code></span>
+            </div>
+            {f'<div class="codes">{codes_html}</div>' if codes_html else ""}
+            {f'<div class="labs">{labels_html}</div>' if labels_html else ""}
+          </article>
+        """)
+    return "".join(blocks)
+
+
 def _render_reports(reports):
     if not reports:
         return (
@@ -349,6 +492,20 @@ PAGE = """<!doctype html>
   .codes {{ display:flex; flex-wrap:wrap; gap:6px; margin-top:13px; }}
   .code {{ font:11.5px ui-monospace,SFMono-Regular,Menlo,monospace;
     color:var(--bad); background:var(--bad-bg); padding:3px 8px; border-radius:2px; }}
+  .draft {{ background:var(--surface); border:1px solid var(--rule);
+    padding:14px 18px; margin-bottom:10px; }}
+  .draft header {{ display:flex; flex-wrap:wrap; gap:8px 16px; align-items:center; }}
+  .glink {{ font:600 12.5px ui-monospace,SFMono-Regular,Menlo,monospace;
+    color:var(--accent); text-underline-offset:3px; }}
+  .glink:focus-visible {{ outline:2px solid var(--accent); outline-offset:2px; }}
+  .ids {{ display:flex; flex-wrap:wrap; gap:6px 18px; margin-top:10px;
+    font-size:12px; color:var(--faint); }}
+  .ids code {{ color:var(--soft); }}
+  .code.neutral {{ color:var(--soft); background:var(--ground); }}
+  .labs {{ display:flex; flex-wrap:wrap; gap:6px; margin-top:9px; }}
+  .lab {{ font:11.5px ui-monospace,SFMono-Regular,Menlo,monospace;
+    color:var(--accent); background:var(--ground); border:1px solid var(--rule);
+    padding:2px 7px; border-radius:2px; }}
   .checks {{ display:flex; flex-direction:column; gap:1px; background:var(--rule);
     border:1px solid var(--rule); margin-top:16px; }}
   .chk {{ background:var(--surface); padding:8px 12px; display:flex;
@@ -372,9 +529,11 @@ PAGE = """<!doctype html>
   <div class="panel">{readiness}</div>
   <h2>Last run</h2>
   <div class="panel">{status}</div>
+  <h2>Drafts</h2>
+  {drafts}
   <h2>Review reports</h2>
   {reports}
-  <footer>Serving {status_path}<br>Reports from {review_dir}<br>Readiness snapshot: {readiness_path}</footer>
+  <footer>Serving {status_path}<br>Reports from {review_dir}<br>Readiness snapshot: {readiness_path}<br>Run journal: {state_path} &middot; message content is never shown here</footer>
 </div></body></html>
 """
 
@@ -412,16 +571,32 @@ class StatusApp:
         name = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
         return name.strip().lower() in ALLOWED_HOSTS
 
+    def _drafts_html(self):
+        rows = self.source.drafts()
+        if rows is None:
+            return (
+                '<p class="empty">Draft review is off. Point '
+                '<code>--state-path</code> at the run journal to list drafts '
+                'and link to them in Gmail. Message content is never shown '
+                'here or stored locally; it stays in Gmail.</p>'
+            )
+        return _render_drafts(rows, self.source.gmail_account_index)
+
     def _page(self, start_response):
         body = PAGE.format(
             host=html.escape(f"{BIND_HOST}"),
             status=_render_status(self.source.status()),
             readiness=_render_readiness(self.source.readiness()),
+            drafts=self._drafts_html(),
             reports=_render_reports(self.source.reports()),
             status_path=html.escape(str(self.source.status_path)),
             review_dir=html.escape(str(self.source.review_dir)),
             readiness_path=html.escape(
                 str(self.source.readiness_path) if self.source.readiness_path
+                else "(not configured)"
+            ),
+            state_path=html.escape(
+                str(self.source.state_path) if self.source.state_path
                 else "(not configured)"
             ),
         ).encode("utf-8")
@@ -463,6 +638,15 @@ def parse_args(argv=None):
         help="Directory holding PII-minimized review reports",
     )
     parser.add_argument(
+        "--state-path",
+        help=("Run journal (daily-state.json). Enables the draft list, which "
+              "shows decisions and links to Gmail, never message content."),
+    )
+    parser.add_argument(
+        "--gmail-account-index", type=int, default=0,
+        help="Google account index for Gmail links (the u/N in the URL)",
+    )
+    parser.add_argument(
         "--readiness-path",
         help=("JSON snapshot written by check_readiness.py --json-output. "
               "Displayed, never produced here."),
@@ -475,12 +659,15 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     if not 1 <= args.port <= 65535:
         parser.error("--port must be between 1 and 65535")
+    if not 0 <= args.gmail_account_index <= 99:
+        parser.error("--gmail-account-index must be between 0 and 99")
     return args
 
 
 def build_app(args):
     return StatusApp(StatusSource(
         args.status_path, args.review_dir, args.readiness_path,
+        args.state_path, args.gmail_account_index,
     ))
 
 

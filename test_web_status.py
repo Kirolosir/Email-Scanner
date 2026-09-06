@@ -443,3 +443,230 @@ def test_unparseable_timestamp_degrades_to_age_unknown(tmp_path):
     _capture, body = _request(_app_with_readiness(
         tmp_path, _snapshot(created_at="not-a-date")))
     assert b"age unknown" in body
+
+
+# ---------------------------------------------------------------------
+# G5: the page renders no message content.
+#
+# Draft text lives only in Gmail; nothing in this system stores it locally.
+# The page shows why a draft exists and links out. This guard is what stops
+# that drifting into rendering content: _draft_rows copies only the named
+# fields, so a source document may carry anything at all and none of it
+# reaches the output.
+# ---------------------------------------------------------------------
+
+CONTENT_MARKERS = (
+    "PRIVATE SUBJECT MARKER",
+    "PRIVATE BODY MARKER",
+    "person@example.test",
+    "PRIVATE DRAFT TEXT",
+    "PRIVATE SNIPPET",
+)
+
+
+def _contaminated_state():
+    """A journal whose records carry every content field we must never show."""
+    return {
+        "version": 1,
+        "messages": {
+            "raw-message-id-1": {
+                "status": "draft_created",
+                "thread_id": "thread-abc123",
+                "draft_id": "draft-xyz789",
+                "subject": CONTENT_MARKERS[0],
+                "body": CONTENT_MARKERS[1],
+                "from": CONTENT_MARKERS[2],
+                "generated_reply": CONTENT_MARKERS[3],
+                "snippet": CONTENT_MARKERS[4],
+            },
+        },
+    }
+
+
+def _contaminated_report():
+    return {
+        "version": 1, "run_mode": "daily", "applied": True,
+        "outcome": "success", "created_at": "2026-09-06T10:00:00+00:00",
+        "counts": {"scanned": 1},
+        "messages": [{
+            "opaque_message_id": web_status._opaque_id("raw-message-id-1"),
+            "category": "recruit_intro", "confidence": "high",
+            "drafting_mode": "ai", "reason_codes": ["safe_fallback_used"],
+            "draft_created": True, "draft_planned": True,
+            "labels": {"state": "applied", "names": ["Triage/Recruit Intro"]},
+            "classification_called": True,
+            "subject": CONTENT_MARKERS[0],
+            "body": CONTENT_MARKERS[1],
+            "generated_reply": CONTENT_MARKERS[3],
+        }],
+    }
+
+
+# Field names that may never appear in either allowlist, whatever anyone
+# later decides is convenient. Deriving the expectation from the constants
+# under test would let widening the constant widen the test with it - which
+# is exactly what a mutation caught here.
+CONTENT_FIELD_NAMES = frozenset({
+    "subject", "body", "snippet", "text", "html", "generated_reply",
+    "reply", "template", "from", "to", "cc", "bcc", "sender",
+    "message", "content", "preview", "evidence", "reason",
+})
+
+
+def test_g5_allowlists_contain_no_content_field():
+    """Semantic guard: the lists themselves may never name content.
+
+    This is the half that survives someone editing the constants, because it
+    does not read its expectation from them.
+    """
+    named = set(web_status.DRAFT_STATE_FIELDS) | set(web_status.DRAFT_REPORT_FIELDS)
+    offending = sorted(named & CONTENT_FIELD_NAMES)
+    assert offending == [], (
+        f"a content field was added to the render allowlist: {offending}"
+    )
+
+
+def test_g5_projection_shape_is_fixed_literally():
+    """The exact rendered shape, written out rather than derived.
+
+    If a field is added to either constant, this fails and a human has to
+    decide whether the new field is content.
+    """
+    rows = web_status._draft_rows(_contaminated_state(), _contaminated_report())
+    assert len(rows) == 1
+    assert set(rows[0]) == {
+        "opaque_id", "matched", "labels",
+        "status", "thread_id", "draft_id",
+        "category", "confidence", "drafting_mode", "reason_codes",
+        "draft_created", "draft_planned",
+    }
+
+
+def test_g5_no_message_content_reaches_the_page(tmp_path):
+    """The whole guard, end to end, through the real renderer."""
+    app = _app_with_drafts(tmp_path, _contaminated_state(), _contaminated_report())
+    _capture, body = _request(app)
+    text = body.decode("utf-8")
+    for marker in CONTENT_MARKERS:
+        assert marker not in text, f"message content reached the page: {marker!r}"
+
+
+def test_g5_raw_message_id_is_never_displayed(tmp_path):
+    """The report hashes message ids; the page must not undo that."""
+    app = _app_with_drafts(tmp_path, _contaminated_state(), _contaminated_report())
+    _capture, body = _request(app)
+    text = body.decode("utf-8")
+    assert "raw-message-id-1" not in text
+    assert web_status._opaque_id("raw-message-id-1") in text
+
+
+# ---------------------------------------------------------------------
+# Draft list behaviour
+# ---------------------------------------------------------------------
+
+def _app_with_drafts(tmp_path, state_document, report_document=None,
+                     account_index=0):
+    status_path = tmp_path / "state" / "daily-status.json"
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    review = tmp_path / "review"
+    review.mkdir(parents=True, exist_ok=True)
+    if report_document is not None:
+        (review / "r.json").write_text(json.dumps(report_document), encoding="utf-8")
+    state_path = tmp_path / "journal.json"
+    if state_document is not None:
+        state_path.write_text(json.dumps(state_document), encoding="utf-8")
+    return web_status.StatusApp(web_status.StatusSource(
+        status_path, review, None, state_path, account_index,
+    ))
+
+
+def test_draft_context_is_joined_from_the_report(tmp_path):
+    app = _app_with_drafts(tmp_path, _contaminated_state(), _contaminated_report())
+    _capture, body = _request(app)
+    text = body.decode("utf-8")
+    assert "recruit_intro" in text
+    assert "safe_fallback_used" in text
+    assert "Triage/Recruit Intro" in text
+    assert "draft_created" in text
+
+
+def test_draft_without_report_context_says_so(tmp_path):
+    app = _app_with_drafts(tmp_path, _contaminated_state(), None)
+    _capture, body = _request(app)
+    assert b"no report context for this draft" in body
+
+
+def test_gmail_link_uses_the_thread_and_account_index(tmp_path):
+    app = _app_with_drafts(tmp_path, _contaminated_state(),
+                           _contaminated_report(), account_index=3)
+    _capture, body = _request(app)
+    text = body.decode("utf-8")
+    assert "https://mail.google.com/mail/u/3/#all/thread-abc123" in text
+    assert 'rel="noopener noreferrer"' in text
+
+
+def test_unusable_thread_id_falls_back_to_the_drafts_folder():
+    url, exact = web_status._gmail_url(0, "not a valid id!!")
+    assert url.endswith("#drafts") and exact is False
+    url, exact = web_status._gmail_url(0, "")
+    assert url.endswith("#drafts") and exact is False
+    url, exact = web_status._gmail_url(0, "abc123")
+    assert url.endswith("#all/abc123") and exact is True
+
+
+def test_a_hostile_thread_id_cannot_break_out_of_the_href(tmp_path):
+    state = _contaminated_state()
+    state["messages"]["raw-message-id-1"]["thread_id"] = '"><script>alert(1)</script>'
+    app = _app_with_drafts(tmp_path, state, None)
+    _capture, body = _request(app)
+    text = body.decode("utf-8")
+    assert "<script>alert(1)</script>" not in text
+    assert "#drafts" in text, "an unusable id must fall back, not be linked"
+
+
+def test_draft_list_is_capped(tmp_path):
+    state = {"version": 1, "messages": {
+        f"m{i}": {"status": "draft_created", "thread_id": f"t{i}",
+                  "draft_id": f"d{i}"}
+        for i in range(web_status.MAX_DRAFTS + 40)
+    }}
+    rows = web_status._draft_rows(state, None)
+    assert len(rows) == web_status.MAX_DRAFTS
+
+
+def test_absent_state_path_disables_the_section(tmp_path):
+    app = _app(tmp_path)
+    _capture, body = _request(app)
+    assert b"Draft review is off" in body
+    assert b"never shown here or stored locally" in body
+
+
+def test_malformed_journal_does_not_break_the_page(tmp_path):
+    status_path = tmp_path / "state" / "daily-status.json"
+    status_path.parent.mkdir(parents=True)
+    review = tmp_path / "review"; review.mkdir()
+    journal = tmp_path / "journal.json"
+    journal.write_text("]]not json[[", encoding="utf-8")
+    app = web_status.StatusApp(web_status.StatusSource(
+        status_path, review, None, journal, 0))
+    capture, body = _request(app)
+    assert capture.status.startswith("200")
+    assert b"No drafts recorded yet" in body
+
+
+def test_non_string_journal_records_are_skipped(tmp_path):
+    state = {"version": 1, "messages": {
+        "good": {"status": "draft_created", "thread_id": "t1", "draft_id": "d1"},
+        "bad": ["not", "a", "record"],
+        42: {"status": "complete"},
+    }}
+    rows = web_status._draft_rows(state, None)
+    assert len(rows) == 1
+    assert rows[0]["thread_id"] == "t1"
+
+
+def test_gmail_account_index_is_range_checked():
+    with pytest.raises(SystemExit):
+        web_status.parse_args(["--gmail-account-index", "-1"])
+    with pytest.raises(SystemExit):
+        web_status.parse_args(["--gmail-account-index", "500"])
