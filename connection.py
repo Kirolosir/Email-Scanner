@@ -1,0 +1,290 @@
+"""Exactly one connected account, handed over deliberately.
+
+There is no roster and no tenancy. The deployment is either vacant or holds a
+single connection, and moving between those states is an explicit act. This
+replaces the three-seat roster wholesale: that machinery existed to keep
+several live tokens apart at once, which is not a problem this product has.
+
+OCCUPANCY IS THE RECORD, NOT THE TOKEN. A connection is occupied because
+connection.json exists, never because a token still works. That distinction is
+the whole design:
+
+  * Testing-mode refresh tokens lapse in about seven days, permanently, because
+    Internal is unavailable on a personal-Gmail-based project. Expiry is a
+    weekly event, not an exception.
+  * If expiry vacated the slot, a different account could inherit the previous
+    person's configuration, journal and schedule simply by turning up on a
+    Tuesday. So a lapsed token changes nothing about who holds the connection.
+  * Re-authorising the SAME account is therefore routine and lossless, and
+    connecting a DIFFERENT one is refused until someone disconnects on purpose.
+
+REFUSAL WRITES NOTHING. A refused connect must leave the deployment exactly as
+it found it - no partial record, no cleared journal, no token. Silently
+replacing a connection is the failure this module exists to prevent, and a
+half-written replacement is the same failure with extra steps.
+"""
+from __future__ import annotations
+
+import datetime as dt
+import json
+import re
+from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from private_runtime import atomic_write_json, ensure_private_directory
+
+
+CONNECTION_FILE = "connection.json"
+ACTIVE_DIR = "active"
+RECORD_VERSION = 1
+
+EMAIL_SHAPED = re.compile(r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$")
+RUN_AT = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+
+ALLOWED_KEYS = frozenset({
+    "version", "account", "timezone", "run_at", "connected_at",
+    "last_authorized_at", "enabled", "max_scan", "limit", "max_drafts",
+})
+
+DEFAULT_LIMITS = {"max_scan": 25, "limit": 25, "max_drafts": 5}
+
+
+class ConnectionError(RuntimeError):
+    pass
+
+
+class ConnectionOccupied(ConnectionError):
+    """A different account already holds the connection.
+
+    Carries the occupant so the caller can say who to disconnect, rather than
+    making somebody go and look.
+    """
+
+    def __init__(self, account):
+        self.account = account
+        super().__init__(
+            f"{account} is already connected. Disconnect it first; "
+            "connecting a different account never replaces one silently."
+        )
+
+
+class ConnectionConfigError(ValueError):
+    pass
+
+
+def normalize_account(value):
+    """One spelling for comparison. Case and surrounding space never differ."""
+    return str(value or "").strip().casefold()
+
+
+def same_account(left, right):
+    return bool(left) and normalize_account(left) == normalize_account(right)
+
+
+def _require(condition, message):
+    if not condition:
+        raise ConnectionConfigError(message)
+
+
+class Connection:
+    """The connected account plus the paths derived from a fixed root.
+
+    Paths are derived from the root and a constant directory name, never from
+    the account address, so there is no value from outside that can steer
+    where anything is written.
+    """
+
+    def __init__(self, document, root):
+        self.root = Path(root).resolve()
+        self.account = document["account"]
+        self.timezone_name = document["timezone"]
+        self.timezone = ZoneInfo(self.timezone_name)
+        self.run_at = document["run_at"]
+        self.connected_at = document.get("connected_at", "")
+        self.last_authorized_at = document.get("last_authorized_at", "")
+        self.enabled = bool(document.get("enabled", True))
+        # Written out rather than looped over. A computed attribute name is
+        # not statically auditable, and the no-send audit rightly refuses to
+        # let production code reach an attribute it cannot name.
+        self.max_scan = int(document.get("max_scan", DEFAULT_LIMITS["max_scan"]))
+        self.limit = int(document.get("limit", DEFAULT_LIMITS["limit"]))
+        self.max_drafts = int(
+            document.get("max_drafts", DEFAULT_LIMITS["max_drafts"])
+        )
+
+    # -- scheduling shape, unchanged from the single-operator system ----
+
+    @property
+    def hour(self):
+        return int(self.run_at.split(":")[0])
+
+    @property
+    def minute(self):
+        return int(self.run_at.split(":")[1])
+
+    # -- derived layout -------------------------------------------------
+
+    @property
+    def id(self):
+        """A stable label for lease keys and log lines, never the address."""
+        return "active"
+
+    @property
+    def directory(self):
+        return self.root / ACTIVE_DIR
+
+    @property
+    def state_path(self):
+        return self.directory / "daily-state.json"
+
+    @property
+    def status_path(self):
+        return self.directory / "daily-status.json"
+
+    @property
+    def review_dir(self):
+        return self.directory / "review"
+
+    @property
+    def lock_dir(self):
+        return self.directory / "locks"
+
+    def as_document(self):
+        return {
+            "version": RECORD_VERSION,
+            "account": self.account,
+            "timezone": self.timezone_name,
+            "run_at": self.run_at,
+            "connected_at": self.connected_at,
+            "last_authorized_at": self.last_authorized_at,
+            "enabled": self.enabled,
+            "max_scan": self.max_scan,
+            "limit": self.limit,
+            "max_drafts": self.max_drafts,
+        }
+
+    def __repr__(self):
+        return f"<Connection {self.account} {self.run_at} {self.timezone_name}>"
+
+
+def record_path(root):
+    return Path(root) / CONNECTION_FILE
+
+
+def _validate(document):
+    _require(isinstance(document, dict), "connection record must be an object")
+    unexpected = sorted(set(document) - ALLOWED_KEYS)
+    _require(not unexpected,
+             f"unsupported connection keys: {', '.join(unexpected)}")
+    _require(document.get("version") == RECORD_VERSION,
+             "connection record must be a version 1 object")
+
+    account = document.get("account")
+    _require(isinstance(account, str) and EMAIL_SHAPED.match(account.strip()),
+             "connection record has an invalid account address")
+
+    _require(isinstance(document.get("run_at"), str)
+             and RUN_AT.match(document["run_at"]),
+             "run_at must be HH:MM in 24-hour local time")
+
+    timezone_name = document.get("timezone")
+    _require(isinstance(timezone_name, str) and timezone_name.strip(),
+             "connection record must name a timezone")
+    try:
+        ZoneInfo(timezone_name)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ConnectionConfigError(
+            f"unknown timezone {timezone_name!r}"
+        ) from exc
+
+    for key in DEFAULT_LIMITS:
+        if key in document:
+            value = document[key]
+            _require(isinstance(value, int) and not isinstance(value, bool)
+                     and value >= 0,
+                     f"{key} must be a nonnegative integer")
+
+    if "enabled" in document:
+        _require(isinstance(document["enabled"], bool),
+                 "enabled must be true or false")
+
+
+def current(root):
+    """The connection this deployment holds, or None if vacant.
+
+    A record that cannot be validated raises rather than reading as vacant:
+    treating an unparseable record as "nobody is connected" is how a different
+    account would end up quietly taking over a damaged deployment.
+    """
+    path = record_path(root)
+    try:
+        with path.open(encoding="utf-8") as handle:
+            document = json.load(handle)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ConnectionConfigError(
+            f"connection record is unreadable: {type(exc).__name__}"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise ConnectionConfigError(
+            "connection record is not valid JSON"
+        ) from exc
+
+    _validate(document)
+    return Connection(document, root)
+
+
+def occupied_by(root):
+    """The connected address, or None. Never raises for a vacant deployment."""
+    connection = current(root)
+    return connection.account if connection else None
+
+
+def connect(root, account, *, timezone="UTC", run_at="18:00", now=None,
+            limits=None):
+    """Establish or refresh the single connection.
+
+    Vacant            -> connect, recording both timestamps.
+    Same account      -> a re-authorisation. Only last_authorized_at moves;
+                         schedule, limits and every artifact are untouched,
+                         because a weekly token refresh must not quietly
+                         change how the deployment behaves.
+    Different account -> ConnectionOccupied, having written nothing.
+    """
+    account = str(account or "").strip()
+    _require(EMAIL_SHAPED.match(account), "account address is not valid")
+    stamp = (now or dt.datetime.now(dt.timezone.utc)).isoformat(
+        timespec="seconds"
+    )
+
+    existing = current(root)
+    if existing is not None:
+        if not same_account(existing.account, account):
+            # Deliberately before any write: a refusal leaves the deployment
+            # exactly as it was found.
+            raise ConnectionOccupied(existing.account)
+        document = existing.as_document()
+        document["last_authorized_at"] = stamp
+        _validate(document)
+        ensure_private_directory(Path(root))
+        atomic_write_json(record_path(root), document)
+        return Connection(document, root)
+
+    document = {
+        "version": RECORD_VERSION,
+        "account": account,
+        "timezone": timezone,
+        "run_at": run_at,
+        "connected_at": stamp,
+        "last_authorized_at": stamp,
+        "enabled": True,
+        **DEFAULT_LIMITS,
+        **(limits or {}),
+    }
+    _validate(document)
+    ensure_private_directory(Path(root))
+    connection = Connection(document, root)
+    ensure_private_directory(connection.directory)
+    atomic_write_json(record_path(root), document)
+    return connection

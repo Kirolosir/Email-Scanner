@@ -33,10 +33,10 @@ PRODUCTION = [
     ROOT / "triage_limits.py",
     ROOT / "local_notifier.py",
     ROOT / "review_report.py",
-    ROOT / "seat_notify.py",
-    ROOT / "seat_schedule.py",
-    ROOT / "seats.py",
-    ROOT / "seat_tokens.py",
+    ROOT / "connection.py",
+    ROOT / "connection_notify.py",
+    ROOT / "connection_schedule.py",
+    ROOT / "connection_tokens.py",
     ROOT / "web_status.py",
 ]
 

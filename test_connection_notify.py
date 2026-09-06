@@ -1,4 +1,4 @@
-"""Offline tests for the per-seat failure webhook.
+"""Offline tests for the connection failure webhook.
 
 A webhook leaves the machine, so it is held to a stricter standard than the
 local status file: allowlisted counts and codes only, and never the account
@@ -10,12 +10,12 @@ from pathlib import Path
 
 import pytest
 
-import seat_notify
-from seat_notify import (
+import connection_notify
+from connection_notify import (
     NotifyConfigError,
     PAYLOAD_FIELDS,
     build_payload,
-    notify_seat_failure,
+    notify_failure,
     validate_endpoint,
 )
 
@@ -87,7 +87,7 @@ def test_no_private_value_can_reach_the_wire():
         },
     }
     sender = _Sender()
-    assert notify_seat_failure(
+    assert notify_failure(
         "coach", "https://hooks.example.test/x", 1, contaminated, sender) is True
     _url, body = sender.calls[0]
     text = body.decode("utf-8")
@@ -151,7 +151,7 @@ def test_https_endpoint_is_accepted():
 
 def test_a_plaintext_endpoint_sends_nothing():
     sender = _Sender()
-    assert notify_seat_failure(
+    assert notify_failure(
         "coach", "http://hooks.example.test/x", 1, _status(), sender) is False
     assert sender.calls == [], "a notice was sent over plaintext"
 
@@ -163,28 +163,28 @@ def test_a_plaintext_endpoint_sends_nothing():
 def test_a_raising_sender_is_reported_not_propagated():
     """This runs on an exception path; raising would hide the real error."""
     sender = _Sender(raises=OSError("network down"))
-    assert notify_seat_failure(
+    assert notify_failure(
         "coach", "https://hooks.example.test/x", 1, _status(), sender) is False
 
 
 def test_an_unexpected_sender_exception_is_also_contained():
     sender = _Sender(raises=RuntimeError("something exotic"))
-    assert notify_seat_failure(
+    assert notify_failure(
         "coach", "https://hooks.example.test/x", 1, _status(), sender) is False
 
 
 def test_a_rejecting_endpoint_reports_false():
     sender = _Sender(result=False)
-    assert notify_seat_failure(
+    assert notify_failure(
         "coach", "https://hooks.example.test/x", 1, _status(), sender) is False
 
 
 def test_body_is_valid_json_with_a_version():
     sender = _Sender()
-    notify_seat_failure("coach", "https://hooks.example.test/x", 1,
+    notify_failure("coach", "https://hooks.example.test/x", 1,
                         _status(), sender)
     document = json.loads(sender.calls[0][1].decode("utf-8"))
-    assert document["version"] == seat_notify.PAYLOAD_VERSION
+    assert document["version"] == connection_notify.PAYLOAD_VERSION
     assert document["outcome"] == "failed"
 
 
@@ -193,7 +193,7 @@ def test_body_is_valid_json_with_a_version():
 # ---------------------------------------------------------------------
 
 def test_the_module_performs_no_gmail_operation():
-    tree = ast.parse(Path("seat_notify.py").read_text(encoding="utf-8"))
+    tree = ast.parse(Path("connection_notify.py").read_text(encoding="utf-8"))
     imported = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -202,9 +202,9 @@ def test_the_module_performs_no_gmail_operation():
             imported.add(node.module.split(".")[0])
     for forbidden in ("gmail_auth", "gemini_client", "googleapiclient",
                       "smtplib", "email"):
-        assert forbidden not in imported, f"seat_notify imports {forbidden}"
+        assert forbidden not in imported, f"connection_notify imports {forbidden}"
 
 
 def test_the_no_send_boundary_is_documented_as_the_reason():
-    source = Path("seat_notify.py").read_text(encoding="utf-8")
+    source = Path("connection_notify.py").read_text(encoding="utf-8")
     assert "must never send mail" in source

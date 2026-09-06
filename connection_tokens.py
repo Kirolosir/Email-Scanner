@@ -1,4 +1,4 @@
-"""Envelope-encrypted storage for per-seat OAuth refresh tokens.
+"""Envelope-encrypted storage for the connected account's OAuth refresh token.
 
 WHY THIS IS NOT broker_crypto.py. That module seals a token to a public key so
 the broker can encrypt but never decrypt - "a stolen broker disk yields
@@ -116,16 +116,16 @@ class FileKeyProvider:
             ) from exc
 
 
-def token_path(seat):
-    return seat.directory / "token.enc.json"
+def token_path(connection):
+    return connection.directory / "token.enc.json"
 
 
-def store_token(seat, token_document, provider):
-    """Encrypt and persist one seat's token document.
+def store_token(connection, token_document, provider):
+    """Encrypt and persist the connected account's token document.
 
-    The seat id is bound into both AEAD layers as associated data, so a record
-    copied into another seat's directory fails authentication instead of
-    decrypting into the wrong mailbox.
+    The connection id is bound into both AEAD layers as associated data, so a
+    record copied from an archive or another deployment fails authentication
+    instead of decrypting into the wrong mailbox.
     """
     if not isinstance(token_document, dict) or not token_document:
         raise TokenStoreError("token document must be a non-empty object")
@@ -136,33 +136,33 @@ def store_token(seat, token_document, provider):
     data_key = secrets.token_bytes(DATA_KEY_BYTES)
     nonce = secrets.token_bytes(NONCE_BYTES)
     ciphertext = AESGCM(data_key).encrypt(
-        nonce, plaintext, seat.id.encode("utf-8")
+        nonce, plaintext, connection.id.encode("utf-8")
     )
     record = {
         "version": RECORD_VERSION,
-        "seat": seat.id,
-        "wrapped_key": _b64(provider.wrap(data_key, seat.id)),
+        "seat": connection.id,
+        "wrapped_key": _b64(provider.wrap(data_key, connection.id)),
         "nonce": _b64(nonce),
         "ciphertext": _b64(ciphertext),
     }
     # Drop the plaintext key reference before the write can raise.
     data_key = None
-    atomic_write_json(token_path(seat), record)
-    return token_path(seat)
+    atomic_write_json(token_path(connection), record)
+    return token_path(connection)
 
 
-def load_token(seat, provider):
-    """Decrypt one seat's token document, or raise.
+def load_token(connection, provider):
+    """Decrypt the connected account's token document, or raise.
 
     The caller is expected to hold the result in memory for the duration of a
     run and drop it - never log it, never write it anywhere.
     """
-    path = token_path(seat)
+    path = token_path(connection)
     try:
         with path.open(encoding="utf-8") as handle:
             record = json.load(handle)
     except OSError as exc:
-        raise TokenStoreError("seat has no stored token") from exc
+        raise TokenStoreError("no stored token for this connection") from exc
     except json.JSONDecodeError as exc:
         raise TokenStoreError("token record is not valid JSON") from exc
 
@@ -170,14 +170,14 @@ def load_token(seat, provider):
         raise TokenStoreError("token record must be an object")
     if record.get("version") != RECORD_VERSION:
         raise TokenStoreError("token record has an unsupported version")
-    if record.get("seat") != seat.id:
+    if record.get("seat") != connection.id:
         raise TokenStoreError("token record belongs to a different seat")
 
-    data_key = provider.unwrap(_unb64(record["wrapped_key"]), seat.id)
+    data_key = provider.unwrap(_unb64(record["wrapped_key"]), connection.id)
     try:
         plaintext = AESGCM(data_key).decrypt(
             _unb64(record["nonce"]), _unb64(record["ciphertext"]),
-            seat.id.encode("utf-8"),
+            connection.id.encode("utf-8"),
         )
     except InvalidTag as exc:
         raise TokenStoreError("token record failed authentication") from exc
@@ -193,16 +193,16 @@ def load_token(seat, provider):
     return document
 
 
-def forget_token(seat):
+def forget_token(connection):
     """Delete the local record.
 
-    Local deletion is NOT revocation. A caller disconnecting a seat must also
+    Local deletion is NOT revocation. A caller disconnecting must also
     call Google's revocation endpoint, or the grant stays alive at Google and
     merely becomes invisible here. That call is deliberately not made from this
     module, which never contacts the network.
     """
     try:
-        token_path(seat).unlink()
+        token_path(connection).unlink()
         return True
     except FileNotFoundError:
         return False

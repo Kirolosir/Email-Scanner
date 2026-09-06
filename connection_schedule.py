@@ -1,4 +1,4 @@
-"""Timezone-correct, idempotent scheduling for a fixed seat roster.
+"""Timezone-correct, idempotent scheduling for the single connection.
 
 WHY ExclusiveRunLock IS NOT ENOUGH HERE. That lock uses fcntl advisory file
 locks, which coordinate processes on one host and nothing at all beyond it. It
@@ -98,13 +98,13 @@ def require_distributed(backend):
     return backend
 
 
-class SeatLease:
-    """A fenced, expiring lease over one seat's scheduled work."""
+class ConnectionLease:
+    """A fenced, expiring lease over the connection's scheduled work."""
 
-    def __init__(self, backend, seat_id, owner=None,
+    def __init__(self, backend, key, owner=None,
                  ttl_seconds=DEFAULT_LEASE_SECONDS):
         self.backend = backend
-        self.seat_id = seat_id
+        self.key = key
         self.owner = owner or f"{os.getpid()}-{secrets.token_hex(4)}"
         self.ttl = int(ttl_seconds)
         self.fence = None
@@ -120,13 +120,13 @@ class SeatLease:
         never noticed.
         """
         now = self._now(now)
-        record = self.backend.read(self.seat_id)
+        record = self.backend.read(self.key)
         if record is not None:
             expires = _parse(record.get("expires_at"))
             if expires is not None and expires > now and record.get("owner") != self.owner:
                 return False
         fence = int(record.get("fence", 0)) + 1 if record else 1
-        self.backend.write(self.seat_id, {
+        self.backend.write(self.key, {
             "owner": self.owner,
             "fence": fence,
             "acquired_at": now.isoformat(timespec="seconds"),
@@ -139,11 +139,11 @@ class SeatLease:
     def renew(self, now=None):
         """Extend the lease. Raises LeaseLost if someone else took it."""
         now = self._now(now)
-        record = self.backend.read(self.seat_id)
+        record = self.backend.read(self.key)
         if record is None or record.get("owner") != self.owner \
                 or int(record.get("fence", -1)) != self.fence:
-            raise LeaseLost(f"lease for {self.seat_id} was taken by another holder")
-        self.backend.write(self.seat_id, {
+            raise LeaseLost(f"lease for {self.key} was taken by another holder")
+        self.backend.write(self.key, {
             **record,
             "expires_at": (now + dt.timedelta(seconds=self.ttl)).isoformat(
                 timespec="seconds"),
@@ -153,7 +153,7 @@ class SeatLease:
     def held(self, now=None):
         """Whether this object still holds a live, un-superseded lease."""
         now = self._now(now)
-        record = self.backend.read(self.seat_id)
+        record = self.backend.read(self.key)
         if record is None or record.get("owner") != self.owner:
             return False
         if int(record.get("fence", -1)) != self.fence:
@@ -162,15 +162,15 @@ class SeatLease:
         return expires is not None and expires > now
 
     def release(self):
-        record = self.backend.read(self.seat_id)
+        record = self.backend.read(self.key)
         if record and record.get("owner") == self.owner:
-            self.backend.clear(self.seat_id)
+            self.backend.clear(self.key)
             return True
         return False
 
     def __enter__(self):
         if not self.acquire():
-            raise LeaseError(f"seat {self.seat_id} is already running")
+            raise LeaseError(f"{self.key} is already running")
         return self
 
     def __exit__(self, *_exc):
@@ -188,33 +188,33 @@ def _parse(value):
     return stamp if stamp.tzinfo else stamp.replace(tzinfo=dt.timezone.utc)
 
 
-def scheduled_datetime(seat, local_date):
-    """The seat's run instant on a given local date, in its own timezone."""
+def scheduled_datetime(connection, local_date):
+    """The run instant on a given local date, in the account's timezone."""
     return dt.datetime.combine(
-        local_date, dt.time(hour=seat.hour, minute=seat.minute),
-        tzinfo=seat.timezone,
+        local_date, dt.time(hour=connection.hour, minute=connection.minute),
+        tzinfo=connection.timezone,
     )
 
 
-def is_due(seat, now, last_completed_date=None,
+def is_due(connection, now, last_completed_date=None,
            grace_minutes=DEFAULT_GRACE_MINUTES):
-    """Whether this seat should run at `now`, and why not if it should not.
+    """Whether the connection should run at `now`, and why not if it should not.
 
     Returns (due, reason). Deliberately conservative in both directions: a
     seat that already ran today does not run again, and a window missed by
     more than the grace period is skipped rather than fired at a time the
     person did not choose.
     """
-    if not seat.enabled:
-        return False, "seat is disabled"
+    if not connection.enabled:
+        return False, "connection is disabled"
 
-    local_now = now.astimezone(seat.timezone)
+    local_now = now.astimezone(connection.timezone)
     today = local_now.date()
 
     if last_completed_date is not None and last_completed_date >= today:
         return False, "already completed today"
 
-    target = scheduled_datetime(seat, today)
+    target = scheduled_datetime(connection, today)
     if local_now < target:
         return False, "before the scheduled time"
 
@@ -227,29 +227,13 @@ def is_due(seat, now, last_completed_date=None,
     return True, "due"
 
 
-def next_run(seat, now):
-    """The next instant this seat is scheduled to run, in its timezone."""
-    local_now = now.astimezone(seat.timezone)
-    today_target = scheduled_datetime(seat, local_now.date())
+def next_run(connection, now):
+    """The next instant this connection is scheduled to run, in its timezone."""
+    local_now = now.astimezone(connection.timezone)
+    today_target = scheduled_datetime(connection, local_now.date())
     if local_now < today_target:
         return today_target
     return scheduled_datetime(
-        seat, local_now.date() + dt.timedelta(days=1)
+        connection, local_now.date() + dt.timedelta(days=1)
     )
 
-
-def due_seats(roster, now, completed=None, grace_minutes=DEFAULT_GRACE_MINUTES):
-    """Every seat due at `now`, in roster order.
-
-    `completed` maps seat id to the last local date that seat finished, which
-    is what the existing same-day guard already records per seat.
-    """
-    completed = completed or {}
-    due = []
-    for seat in roster:
-        ready, _reason = is_due(
-            seat, now, completed.get(seat.id), grace_minutes
-        )
-        if ready:
-            due.append(seat)
-    return due

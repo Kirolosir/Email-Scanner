@@ -59,10 +59,10 @@ PIPELINE_MODULES = [
     "triage.py",
     "triage_config.py",
     "triage_limits.py",
-    "seat_notify.py",
-    "seat_schedule.py",
-    "seats.py",
-    "seat_tokens.py",
+    "connection.py",
+    "connection_notify.py",
+    "connection_schedule.py",
+    "connection_tokens.py",
     "web_status.py",
 ]
 

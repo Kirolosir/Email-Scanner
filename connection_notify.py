@@ -1,4 +1,4 @@
-"""Push a PII-free failure notice for one seat to a configured endpoint.
+"""Push a PII-free failure notice for the connection to a configured endpoint.
 
 WHY NOT EMAIL. The obvious way to tell someone their run failed is to email
 them, and this system must never send mail: the no-send boundary is enforced
@@ -66,7 +66,7 @@ def _safe_int(value):
     return value
 
 
-def build_payload(seat_id, exit_code, status_document=None):
+def build_payload(connection_id, exit_code, status_document=None):
     """Assemble the notice from allowlisted fields only.
 
     Mirrors local_notifier.safe_status_summary: unknown counts are dropped,
@@ -90,7 +90,7 @@ def build_payload(seat_id, exit_code, status_document=None):
 
     return {
         "version": PAYLOAD_VERSION,
-        "seat": str(seat_id),
+        "seat": str(connection_id),
         "outcome": "failed",
         "exit_code": _safe_int(exit_code) or int(bool(exit_code)),
         "counts": counts,
@@ -107,8 +107,8 @@ def _default_sender(url, body):
         return 200 <= response.status < 300
 
 
-def notify_seat_failure(seat_id, endpoint, exit_code, status_document=None,
-                        sender=None):
+def notify_failure(connection_id, endpoint, exit_code, status_document=None,
+                   sender=None):
     """Post one failure notice. Returns True only on a confirmed delivery.
 
     Never raises. A notification that fails is a notification that fails; it
@@ -120,7 +120,7 @@ def notify_seat_failure(seat_id, endpoint, exit_code, status_document=None,
     except NotifyConfigError:
         return False
 
-    payload = build_payload(seat_id, exit_code, status_document)
+    payload = build_payload(connection_id, exit_code, status_document)
     # Belt and braces: the payload is assembled from an allowlist above, and
     # checked against it again here, so a future edit to build_payload cannot
     # quietly widen what leaves the machine.

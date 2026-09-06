@@ -1,4 +1,4 @@
-"""Offline tests for seat leasing and timezone-correct scheduling.
+"""Offline tests for connection leasing and timezone-correct scheduling.
 
 Every decision takes an injected clock, so none of this waits on real time.
 """
@@ -9,44 +9,31 @@ from pathlib import Path
 
 import pytest
 
-import seat_schedule
-from seat_schedule import (
+import connection_schedule
+from connection_schedule import (
     DEFAULT_GRACE_MINUTES,
     FileLeaseBackend,
     LeaseError,
     LeaseLost,
-    SeatLease,
-    due_seats,
+    ConnectionLease,
     is_due,
     next_run,
     require_distributed,
     scheduled_datetime,
 )
-from seats import load_roster
+import connection as conn
 
 
 UTC = dt.timezone.utc
 
 
-def _roster_file(tmp_path, *seats):
-    path = tmp_path / "roster.json"
-    path.write_text(json.dumps({"version": 1, "seats": list(seats)}),
-                    encoding="utf-8")
-    return path
-
-
-def _seat_doc(seat_id="coach", tz="America/New_York", run_at="18:00", **kw):
-    doc = {
-        "id": seat_id, "account": f"{seat_id}@example.test", "timezone": tz,
-        "run_at": run_at, "directory": f"seats/{seat_id}",
-        "account_config": f"seats/{seat_id}/account.json",
-    }
-    doc.update(kw)
-    return doc
-
-
-def _seat(tmp_path, **kw):
-    return load_roster(_roster_file(tmp_path, _seat_doc(**kw)))[0]
+def _seat(tmp_path, tz="America/New_York", run_at="18:00", enabled=True,
+          account="coach@example.test", root=None):
+    """One connection, established directly rather than through a roster."""
+    root = root or tmp_path
+    connection = conn.connect(root, account, timezone=tz, run_at=run_at)
+    connection.enabled = enabled
+    return connection
 
 
 def _backend(tmp_path):
@@ -60,8 +47,8 @@ def _backend(tmp_path):
 def test_a_second_holder_is_refused_while_the_lease_is_live(tmp_path):
     backend = _backend(tmp_path)
     now = dt.datetime(2026, 9, 6, 22, 0, tzinfo=UTC)
-    first = SeatLease(backend, "coach", owner="instance-a")
-    second = SeatLease(backend, "coach", owner="instance-b")
+    first = ConnectionLease(backend, "coach", owner="instance-a")
+    second = ConnectionLease(backend, "coach", owner="instance-b")
 
     assert first.acquire(now) is True
     assert second.acquire(now) is False, (
@@ -72,11 +59,11 @@ def test_a_second_holder_is_refused_while_the_lease_is_live(tmp_path):
 def test_an_expired_lease_is_reclaimable_without_a_human(tmp_path):
     backend = _backend(tmp_path)
     start = dt.datetime(2026, 9, 6, 22, 0, tzinfo=UTC)
-    stalled = SeatLease(backend, "coach", owner="crashed", ttl_seconds=600)
+    stalled = ConnectionLease(backend, "coach", owner="crashed", ttl_seconds=600)
     assert stalled.acquire(start) is True
 
     later = start + dt.timedelta(seconds=601)
-    successor = SeatLease(backend, "coach", owner="fresh")
+    successor = ConnectionLease(backend, "coach", owner="fresh")
     assert successor.acquire(later) is True
 
 
@@ -84,11 +71,11 @@ def test_a_superseded_holder_discovers_it_lost_the_lease(tmp_path):
     """The fence is what a stalled holder checks; its own clock cannot help."""
     backend = _backend(tmp_path)
     start = dt.datetime(2026, 9, 6, 22, 0, tzinfo=UTC)
-    stalled = SeatLease(backend, "coach", owner="stalled", ttl_seconds=600)
+    stalled = ConnectionLease(backend, "coach", owner="stalled", ttl_seconds=600)
     stalled.acquire(start)
 
     later = start + dt.timedelta(seconds=601)
-    SeatLease(backend, "coach", owner="successor").acquire(later)
+    ConnectionLease(backend, "coach", owner="successor").acquire(later)
 
     assert stalled.held(later) is False
     with pytest.raises(LeaseLost):
@@ -105,11 +92,11 @@ def test_the_fence_alone_catches_a_same_owner_reacquisition(tmp_path):
     """
     backend = _backend(tmp_path)
     start = dt.datetime(2026, 9, 6, 22, 0, tzinfo=UTC)
-    first = SeatLease(backend, "coach", owner="instance-a", ttl_seconds=600)
+    first = ConnectionLease(backend, "coach", owner="instance-a", ttl_seconds=600)
     assert first.acquire(start) is True
 
     later = start + dt.timedelta(seconds=601)
-    restarted = SeatLease(backend, "coach", owner="instance-a", ttl_seconds=600)
+    restarted = ConnectionLease(backend, "coach", owner="instance-a", ttl_seconds=600)
     assert restarted.acquire(later) is True
     assert restarted.fence == first.fence + 1
 
@@ -124,7 +111,7 @@ def test_the_fence_increases_on_every_acquisition(tmp_path):
     now = dt.datetime(2026, 9, 6, 22, 0, tzinfo=UTC)
     fences = []
     for index in range(3):
-        lease = SeatLease(backend, "coach", owner=f"o{index}", ttl_seconds=1)
+        lease = ConnectionLease(backend, "coach", owner=f"o{index}", ttl_seconds=1)
         assert lease.acquire(now + dt.timedelta(seconds=index * 5)) is True
         fences.append(lease.fence)
     assert fences == sorted(set(fences)) == [1, 2, 3]
@@ -133,7 +120,7 @@ def test_the_fence_increases_on_every_acquisition(tmp_path):
 def test_renewal_extends_the_lease(tmp_path):
     backend = _backend(tmp_path)
     start = dt.datetime(2026, 9, 6, 22, 0, tzinfo=UTC)
-    lease = SeatLease(backend, "coach", owner="a", ttl_seconds=600)
+    lease = ConnectionLease(backend, "coach", owner="a", ttl_seconds=600)
     lease.acquire(start)
     lease.renew(start + dt.timedelta(seconds=500))
     assert lease.held(start + dt.timedelta(seconds=900)) is True
@@ -142,31 +129,31 @@ def test_renewal_extends_the_lease(tmp_path):
 def test_release_frees_the_seat_for_another_holder(tmp_path):
     backend = _backend(tmp_path)
     now = dt.datetime(2026, 9, 6, 22, 0, tzinfo=UTC)
-    first = SeatLease(backend, "coach", owner="a")
+    first = ConnectionLease(backend, "coach", owner="a")
     first.acquire(now)
     assert first.release() is True
-    assert SeatLease(backend, "coach", owner="b").acquire(now) is True
+    assert ConnectionLease(backend, "coach", owner="b").acquire(now) is True
 
 
 def test_release_by_a_non_holder_does_nothing(tmp_path):
     backend = _backend(tmp_path)
     now = dt.datetime(2026, 9, 6, 22, 0, tzinfo=UTC)
-    SeatLease(backend, "coach", owner="a").acquire(now)
-    assert SeatLease(backend, "coach", owner="b").release() is False
+    ConnectionLease(backend, "coach", owner="a").acquire(now)
+    assert ConnectionLease(backend, "coach", owner="b").release() is False
 
 
 def test_seats_do_not_block_each_other(tmp_path):
     backend = _backend(tmp_path)
     now = dt.datetime(2026, 9, 6, 22, 0, tzinfo=UTC)
-    assert SeatLease(backend, "coach", owner="a").acquire(now) is True
-    assert SeatLease(backend, "operator", owner="a").acquire(now) is True
+    assert ConnectionLease(backend, "coach", owner="a").acquire(now) is True
+    assert ConnectionLease(backend, "operator", owner="a").acquire(now) is True
 
 
 def test_context_manager_refuses_a_busy_seat(tmp_path):
     backend = _backend(tmp_path)
-    SeatLease(backend, "coach", owner="a").acquire()
+    ConnectionLease(backend, "coach", owner="a").acquire()
     with pytest.raises(LeaseError, match="already running"):
-        with SeatLease(backend, "coach", owner="b"):
+        with ConnectionLease(backend, "coach", owner="b"):
             pass
 
 
@@ -195,12 +182,8 @@ def test_the_run_instant_is_in_the_seats_own_timezone(tmp_path):
 
 
 def test_two_seats_in_different_zones_are_due_at_different_instants(tmp_path):
-    path = _roster_file(
-        tmp_path,
-        _seat_doc("east", tz="America/New_York", run_at="18:00"),
-        _seat_doc("west", tz="America/Los_Angeles", run_at="18:00"),
-    )
-    east, west = load_roster(path)
+    east = _seat(tmp_path / "e", tz="America/New_York", run_at="18:00")
+    west = _seat(tmp_path / "w", tz="America/Los_Angeles", run_at="18:00")
     at_2201_utc = dt.datetime(2026, 9, 6, 22, 1, tzinfo=UTC)  # 18:01 EDT
     assert is_due(east, at_2201_utc)[0] is True
     assert is_due(west, at_2201_utc)[0] is False
@@ -277,17 +260,6 @@ def test_scheduling_survives_a_dst_transition(tmp_path):
     assert before.utcoffset() != after.utcoffset()
 
 
-def test_due_seats_returns_only_the_ones_ready(tmp_path):
-    path = _roster_file(
-        tmp_path,
-        _seat_doc("early", run_at="06:00"),
-        _seat_doc("late", run_at="23:00"),
-        _seat_doc("done", run_at="06:00"),
-    )
-    roster = load_roster(path)
-    now = dt.datetime(2026, 9, 6, 11, 0, tzinfo=UTC)  # 07:00 EDT
-    ready = due_seats(roster, now, completed={"done": dt.date(2026, 9, 6)})
-    assert [s.id for s in ready] == ["early"]
 
 
 # ---------------------------------------------------------------------
@@ -296,8 +268,8 @@ def test_due_seats_returns_only_the_ones_ready(tmp_path):
 
 def test_scheduling_never_reads_the_wall_clock_in_a_decision():
     """Every decision takes `now`, so behaviour is testable without waiting."""
-    tree = ast.parse(Path("seat_schedule.py").read_text(encoding="utf-8"))
-    for name in ("is_due", "next_run", "scheduled_datetime", "due_seats"):
+    tree = ast.parse(Path("connection_schedule.py").read_text(encoding="utf-8"))
+    for name in ("is_due", "next_run", "scheduled_datetime"):
         function = next(
             node for node in ast.walk(tree)
             if isinstance(node, ast.FunctionDef) and node.name == name
@@ -312,7 +284,7 @@ def test_scheduling_never_reads_the_wall_clock_in_a_decision():
 
 
 def test_the_module_never_runs_a_job_or_touches_the_network():
-    tree = ast.parse(Path("seat_schedule.py").read_text(encoding="utf-8"))
+    tree = ast.parse(Path("connection_schedule.py").read_text(encoding="utf-8"))
     imported = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -321,4 +293,4 @@ def test_the_module_never_runs_a_job_or_touches_the_network():
             imported.add(node.module.split(".")[0])
     for forbidden in ("subprocess", "socket", "urllib", "requests",
                       "gmail_auth", "gemini_client", "daily_triage", "triage"):
-        assert forbidden not in imported, f"seat_schedule imports {forbidden}"
+        assert forbidden not in imported, f"connection_schedule imports {forbidden}"
