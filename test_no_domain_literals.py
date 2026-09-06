@@ -59,6 +59,7 @@ PIPELINE_MODULES = [
     "triage.py",
     "triage_config.py",
     "triage_limits.py",
+    "web_status.py",
 ]
 
 EMAIL_SHAPED = re.compile(r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$")
