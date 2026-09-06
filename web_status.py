@@ -13,6 +13,15 @@ a separate short-lived subprocess instead, so the credential surface stays where
 the CLI already keeps it. test_web_status.py enforces this at runtime, not just
 by reading the import list.
 
+DELIBERATE NON-EXECUTION. This module also starts no subprocess. Readiness is
+displayed from a snapshot written by `check_readiness.py --json --json-output`,
+not computed on demand, for two reasons. A readiness run executes the whole
+test suite twice and takes tens of seconds, which no page load should wait on.
+More importantly, any page a browser visits can cause a request here - Host
+validation stops a hostile origin READING the response, not causing the GET -
+so work triggered per request is work an outside page can amplify. Reading a
+file is bounded; spawning an interpreter is not.
+
 DELIBERATE NON-REUSE from oauth_broker.py. The routing shape, the GET-only
 gate, and the response-header helper are modelled on that module. Its
 `_scheme()`/X-Forwarded-Proto handling is deliberately NOT copied: that exists
@@ -28,6 +37,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import html
 import json
 import sys
@@ -58,6 +68,11 @@ COUNT_ORDER = (
 )
 
 MAX_REPORTS = 25
+
+# A readiness snapshot describes the moment it was taken. Past this age it is
+# still shown - stale information beats a blank panel when you are debugging -
+# but it is labelled, so nobody reads a week-old PASS as today's state.
+READINESS_STALE_AFTER_HOURS = 24
 
 
 def _read_json(path):
@@ -102,12 +117,21 @@ class StatusSource:
     input, so there is no traversal surface to defend.
     """
 
-    def __init__(self, status_path, review_dir):
+    def __init__(self, status_path, review_dir, readiness_path=None):
         self.status_path = Path(status_path).expanduser().resolve()
         self.review_dir = Path(review_dir).expanduser().resolve()
+        self.readiness_path = (
+            Path(readiness_path).expanduser().resolve()
+            if readiness_path else None
+        )
 
     def status(self):
         return _read_json(self.status_path)
+
+    def readiness(self):
+        if self.readiness_path is None:
+            return None
+        return _read_json(self.readiness_path)
 
     def reports(self):
         """Most recent review reports, newest first."""
@@ -171,6 +195,81 @@ def _render_status(document):
       </div>
       {codes_html}
       {_render_counts(_counts(run))}
+    """
+
+
+def _age_hours(created_at):
+    """Hours since an ISO timestamp, or None if it cannot be read."""
+    if not isinstance(created_at, str):
+        return None
+    try:
+        stamp = dt.datetime.fromisoformat(created_at)
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=dt.timezone.utc)
+    delta = dt.datetime.now(dt.timezone.utc) - stamp
+    return delta.total_seconds() / 3600.0
+
+
+def _render_readiness(document):
+    if document is None:
+        return (
+            '<p class="empty">No readiness snapshot. Produce one with '
+            '<code>check_readiness.py --json --json-output &lt;path&gt;</code> '
+            'and point <code>--readiness-path</code> at it. It is not computed '
+            'here: a readiness run takes tens of seconds and no page load '
+            'should trigger that work.</p>'
+        )
+
+    ready = document.get("ready") is True
+    scope = "live read-only" if document.get("live") else "offline"
+    age = _age_hours(document.get("created_at"))
+    stale = age is not None and age > READINESS_STALE_AFTER_HOURS
+
+    if age is None:
+        age_text = "age unknown"
+    elif age < 1:
+        age_text = "under an hour old"
+    elif age < 48:
+        age_text = f"{int(age)}h old"
+    else:
+        age_text = f"{int(age // 24)}d old"
+
+    stale_badge = (
+        f'<span class="pill warn">stale &middot; {html.escape(age_text)}</span>'
+        if stale else f'<span class="meta">{html.escape(age_text)}</span>'
+    )
+
+    results = document.get("results")
+    results = results if isinstance(results, list) else []
+    rows = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        ok = item.get("ok") is True
+        required = item.get("required") is not False
+        mark, tone = ("pass", "ok") if ok else (
+            ("fail", "bad") if required else ("skip", "warn")
+        )
+        rows.append(
+            f'<div class="chk"><span class="pill {tone}">{mark}</span>'
+            f'<span class="cn">{_text(item.get("name"), "unnamed")}</span>'
+            f'<span class="cd">{_text(item.get("detail"), "-")}</span></div>'
+        )
+    body = (
+        f'<div class="checks">{"".join(rows)}</div>' if rows
+        else '<p class="empty">The snapshot recorded no checks.</p>'
+    )
+
+    return f"""
+      <div class="rowline">
+        <span class="pill {"ok" if ready else "bad"}">{"ready" if ready else "not ready"}</span>
+        <span class="meta">scope <b>{html.escape(scope)}</b></span>
+        <span class="meta">account <b>{_text(document.get("account"), "-")}</b></span>
+        {stale_badge}
+      </div>
+      {body}
     """
 
 
@@ -250,6 +349,12 @@ PAGE = """<!doctype html>
   .codes {{ display:flex; flex-wrap:wrap; gap:6px; margin-top:13px; }}
   .code {{ font:11.5px ui-monospace,SFMono-Regular,Menlo,monospace;
     color:var(--bad); background:var(--bad-bg); padding:3px 8px; border-radius:2px; }}
+  .checks {{ display:flex; flex-direction:column; gap:1px; background:var(--rule);
+    border:1px solid var(--rule); margin-top:16px; }}
+  .chk {{ background:var(--surface); padding:8px 12px; display:flex;
+    gap:12px; align-items:baseline; flex-wrap:wrap; }}
+  .chk .cn {{ font-weight:600; font-size:13.5px; min-width:190px; }}
+  .chk .cd {{ font-size:13px; color:var(--soft); flex:1; min-width:200px; }}
   .report {{ background:var(--surface); border:1px solid var(--rule);
     padding:15px 18px; margin-bottom:10px; }}
   .report header {{ display:flex; flex-wrap:wrap; gap:8px 16px; align-items:center; }}
@@ -263,11 +368,13 @@ PAGE = """<!doctype html>
   <h1>Triage status</h1>
   <p class="sub">Read-only view of the last run and recent review reports.</p>
   <p class="scope">no writes &middot; no credentials &middot; no Gmail &middot; no Gemini &middot; {host}</p>
+  <h2>Readiness</h2>
+  <div class="panel">{readiness}</div>
   <h2>Last run</h2>
   <div class="panel">{status}</div>
   <h2>Review reports</h2>
   {reports}
-  <footer>Serving {status_path}<br>Reports from {review_dir}</footer>
+  <footer>Serving {status_path}<br>Reports from {review_dir}<br>Readiness snapshot: {readiness_path}</footer>
 </div></body></html>
 """
 
@@ -309,9 +416,14 @@ class StatusApp:
         body = PAGE.format(
             host=html.escape(f"{BIND_HOST}"),
             status=_render_status(self.source.status()),
+            readiness=_render_readiness(self.source.readiness()),
             reports=_render_reports(self.source.reports()),
             status_path=html.escape(str(self.source.status_path)),
             review_dir=html.escape(str(self.source.review_dir)),
+            readiness_path=html.escape(
+                str(self.source.readiness_path) if self.source.readiness_path
+                else "(not configured)"
+            ),
         ).encode("utf-8")
         start_response("200 OK", [
             ("Content-Type", "text/html; charset=utf-8"),
@@ -350,6 +462,11 @@ def parse_args(argv=None):
         "--review-dir", default="review",
         help="Directory holding PII-minimized review reports",
     )
+    parser.add_argument(
+        "--readiness-path",
+        help=("JSON snapshot written by check_readiness.py --json-output. "
+              "Displayed, never produced here."),
+    )
     # There is deliberately no --host. See BIND_HOST.
     parser.add_argument(
         "--port", type=int, default=DEFAULT_PORT,
@@ -362,7 +479,9 @@ def parse_args(argv=None):
 
 
 def build_app(args):
-    return StatusApp(StatusSource(args.status_path, args.review_dir))
+    return StatusApp(StatusSource(
+        args.status_path, args.review_dir, args.readiness_path,
+    ))
 
 
 def main(argv=None):

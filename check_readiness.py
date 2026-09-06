@@ -4,10 +4,19 @@ Without ``--live`` this runs the complete offline test suite and validates
 local, account-bound artifacts. ``--live`` additionally refreshes the
 selected token in memory and reads only the Gmail profile and label list. It
 never starts OAuth, calls Gemini, creates labels/drafts, or writes a token.
+
+``--json`` renders the same report as a machine-readable document instead of
+text, and ``--json-output`` additionally writes it to a private file. That
+snapshot is what the local status page displays: a readiness run executes the
+whole test suite twice as subprocesses and takes tens of seconds, so it is
+produced deliberately and read later, never computed while somebody waits on
+a page load.
 """
 from __future__ import annotations
 
 import argparse
+import datetime as dt
+import json
 import os
 import subprocess
 import sys
@@ -16,6 +25,10 @@ from pathlib import Path
 
 import readiness
 from gmail_retry import gmail_execute
+from private_runtime import atomic_write_json
+
+
+READINESS_SNAPSHOT_VERSION = 1
 
 
 def parse_args(argv=None):
@@ -46,7 +59,59 @@ def parse_args(argv=None):
         help=("Optional broker health endpoint; requires --live and contacts "
               "that URL without sending credentials"),
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--json", action="store_true",
+        help="Render the report as JSON instead of text",
+    )
+    parser.add_argument(
+        "--json-output", metavar="PATH",
+        help=("Also write the JSON report to this private (0600) path, for "
+              "the local status page to display"),
+    )
+    args = parser.parse_args(argv)
+    if args.json_output and not args.json:
+        parser.error("--json-output requires --json")
+    return args
+
+
+def report_to_document(report):
+    """Serialize a ReadinessReport into the snapshot schema.
+
+    Only the fields the text renderer already prints: check names, their
+    pass/fail state, and the detail strings written by readiness.py. No token,
+    no message content, and no value this command did not already display on a
+    terminal.
+    """
+    return {
+        "version": READINESS_SNAPSHOT_VERSION,
+        "created_at": dt.datetime.now(dt.timezone.utc).isoformat(
+            timespec="seconds"
+        ),
+        "account": report.account or "",
+        "live": bool(report.live),
+        "ready": bool(report.ready),
+        "status": "ready" if report.ready else "not_ready",
+        "results": [
+            {
+                "name": str(result.name),
+                "ok": bool(result.ok),
+                "required": bool(result.required),
+                "detail": str(result.detail),
+            }
+            for result in report.results
+        ],
+    }
+
+
+def _emit(report, args):
+    """Render the report in the requested form. Returns nothing."""
+    if not args.json:
+        print(report.render())
+        return
+    document = report_to_document(report)
+    if args.json_output:
+        atomic_write_json(args.json_output, document)
+    print(json.dumps(document, indent=2, sort_keys=True))
 
 
 def _pytest_check(arguments, description):
@@ -157,18 +222,21 @@ def main(argv=None):
         args, declared_account, labels=None, live=False
     )
     if not args.live or not local_report.ready:
-        print(local_report.render())
-        if args.live and not local_report.ready:
+        _emit(local_report, args)
+        if args.live and not local_report.ready and not args.json:
             print("\nGmail was not contacted because local readiness failed.")
         return 0 if local_report.ready else 1
 
-    print(
-        "Local checks passed. Performing read-only Gmail profile and label "
-        "checks; no messages, drafts, or bodies will be read."
-    )
+    if not args.json:
+        print(
+            "Local checks passed. Performing read-only Gmail profile and label "
+            "checks; no messages, drafts, or bodies will be read."
+        )
     try:
         account, labels = _read_live_gmail_metadata(args.token_path)
     except Exception as exc:  # noqa: BLE001 - fail closed
+        # The exception text can name a token path, so it is shown on the
+        # terminal but never written into the snapshot the status page reads.
         print(f"Could not complete live Gmail checks ({type(exc).__name__}: {exc})")
         print("Status: NOT READY")
         return 2
@@ -178,7 +246,7 @@ def main(argv=None):
         "OAuth broker health",
         lambda: _check_broker_health(args.broker_health_url),
     ))
-    print(live_report.render())
+    _emit(live_report, args)
     return 0 if live_report.ready else 1
 
 

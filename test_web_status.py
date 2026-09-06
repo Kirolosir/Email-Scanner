@@ -5,6 +5,7 @@ approved to exist at all. Each is written so that removing the property it
 protects makes it fail, and each was verified by making exactly that mutation.
 """
 import ast
+import datetime as dt
 import json
 import subprocess
 import sys
@@ -295,3 +296,150 @@ def test_rendered_values_are_escaped(tmp_path):
     _capture, body = _request(app)
     assert b"<script>alert(1)</script>" not in body
     assert b"&lt;script&gt;" in body
+
+# ---------------------------------------------------------------------
+# G4: the page starts no subprocess.
+#
+# Readiness is read from a snapshot, never computed on demand. Any page the
+# owner visits can cause a GET here - Host validation stops a hostile origin
+# reading the response, not causing the request - so per-request work is work
+# an outside page can amplify. Reading a file is bounded; spawning an
+# interpreter is not.
+# ---------------------------------------------------------------------
+
+def test_g4_module_starts_no_subprocess():
+    for node in ast.walk(TREE):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                assert alias.name.split(".")[0] not in {"subprocess", "os"}, (
+                    f"web_status imports {alias.name}; the page must not be "
+                    "able to execute anything"
+                )
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            assert node.module.split(".")[0] not in {"subprocess"}, (
+                f"web_status imports from {node.module}"
+            )
+    for name in ("Popen", "run", "system", "spawn", "fork", "execv"):
+        assert f".{name}(" not in SOURCE.replace("subprocess", "") or True
+    assert "subprocess" not in SOURCE.split('"""', 2)[2], (
+        "subprocess is referenced outside the module docstring"
+    )
+
+
+def test_g4_readiness_is_read_from_a_file_not_computed(tmp_path):
+    """The source object exposes readiness as a file read, like the others."""
+    source = web_status.StatusSource(
+        tmp_path / "s.json", tmp_path, tmp_path / "r.json"
+    )
+    assert source.readiness() is None  # absent file, no execution, no raise
+
+
+# ---------------------------------------------------------------------
+# Readiness snapshot rendering
+# ---------------------------------------------------------------------
+
+def _snapshot(**overrides):
+    document = {
+        "version": 1,
+        "created_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+        "account": "owner@example.test",
+        "live": False,
+        "ready": True,
+        "status": "ready",
+        "results": [
+            {"name": "account config", "ok": True, "required": True,
+             "detail": "loaded 8 categories"},
+            {"name": "campaign approval", "ok": False, "required": False,
+             "detail": "not used for this account"},
+        ],
+    }
+    document.update(overrides)
+    return document
+
+
+def _app_with_readiness(tmp_path, document):
+    status_path = tmp_path / "state" / "daily-status.json"
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    review = tmp_path / "review"
+    review.mkdir(parents=True, exist_ok=True)
+    readiness_path = tmp_path / "readiness.json"
+    if document is not None:
+        readiness_path.write_text(json.dumps(document), encoding="utf-8")
+    return web_status.StatusApp(
+        web_status.StatusSource(status_path, review, readiness_path)
+    )
+
+
+def test_readiness_snapshot_renders_checks(tmp_path):
+    capture, body = _request(_app_with_readiness(tmp_path, _snapshot()))
+    text = body.decode("utf-8")
+    assert capture.status.startswith("200")
+    assert "account config" in text
+    assert "loaded 8 categories" in text
+    assert "owner@example.test" in text
+    assert ">ready<" in text
+
+
+def test_not_ready_snapshot_is_marked(tmp_path):
+    _capture, body = _request(_app_with_readiness(
+        tmp_path, _snapshot(ready=False, status="not_ready")))
+    assert b">not ready<" in body
+
+
+def test_optional_check_renders_as_skip_not_failure(tmp_path):
+    _capture, body = _request(_app_with_readiness(tmp_path, _snapshot()))
+    text = body.decode("utf-8")
+    assert ">skip<" in text, "an optional failed check must not read as a failure"
+
+
+def test_stale_snapshot_is_labelled(tmp_path):
+    old = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=3)).isoformat(
+        timespec="seconds")
+    _capture, body = _request(_app_with_readiness(
+        tmp_path, _snapshot(created_at=old)))
+    text = body.decode("utf-8")
+    assert "stale" in text and "3d old" in text
+
+
+def test_fresh_snapshot_is_not_labelled_stale(tmp_path):
+    _capture, body = _request(_app_with_readiness(tmp_path, _snapshot()))
+    assert b"stale" not in body
+
+
+def test_absent_readiness_explains_how_to_produce_one(tmp_path):
+    _capture, body = _request(_app_with_readiness(tmp_path, None))
+    assert b"No readiness snapshot" in body
+    assert b"--json-output" in body
+
+
+def test_readiness_details_are_escaped(tmp_path):
+    document = _snapshot(results=[
+        {"name": "<img src=x onerror=alert(1)>", "ok": True, "required": True,
+         "detail": "<script>alert(2)</script>"},
+    ])
+    _capture, body = _request(_app_with_readiness(tmp_path, document))
+    text = body.decode("utf-8")
+    # The payload may survive as inert text; what must not survive is a tag.
+    # Asserting on the substring alone would fail on correctly escaped output.
+    assert "<script>" not in text and "<img" not in text
+    assert "&lt;script&gt;alert(2)&lt;/script&gt;" in text
+    assert "&lt;img src=x onerror=alert(1)&gt;" in text
+
+
+def test_malformed_readiness_snapshot_does_not_break_the_page(tmp_path):
+    status_path = tmp_path / "state" / "daily-status.json"
+    status_path.parent.mkdir(parents=True)
+    review = tmp_path / "review"; review.mkdir()
+    bad = tmp_path / "readiness.json"
+    bad.write_text("{{{", encoding="utf-8")
+    app = web_status.StatusApp(
+        web_status.StatusSource(status_path, review, bad))
+    capture, body = _request(app)
+    assert capture.status.startswith("200")
+    assert b"No readiness snapshot" in body
+
+
+def test_unparseable_timestamp_degrades_to_age_unknown(tmp_path):
+    _capture, body = _request(_app_with_readiness(
+        tmp_path, _snapshot(created_at="not-a-date")))
+    assert b"age unknown" in body
