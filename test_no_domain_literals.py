@@ -60,6 +60,7 @@ PIPELINE_MODULES = [
     "triage_config.py",
     "triage_limits.py",
     "connection.py",
+    "connection_archive.py",
     "connection_notify.py",
     "connection_schedule.py",
     "connection_tokens.py",
