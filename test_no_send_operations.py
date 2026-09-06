@@ -33,6 +33,8 @@ PRODUCTION = [
     ROOT / "triage_limits.py",
     ROOT / "local_notifier.py",
     ROOT / "review_report.py",
+    ROOT / "seats.py",
+    ROOT / "seat_tokens.py",
     ROOT / "web_status.py",
 ]
 
