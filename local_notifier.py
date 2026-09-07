@@ -12,6 +12,10 @@ SAFE_COUNT_KEYS = (
 )
 SAFE_ERROR_CODES = frozenset({
     "configuration_or_state_invalid",
+    # A lapsed OAuth grant is a reconnect, not a broken run. It gets its own
+    # code so a weekly, expected event is distinguishable at a glance from
+    # something that actually went wrong.
+    "connection_expired",
     "draft_write_failed",
     "existing_manual_draft",
     "label_write_failed",

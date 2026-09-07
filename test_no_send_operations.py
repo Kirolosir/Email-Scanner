@@ -35,6 +35,7 @@ PRODUCTION = [
     ROOT / "review_report.py",
     ROOT / "connection.py",
     ROOT / "connection_archive.py",
+    ROOT / "connection_expiry.py",
     ROOT / "connection_notify.py",
     ROOT / "connection_schedule.py",
     ROOT / "connection_tokens.py",
