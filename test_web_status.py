@@ -670,3 +670,152 @@ def test_gmail_account_index_is_range_checked():
         web_status.parse_args(["--gmail-account-index", "-1"])
     with pytest.raises(SystemExit):
         web_status.parse_args(["--gmail-account-index", "500"])
+
+
+# ---------------------------------------------------------------------
+# Connection panel
+#
+# The constants below are duplicated in web_status to keep G1 total. A test
+# may import both modules; the module under test may not. Pinning them equal
+# here is what stops the duplication drifting into a wrong countdown.
+# ---------------------------------------------------------------------
+
+def test_the_duplicated_expiry_constants_match_the_originals():
+    import connection_expiry
+
+    assert web_status.TOKEN_LIFETIME_DAYS == \
+        connection_expiry.TESTING_MODE_TOKEN_LIFETIME_DAYS
+    assert web_status.EXPIRING_SOON_DAYS == connection_expiry.EXPIRING_SOON_DAYS
+
+
+def _connection_doc(issued_days_ago=0, account="coach@example.test", now=None):
+    now = now or dt.datetime.now(dt.timezone.utc)
+    issued = now - dt.timedelta(days=issued_days_ago)
+    return {
+        "version": 1, "account": account, "timezone": "America/New_York",
+        "run_at": "18:00",
+        "connected_at": (now - dt.timedelta(days=30)).isoformat(timespec="seconds"),
+        "last_authorized_at": issued.isoformat(timespec="seconds"),
+        "enabled": True, "max_scan": 25, "limit": 25, "max_drafts": 5,
+    }
+
+
+def _status_doc(outcome="success", finished=None):
+    return {"version": 1, "last_run": {
+        "outcome": outcome, "mode": "daily:apply", "counts": {},
+        "safe_error_codes": [],
+        "finished_at": finished or dt.datetime.now(dt.timezone.utc).isoformat(
+            timespec="seconds"),
+    }}
+
+
+def _app_with_connection(tmp_path, connection_document, status_document=None):
+    status_path = tmp_path / "state" / "daily-status.json"
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    if status_document is not None:
+        status_path.write_text(json.dumps(status_document), encoding="utf-8")
+    review = tmp_path / "review"; review.mkdir(parents=True, exist_ok=True)
+    connection_path = tmp_path / "connection.json"
+    if connection_document is not None:
+        connection_path.write_text(json.dumps(connection_document), encoding="utf-8")
+    return web_status.StatusApp(web_status.StatusSource(
+        status_path, review, None, None, 0, connection_path))
+
+
+def test_a_fresh_connection_reads_as_healthy(tmp_path):
+    app = _app_with_connection(tmp_path, _connection_doc(issued_days_ago=1))
+    _capture, body = _request(app)
+    text = body.decode("utf-8")
+    assert ">healthy<" in text
+    assert "expected to last" in text
+    assert "coach@example.test" in text
+
+
+def test_an_expiring_connection_warns_before_it_breaks(tmp_path):
+    app = _app_with_connection(tmp_path, _connection_doc(issued_days_ago=6))
+    _capture, body = _request(app)
+    text = body.decode("utf-8")
+    assert ">expiring<" in text
+    assert "under a day" in text or "1 more day" in text
+
+
+def test_an_expired_connection_says_reconnect_required(tmp_path):
+    app = _app_with_connection(tmp_path, _connection_doc(issued_days_ago=9))
+    _capture, body = _request(app)
+    text = body.decode("utf-8")
+    assert ">expired<" in text
+    assert "reconnect required" in text
+
+
+def test_the_countdown_is_labelled_an_estimate(tmp_path):
+    """The page must never present the prediction as a verified fact."""
+    app = _app_with_connection(tmp_path, _connection_doc(issued_days_ago=1))
+    _capture, body = _request(app)
+    assert b"estimate, not verified with Google" in body
+
+
+def test_a_successful_run_after_the_window_outranks_the_prediction(tmp_path):
+    now = dt.datetime.now(dt.timezone.utc)
+    app = _app_with_connection(
+        tmp_path,
+        _connection_doc(issued_days_ago=10, now=now),
+        _status_doc(finished=(now - dt.timedelta(hours=2)).isoformat(
+            timespec="seconds")),
+    )
+    _capture, body = _request(app)
+    text = body.decode("utf-8")
+    assert ">healthy<" in text
+    assert "the estimate was wrong" in text
+
+
+def test_a_failed_run_is_not_treated_as_evidence(tmp_path):
+    now = dt.datetime.now(dt.timezone.utc)
+    app = _app_with_connection(
+        tmp_path,
+        _connection_doc(issued_days_ago=10, now=now),
+        _status_doc(outcome="failed",
+                    finished=(now - dt.timedelta(hours=2)).isoformat(
+                        timespec="seconds")),
+    )
+    _capture, body = _request(app)
+    text = body.decode("utf-8")
+    assert ">expired<" in text
+    assert "no successful run recorded yet" in text
+
+
+def test_an_unknown_issue_time_is_not_reported_as_healthy(tmp_path):
+    document = _connection_doc()
+    document["last_authorized_at"] = ""
+    app = _app_with_connection(tmp_path, document)
+    _capture, body = _request(app)
+    text = body.decode("utf-8")
+    assert ">unknown<" in text
+    assert "healthy" not in text
+
+
+def test_a_vacant_deployment_says_so(tmp_path):
+    app = _app_with_connection(tmp_path, None)
+    _capture, body = _request(app)
+    assert b"No account connected" in body
+
+
+def test_a_malformed_connection_record_does_not_break_the_page(tmp_path):
+    status_path = tmp_path / "state" / "daily-status.json"
+    status_path.parent.mkdir(parents=True)
+    review = tmp_path / "review"; review.mkdir()
+    bad = tmp_path / "connection.json"
+    bad.write_text("}}not json{{", encoding="utf-8")
+    app = web_status.StatusApp(web_status.StatusSource(
+        status_path, review, None, None, 0, bad))
+    capture, body = _request(app)
+    assert capture.status.startswith("200")
+    assert b"No account connected" in body
+
+
+def test_the_connection_panel_escapes_its_values(tmp_path):
+    document = _connection_doc(account="<script>alert(1)</script>@x.test")
+    app = _app_with_connection(tmp_path, document)
+    _capture, body = _request(app)
+    text = body.decode("utf-8")
+    assert "<script>alert(1)</script>" not in text
+    assert "&lt;script&gt;" in text

@@ -76,6 +76,14 @@ MAX_REPORTS = 25
 # but it is labelled, so nobody reads a week-old PASS as today's state.
 READINESS_STALE_AFTER_HOURS = 24
 
+# Mirrors connection_expiry, duplicated rather than imported to keep this
+# module free of project imports. Unlike the count-key list, drift here would
+# show a WRONG countdown rather than merely less information, so
+# test_web_status pins these equal to the originals by importing both - a
+# thing a test may do and this module may not.
+TOKEN_LIFETIME_DAYS = 7
+EXPIRING_SOON_DAYS = 2
+
 MAX_DRAFTS = 100
 
 # The complete set of fields that may ever be rendered for a draft. This is
@@ -158,7 +166,8 @@ class StatusSource:
     """
 
     def __init__(self, status_path, review_dir, readiness_path=None,
-                 state_path=None, gmail_account_index=0):
+                 state_path=None, gmail_account_index=0,
+                 connection_path=None):
         self.status_path = Path(status_path).expanduser().resolve()
         self.review_dir = Path(review_dir).expanduser().resolve()
         self.readiness_path = (
@@ -169,6 +178,10 @@ class StatusSource:
             Path(state_path).expanduser().resolve() if state_path else None
         )
         self.gmail_account_index = int(gmail_account_index)
+        self.connection_path = (
+            Path(connection_path).expanduser().resolve()
+            if connection_path else None
+        )
 
     def status(self):
         return _read_json(self.status_path)
@@ -177,6 +190,11 @@ class StatusSource:
         if self.readiness_path is None:
             return None
         return _read_json(self.readiness_path)
+
+    def connection(self):
+        if self.connection_path is None:
+            return None
+        return _read_json(self.connection_path)
 
     def drafts(self):
         """Draft journal entries, joined to the newest report for context."""
@@ -254,6 +272,17 @@ def _render_status(document):
     """
 
 
+def _parse_stamp(value):
+    """An aware datetime from an ISO string, or None."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        stamp = dt.datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=dt.timezone.utc)
+
+
 def _age_hours(created_at):
     """Hours since an ISO timestamp, or None if it cannot be read."""
     if not isinstance(created_at, str):
@@ -266,6 +295,107 @@ def _age_hours(created_at):
         stamp = stamp.replace(tzinfo=dt.timezone.utc)
     delta = dt.datetime.now(dt.timezone.utc) - stamp
     return delta.total_seconds() / 3600.0
+
+
+def _last_successful_run(status_document):
+    """The finish time of the last run that actually succeeded, or None.
+
+    Ground truth, as opposed to the countdown, which is only an estimate.
+    """
+    document = status_document if isinstance(status_document, dict) else {}
+    run = document.get("last_run")
+    run = run if isinstance(run, dict) else {}
+    if run.get("outcome") != "success":
+        return None
+    finished = run.get("finished_at")
+    return finished if isinstance(finished, str) and finished.strip() else None
+
+
+def _connection_state(document, status_document, now=None):
+    """Expected expiry for the connected account, with the evidence beside it.
+
+    A prediction, never an observation: the seven days is Google's documented
+    policy for a Testing-status external project applied to the moment the
+    token was issued, and a grant can also be revoked earlier. So the last
+    successful run is carried alongside and outranks the estimate - a run that
+    succeeded after the predicted lapse proves the prediction wrong.
+    """
+    if document is None:
+        return None
+    now = now or dt.datetime.now(dt.timezone.utc)
+    issued = _parse_stamp(document.get("last_authorized_at"))
+    evidence = _parse_stamp(_last_successful_run(status_document))
+
+    if issued is None:
+        return {
+            "account": document.get("account"),
+            "state": "unknown", "tone": "warn",
+            "summary": "Connection age unknown - reconnect to establish it",
+            "expected_expiry": None, "last_successful_run": None,
+            "connected_at": document.get("connected_at"),
+        }
+
+    expiry = issued + dt.timedelta(days=TOKEN_LIFETIME_DAYS)
+    days = (expiry - now).total_seconds() / 86400.0
+    overridden = bool(evidence is not None and evidence > expiry)
+
+    if overridden:
+        state, tone = "healthy", "ok"
+        summary = ("Past the expected window, but a run succeeded since - "
+                   "the estimate was wrong, not the connection")
+    elif days < 0:
+        state, tone = "expired", "bad"
+        summary = "Connection expired - reconnect required"
+    elif days < 1:
+        state, tone = "expiring", "warn"
+        summary = "Connection expected to expire in under a day"
+    elif days <= EXPIRING_SOON_DAYS:
+        state, tone = "expiring", "warn"
+        summary = f"Connection expected to last {int(days)} more day" + \
+            ("" if int(days) == 1 else "s")
+    else:
+        state, tone = "healthy", "ok"
+        summary = f"Connection expected to last {int(days)} more days"
+
+    return {
+        "account": document.get("account"),
+        "state": state, "tone": tone, "summary": summary,
+        "expected_expiry": expiry.isoformat(timespec="seconds"),
+        "last_successful_run": evidence.isoformat(timespec="seconds") if evidence else None,
+        "connected_at": document.get("connected_at"),
+    }
+
+
+def _render_connection(state):
+    if state is None:
+        return (
+            '<p class="empty">No account connected. Connecting one is a '
+            'deliberate step taken at the terminal; this page only reports '
+            'what it finds.</p>'
+        )
+    evidence = state.get("last_successful_run")
+    evidence_html = (
+        f'<span class="meta">last successful run <b>{_text(evidence)}</b></span>'
+        if evidence
+        else '<span class="meta">no successful run recorded yet</span>'
+    )
+    expiry_html = (
+        f'<span class="meta">expected <b>{_text(state["expected_expiry"])}</b></span>'
+        if state.get("expected_expiry") else ""
+    )
+    return f"""
+      <div class="rowline">
+        <span class="pill {state['tone']}">{_text(state['state'])}</span>
+        <span class="meta">account <b>{_text(state.get('account'), '-')}</b></span>
+        <span class="meta">connected <b>{_text(state.get('connected_at'), '-')}</b></span>
+      </div>
+      <p class="summary">{_text(state['summary'])}</p>
+      <div class="rowline">
+        {expiry_html}
+        {evidence_html}
+        <span class="est">estimate, not verified with Google</span>
+      </div>
+    """
 
 
 def _render_readiness(document):
@@ -506,6 +636,9 @@ PAGE = """<!doctype html>
   .lab {{ font:11.5px ui-monospace,SFMono-Regular,Menlo,monospace;
     color:var(--accent); background:var(--ground); border:1px solid var(--rule);
     padding:2px 7px; border-radius:2px; }}
+  .summary {{ margin:13px 0 11px; font-size:15px; font-weight:600; }}
+  .est {{ font:11.5px ui-monospace,SFMono-Regular,Menlo,monospace;
+    color:var(--faint); }}
   .checks {{ display:flex; flex-direction:column; gap:1px; background:var(--rule);
     border:1px solid var(--rule); margin-top:16px; }}
   .chk {{ background:var(--surface); padding:8px 12px; display:flex;
@@ -525,6 +658,8 @@ PAGE = """<!doctype html>
   <h1>Triage status</h1>
   <p class="sub">Read-only view of the last run and recent review reports.</p>
   <p class="scope">no writes &middot; no credentials &middot; no Gmail &middot; no Gemini &middot; {host}</p>
+  <h2>Connection</h2>
+  <div class="panel">{connection}</div>
   <h2>Readiness</h2>
   <div class="panel">{readiness}</div>
   <h2>Last run</h2>
@@ -571,6 +706,11 @@ class StatusApp:
         name = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
         return name.strip().lower() in ALLOWED_HOSTS
 
+    def _connection_html(self):
+        return _render_connection(_connection_state(
+            self.source.connection(), self.source.status(),
+        ))
+
     def _drafts_html(self):
         rows = self.source.drafts()
         if rows is None:
@@ -587,6 +727,7 @@ class StatusApp:
             host=html.escape(f"{BIND_HOST}"),
             status=_render_status(self.source.status()),
             readiness=_render_readiness(self.source.readiness()),
+            connection=self._connection_html(),
             drafts=self._drafts_html(),
             reports=_render_reports(self.source.reports()),
             status_path=html.escape(str(self.source.status_path)),
@@ -638,6 +779,11 @@ def parse_args(argv=None):
         help="Directory holding PII-minimized review reports",
     )
     parser.add_argument(
+        "--connection-path",
+        help=("connection.json for the connected account. Shows who is "
+              "connected and when the grant is expected to lapse."),
+    )
+    parser.add_argument(
         "--state-path",
         help=("Run journal (daily-state.json). Enables the draft list, which "
               "shows decisions and links to Gmail, never message content."),
@@ -667,7 +813,7 @@ def parse_args(argv=None):
 def build_app(args):
     return StatusApp(StatusSource(
         args.status_path, args.review_dir, args.readiness_path,
-        args.state_path, args.gmail_account_index,
+        args.state_path, args.gmail_account_index, args.connection_path,
     ))
 
 
