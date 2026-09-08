@@ -983,7 +983,35 @@ Deployment order, when it happens:
    before enabling the service.
 4. Confirm `/healthz` answers through the tunnel and `/` refuses without a
    bearer.
-5. Only then connect an account, deliberately and separately.
+5. Only then connect an account, deliberately and separately:
+
+```
+python broker_client.py mint-invite
+# the owner visits https://<broker>/start/<invite> and consents
+python broker_client.py collect --url https://<broker>/pickup/<invite> \
+    --private broker-operator.key --token-out ./token.json
+
+python connect_account.py --root /mnt/state --account <address> \
+    --token ./token.json --yes
+```
+
+`connect_account.py` is the only place that calls Cloud KMS for real, and it
+does so through an injected client factory whose default import of
+`google.cloud.kms` lives inside the factory function - so importing the module
+reaches nothing and its tests run offline against a double.
+
+The address is asserted by the operator and cannot be checked here: the broker
+seals only `refresh_token`, `scope` and `token_type`, having no business
+retaining an address. If a token document ever does carry one it must agree,
+and a mismatch is refused. Getting the address wrong leaks nothing - the token
+still opens only the mailbox it was issued for - but it files the archive and
+the occupancy record under the wrong identity, which is why `--yes` is
+required. The only real verification is a read-only Gmail profile check, which
+is a live call and a separate step.
+
+On success the plaintext credential is deleted. On failure it is deliberately
+kept, and the command says so: a failed store that also destroyed the
+credential would cost the account owner another round of consent for nothing.
 
 Steps 1, 2, 3 and 5 touch a real cloud account or mailbox. They are the
 operator's to perform.
