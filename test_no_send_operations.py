@@ -40,6 +40,8 @@ PRODUCTION = [
     ROOT / "connection_notify.py",
     ROOT / "connection_schedule.py",
     ROOT / "connection_tokens.py",
+    ROOT / "hosted_status.py",
+    ROOT / "hosted_wsgi.py",
     ROOT / "web_status.py",
 ]
 

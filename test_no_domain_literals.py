@@ -66,6 +66,8 @@ PIPELINE_MODULES = [
     "connection_notify.py",
     "connection_schedule.py",
     "connection_tokens.py",
+    "hosted_status.py",
+    "hosted_wsgi.py",
     "web_status.py",
 ]
 
