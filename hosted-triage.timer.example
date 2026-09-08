@@ -1,0 +1,11 @@
+[Unit]
+Description=Check whether Email-Scanner triage is due
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+RandomizedDelaySec=60
+Unit=hosted-triage.service
+
+[Install]
+WantedBy=timers.target

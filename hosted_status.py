@@ -237,17 +237,25 @@ def _last_run(status_document):
     """The last run's outcome, with no counts and no message detail."""
     if not status_document:
         return None
+    run = status_document.get("last_run")
+    # Keep reading the brief pre-RunStatus flat shape if an early deployment
+    # left one behind, while preferring the schema every real run writes.
+    run = run if isinstance(run, dict) else status_document
     return {
-        "outcome": str(status_document.get("outcome") or "unknown"),
-        "finished_at": str(status_document.get("finished_at") or ""),
+        "outcome": str(run.get("outcome") or "unknown"),
+        "finished_at": str(run.get("finished_at") or ""),
     }
 
 
 def _last_successful_run(status_document):
     """Only a success is evidence a token still worked."""
-    if not status_document or status_document.get("outcome") != "success":
+    if not status_document:
         return None
-    stamp = status_document.get("finished_at")
+    run = status_document.get("last_run")
+    run = run if isinstance(run, dict) else status_document
+    if run.get("outcome") != "success":
+        return None
+    stamp = run.get("finished_at")
     return stamp if isinstance(stamp, str) and stamp.strip() else None
 
 

@@ -699,7 +699,8 @@ def _estimate_metadata(messages, account_labels, config, state, own_address,
     return counts
 
 
-def _run_locked(args, classifier, config, templates, state, status):
+def _run_locked(args, classifier, config, templates, state, status,
+                gmail_service=None):
     counts = {
         "scanned": 0, "classified": 0, "labeled": 0, "drafted": 0,
         "needs_review": 0, "skipped": 0, "failures": 0,
@@ -729,7 +730,12 @@ def _run_locked(args, classifier, config, templates, state, status):
         if args.mode == "initial"
         else build_daily_query(args.overlap_days)
     )
-    service = get_gmail_service(token_path=args.token_path)
+    # Hosted runs decrypt their credential in memory and inject an already
+    # authorized service. Local/CLI runs keep the existing token-file path.
+    service = (
+        gmail_service if gmail_service is not None
+        else get_gmail_service(token_path=args.token_path)
+    )
     throttle = QuotaThrottle()
     own_address = normalize_address(
         gmail_execute(service.users().getProfile(userId="me")).get("emailAddress", "")
@@ -981,7 +987,7 @@ def _run_locked(args, classifier, config, templates, state, status):
     return done(1 if counts["failures"] else 0, error_codes)
 
 
-def _main_with_args(args, classifier=None):
+def _main_with_args(args, classifier=None, gmail_service=None):
     logging.basicConfig(
         level=logging.WARNING if args.scheduled else logging.INFO,
         format="%(levelname)s %(message)s",
@@ -1024,7 +1030,10 @@ def _main_with_args(args, classifier=None):
     try:
         with lock:
             try:
-                return _run_locked(args, classifier, config, templates, state, status)
+                return _run_locked(
+                    args, classifier, config, templates, state, status,
+                    gmail_service=gmail_service,
+                )
             except Exception as exc:
                 print(f"Daily triage stopped safely ({type(exc).__name__}).")
                 # The status file stays a PII-free summary. The type name
@@ -1078,7 +1087,7 @@ def _finalize_review_report(args, reporter, code):
     return code
 
 
-def main(argv=None, classifier=None):
+def main(argv=None, classifier=None, gmail_service=None):
     args = parse_args(argv)
     reporter = None
     if args.review_report:
@@ -1092,7 +1101,15 @@ def main(argv=None, classifier=None):
             return code
 
     try:
-        code = _main_with_args(args, classifier=classifier)
+        if gmail_service is None:
+            # Preserve the long-standing callable shape for local callers and
+            # test doubles. The hosted-only keyword appears only when a real
+            # in-memory service was deliberately supplied.
+            code = _main_with_args(args, classifier=classifier)
+        else:
+            code = _main_with_args(
+                args, classifier=classifier, gmail_service=gmail_service
+            )
     except Exception as exc:
         print(f"Daily triage stopped safely ({type(exc).__name__}).")
         code = 1

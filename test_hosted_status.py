@@ -225,8 +225,10 @@ def test_the_expiry_estimate_is_included_and_labelled(tmp_path):
 def test_a_successful_run_after_the_window_still_outranks_the_estimate(tmp_path):
     connection = _connect(tmp_path)
     (Path(connection.directory) / "daily-status.json").write_text(
-        json.dumps({"outcome": "success",
-                    "finished_at": (T0 + dt.timedelta(days=9)).isoformat()}),
+        json.dumps({"version": 1, "last_run": {
+            "outcome": "success",
+            "finished_at": (T0 + dt.timedelta(days=9)).isoformat(),
+        }}),
         encoding="utf-8",
     )
     document = status_document(tmp_path, T0 + dt.timedelta(days=10))
@@ -237,8 +239,10 @@ def test_a_successful_run_after_the_window_still_outranks_the_estimate(tmp_path)
 def test_a_failed_run_is_not_evidence_of_a_working_token(tmp_path):
     connection = _connect(tmp_path)
     (Path(connection.directory) / "daily-status.json").write_text(
-        json.dumps({"outcome": "failure",
-                    "finished_at": (T0 + dt.timedelta(days=9)).isoformat()}),
+        json.dumps({"version": 1, "last_run": {
+            "outcome": "failure",
+            "finished_at": (T0 + dt.timedelta(days=9)).isoformat(),
+        }}),
         encoding="utf-8",
     )
     document = status_document(tmp_path, T0 + dt.timedelta(days=10))
@@ -249,9 +253,11 @@ def test_a_failed_run_is_not_evidence_of_a_working_token(tmp_path):
 def test_the_last_run_carries_no_counts_or_message_detail(tmp_path):
     connection = _connect(tmp_path)
     (Path(connection.directory) / "daily-status.json").write_text(
-        json.dumps({"outcome": "success", "finished_at": T0.isoformat(),
-                    "subjects": ["a private subject line"],
-                    "counts": {"scanned": 12}}),
+        json.dumps({"version": 1, "last_run": {
+            "outcome": "success", "finished_at": T0.isoformat(),
+            "subjects": ["a private subject line"],
+            "counts": {"scanned": 12},
+        }}),
         encoding="utf-8",
     )
     response = _call(_app(tmp_path))

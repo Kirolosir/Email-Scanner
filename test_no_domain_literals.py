@@ -69,6 +69,7 @@ PIPELINE_MODULES = [
     "connection_tokens.py",
     "hosted_status.py",
     "hosted_wsgi.py",
+    "hosted_runner.py",
     "web_status.py",
 ]
 

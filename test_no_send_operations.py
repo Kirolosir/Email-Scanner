@@ -43,6 +43,7 @@ PRODUCTION = [
     ROOT / "connection_tokens.py",
     ROOT / "hosted_status.py",
     ROOT / "hosted_wsgi.py",
+    ROOT / "hosted_runner.py",
     ROOT / "web_status.py",
 ]
 
