@@ -30,7 +30,7 @@ from connect_account import (
     connect_account as wire,
     read_token_document,
 )
-from test_connection_kms import KEY, FakeKms
+from test_connection_kms import KEY, FakeKms, reference_crc32c
 
 
 A = "coach@example.test"
@@ -41,7 +41,8 @@ SOURCE = Path("connect_account.py").read_text(encoding="utf-8")
 
 def _provider(client=None):
     from connection_kms import KmsKeyProvider
-    return KmsKeyProvider(KEY, client or FakeKms())
+    return KmsKeyProvider(KEY, client or FakeKms(),
+                          crc32c=reference_crc32c)
 
 
 def _token_file(tmp_path, **overrides):
@@ -176,7 +177,7 @@ def test_a_failing_kms_leaves_the_credential_file_in_place(tmp_path):
     root, token = _root(tmp_path), _token_file(tmp_path)
     from connection_kms import KmsKeyProvider
     with pytest.raises(tokens.TokenStoreError):
-        wire(root, A, token, KmsKeyProvider(KEY, Broken()))
+        wire(root, A, token, KmsKeyProvider(KEY, Broken(), crc32c=reference_crc32c))
 
     assert token.exists()
     assert json.loads(token.read_text(encoding="utf-8"))["refresh_token"] == SECRET
@@ -282,7 +283,7 @@ def test_the_cli_prints_no_token_material(tmp_path, capsys):
     connect_account.main([
         "--root", str(root), "--account", A, "--token", str(token),
         "--kms-key", KEY, "--yes",
-    ], client_factory=FakeKms)
+    ], client_factory=FakeKms, crc32c=reference_crc32c)
 
     captured = capsys.readouterr()
     assert SECRET not in captured.out and SECRET not in captured.err
@@ -300,7 +301,7 @@ def test_a_kms_failure_prints_no_token_material(tmp_path, capsys):
     code = connect_account.main([
         "--root", str(root), "--account", A, "--token", str(token),
         "--kms-key", KEY, "--yes",
-    ], client_factory=Broken)
+    ], client_factory=Broken, crc32c=reference_crc32c)
 
     captured = capsys.readouterr()
     assert code == 1
@@ -348,7 +349,7 @@ def test_an_injected_factory_is_used_instead_of_the_default(tmp_path):
     connect_account.main([
         "--root", str(root), "--account", A, "--token", str(token),
         "--kms-key", KEY, "--yes",
-    ], client_factory=factory)
+    ], client_factory=factory, crc32c=reference_crc32c)
     assert used == [True]
 
 
@@ -361,7 +362,7 @@ def test_the_default_factory_is_never_reached_when_one_is_injected(tmp_path):
         code = connect_account.main([
             "--root", str(root), "--account", A, "--token", str(token),
             "--kms-key", KEY, "--yes",
-        ], client_factory=FakeKms)
+        ], client_factory=FakeKms, crc32c=reference_crc32c)
     finally:
         connect_account.default_kms_client = original
     assert code == 0
@@ -401,7 +402,7 @@ def test_it_refuses_without_yes(tmp_path):
         connect_account.main([
             "--root", str(root), "--account", A, "--token", str(token),
             "--kms-key", KEY,
-        ], client_factory=FakeKms)
+        ], client_factory=FakeKms, crc32c=reference_crc32c)
     assert caught.value.code != 0
     assert conn.occupied_by(root) is None
     assert token.exists()
@@ -413,7 +414,7 @@ def test_a_missing_kms_key_is_refused_before_anything_is_written(tmp_path,
     code = connect_account.main([
         "--root", str(root), "--account", A, "--token", str(token),
         "--kms-key", "", "--yes",
-    ], client_factory=FakeKms)
+    ], client_factory=FakeKms, crc32c=reference_crc32c)
 
     assert code == 1
     assert conn.occupied_by(root) is None
@@ -431,7 +432,7 @@ def test_an_occupied_connection_exits_distinctly(tmp_path, capsys):
     code = connect_account.main([
         "--root", str(root), "--account", B, "--token", str(intruder),
         "--kms-key", KEY, "--yes",
-    ], client_factory=FakeKms)
+    ], client_factory=FakeKms, crc32c=reference_crc32c)
 
     assert code == 2
     assert "Disconnect it first" in capsys.readouterr().err
@@ -442,7 +443,7 @@ def test_a_failure_says_the_credential_is_still_there(tmp_path, capsys):
     connect_account.main([
         "--root", str(root), "--account", A, "--token", str(token),
         "--kms-key", "", "--yes",
-    ], client_factory=FakeKms)
+    ], client_factory=FakeKms, crc32c=reference_crc32c)
     assert "left in place" in capsys.readouterr().err
 
 
@@ -456,7 +457,7 @@ def test_an_ignored_schedule_flag_is_reported(tmp_path, capsys):
     connect_account.main([
         "--root", str(root), "--account", A, "--token", str(again),
         "--kms-key", KEY, "--run-at", "07:30", "--yes",
-    ], client_factory=FakeKms)
+    ], client_factory=FakeKms, crc32c=reference_crc32c)
 
     assert "does not change run_at" in capsys.readouterr().err
     assert conn.current(root).run_at == "18:00"
@@ -471,7 +472,7 @@ def test_a_matching_schedule_flag_is_not_reported_as_ignored(tmp_path, capsys):
     connect_account.main([
         "--root", str(root), "--account", A, "--token", str(again),
         "--kms-key", KEY, "--run-at", "18:00", "--yes",
-    ], client_factory=FakeKms)
+    ], client_factory=FakeKms, crc32c=reference_crc32c)
     assert "does not change" not in capsys.readouterr().err
 
 
@@ -480,7 +481,7 @@ def test_a_first_connection_reports_no_ignored_flags(tmp_path, capsys):
     connect_account.main([
         "--root", str(root), "--account", A, "--token", str(token),
         "--kms-key", KEY, "--run-at", "07:30", "--yes",
-    ], client_factory=FakeKms)
+    ], client_factory=FakeKms, crc32c=reference_crc32c)
     assert "does not change" not in capsys.readouterr().err
     assert conn.current(root).run_at == "07:30"
 
@@ -490,7 +491,7 @@ def test_the_summary_confirms_the_credential_was_destroyed(tmp_path, capsys):
     connect_account.main([
         "--root", str(root), "--account", A, "--token", str(token),
         "--kms-key", KEY, "--yes",
-    ], client_factory=FakeKms)
+    ], client_factory=FakeKms, crc32c=reference_crc32c)
     assert "plaintext credential destroyed" in capsys.readouterr().out
 
 
@@ -499,5 +500,5 @@ def test_keeping_the_credential_says_so_loudly(tmp_path, capsys):
     connect_account.main([
         "--root", str(root), "--account", A, "--token", str(token),
         "--kms-key", KEY, "--keep-token-file", "--yes",
-    ], client_factory=FakeKms)
+    ], client_factory=FakeKms, crc32c=reference_crc32c)
     assert "STILL AT" in capsys.readouterr().out

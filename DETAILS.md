@@ -1000,6 +1000,14 @@ does so through an injected client factory whose default import of
 `google.cloud.kms` lives inside the factory function - so importing the module
 reaches nothing and its tests run offline against a double.
 
+It needs two libraries on the host, `google-cloud-kms` and **`google-crc32c`**.
+The second is not optional and not merely defensive: every KMS request carries
+a CRC32C of its payload, and Cloud KMS reports `verified_plaintext_crc32c` as
+false when a request arrives with no checksum to verify. A provider that sends
+none therefore fails every call while reporting corruption that never happened.
+The checksum function is injected like the client, and its default fails loudly
+rather than skipping the checksum when the library is absent.
+
 The address is asserted by the operator and cannot be checked here: the broker
 seals only `refresh_token`, `scope` and `token_type`, having no business
 retaining an address. If a token document ever does carry one it must agree,

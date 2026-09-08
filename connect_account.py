@@ -145,15 +145,20 @@ def default_kms_client():
     return kms.KeyManagementServiceClient()
 
 
-def build_provider(key_name, client_factory=None):
-    """A KmsKeyProvider for `key_name`, using an injected factory if given."""
+def build_provider(key_name, client_factory=None, crc32c=None):
+    """A KmsKeyProvider for `key_name`, using injected parts if given.
+
+    The checksum function is injectable alongside the client for the same
+    reason: every KMS request carries a CRC32C of its payload, and a test
+    should be able to exercise that without google-crc32c installed.
+    """
     if not key_name:
         raise ConnectAccountError(
             f"{KMS_KEY_ENV} is not set; it names the Cloud KMS key that wraps "
             "the token's data key"
         )
     factory = client_factory or default_kms_client
-    return KmsKeyProvider(key_name, factory())
+    return KmsKeyProvider(key_name, factory(), crc32c=crc32c)
 
 
 # ---------------------------------------------------------------------
@@ -242,7 +247,7 @@ def parse_args(argv=None):
     return parser, parser.parse_args(argv)
 
 
-def main(argv=None, *, client_factory=None):
+def main(argv=None, *, client_factory=None, crc32c=None):
     parser, args = parse_args(argv)
 
     # Which schedule flags were actually typed, so an ignored one can be
@@ -264,7 +269,9 @@ def main(argv=None, *, client_factory=None):
             print(f"note: re-authorisation does not change {note}",
                   file=sys.stderr)
 
-        provider = build_provider(args.kms_key, client_factory=client_factory)
+        provider = build_provider(args.kms_key,
+                                  client_factory=client_factory,
+                                  crc32c=crc32c)
         summary = connect_account(
             args.root, args.account, args.token, provider,
             timezone=args.timezone, run_at=args.run_at,

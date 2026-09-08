@@ -28,6 +28,20 @@ IT CANNOT CREATE A KEY. create() refuses, permanently. Provisioning a key ring
 and a key has IAM consequences and a billing footprint; it belongs to the
 operator at a terminal, not to a web process that happened to boot holding
 credentials. The refusal carries the command to run instead.
+
+CHECKSUMS ARE SENT, NOT MERELY CHECKED. Every request carries a CRC32C of what
+it contains and every response is checked against the checksum it reports.
+This is written out because the first version got it exactly backwards: it read
+response.verified_plaintext_crc32c without ever sending plaintext_crc32c. Cloud
+KMS answers False to that flag when no checksum was supplied - there was
+nothing to verify - so the very first real call failed, and would have failed
+every time, reporting corruption that had not happened.
+
+Nothing in ten mutations caught it, because the test double returned
+verified_plaintext_crc32c=True unconditionally: it modelled the outcome the
+happy path expects rather than the contract the service actually has. The
+double now derives that flag from whether a checksum was present and correct,
+which is the only reason the tests can speak to this at all.
 """
 from __future__ import annotations
 
@@ -71,6 +85,47 @@ def _require_bytes(value, label):
     return bytes(value)
 
 
+def default_crc32c(data):
+    """CRC32C of `data`, from google-crc32c.
+
+    Imported here rather than at module scope for the same reason the KMS
+    client is injected: this module must stay importable with nothing Google
+    installed. Missing the library is a hard failure rather than a silent
+    downgrade - skipping the checksum is exactly the bug this function exists
+    to fix, and doing it quietly would hide the same failure a second time.
+    """
+    try:
+        import google_crc32c  # noqa: PLC0415 - deliberately deferred
+    except ImportError as exc:
+        raise KmsProviderError(
+            "google-crc32c is not installed; it is required to checksum "
+            "requests to Cloud KMS. Install it on the deployment host"
+        ) from exc
+    return int(google_crc32c.value(data))
+
+
+def _require_verified(verified, field, label):
+    """Insist the service confirmed the checksum we sent for `label`.
+
+    Takes the VALUE, not the field name: the no-send audit refuses a computed
+    getattr in production code, and rightly - an attribute name assembled at
+    runtime cannot be statically audited. Callers read the field with a
+    literal name and pass what they got.
+
+    Fails closed on a missing field. Earlier this defaulted to "assume
+    verified" so a minimal test double would pass, which is precisely how a
+    request that carried no checksum at all went unnoticed: the real service
+    answered False, every double answered True, and nothing in between was
+    ever exercised.
+    """
+    if verified is not True:
+        raise KmsProviderError(
+            f"KMS did not confirm the {label} checksum ({field}={verified!r}); "
+            "the request may have been corrupted in transit, or may have "
+            "carried no checksum to verify"
+        )
+
+
 class KmsKeyProvider:
     """Wrap and unwrap data keys with a Cloud KMS symmetric key.
 
@@ -86,7 +141,8 @@ class KmsKeyProvider:
     constructs one; a deployment builds it and passes it in.
     """
 
-    def __init__(self, key_name, client, *, timeout=DEFAULT_TIMEOUT_SECONDS):
+    def __init__(self, key_name, client, *, timeout=DEFAULT_TIMEOUT_SECONDS,
+                 crc32c=None):
         if not isinstance(key_name, str) or not KEY_NAME.match(key_name.strip()):
             raise KmsProviderError(
                 "KMS key name must look like projects/P/locations/L/"
@@ -104,6 +160,26 @@ class KmsKeyProvider:
         self.key_name = key_name.strip()
         self.client = client
         self.timeout = timeout
+        # Injected like the client, so tests exercise the real request shape
+        # against a reference implementation without needing the library.
+        self.crc32c = crc32c or default_crc32c
+
+    def _require_matching_crc(self, reported, field, data, label):
+        """Insist the bytes we received match the checksum sent with them.
+
+        Takes the reported value rather than the field name, for the same
+        reason _require_verified does.
+        """
+        if reported is None:
+            raise KmsProviderError(
+                f"KMS returned no {field}; the {label} cannot be checked for "
+                "corruption in transit"
+            )
+        if int(reported) != self.crc32c(data):
+            raise KmsProviderError(
+                f"the {label} returned by KMS does not match its checksum; "
+                "it was corrupted in transit"
+            )
 
     # -- provisioning is not ours to do ---------------------------------
 
@@ -136,23 +212,34 @@ class KmsKeyProvider:
 
     def wrap(self, data_key, seat_id):
         data_key = _require_bytes(data_key, "data key")
+        associated = seat_id.encode("utf-8")
         response = self._call(self.client.encrypt, {
             "name": self.key_name,
             "plaintext": data_key,
-            "additional_authenticated_data": seat_id.encode("utf-8"),
+            "plaintext_crc32c": self.crc32c(data_key),
+            "additional_authenticated_data": associated,
+            "additional_authenticated_data_crc32c": self.crc32c(associated),
         })
         ciphertext = getattr(response, "ciphertext", None)
         if not isinstance(ciphertext, (bytes, bytearray)) or not ciphertext:
             raise KmsProviderError("KMS returned no ciphertext")
 
-        # KMS reports whether it verified the checksum of what it received.
-        # Present only on the real client; absent on a minimal double, and a
-        # missing field is not a failed check.
-        if getattr(response, "verified_plaintext_crc32c", True) is False:
-            raise KmsProviderError(
-                "KMS did not verify the request checksum; the data key may "
-                "have been corrupted in transit"
-            )
+        # Outbound integrity: the server confirms the checksum it received
+        # matches the bytes it received. This is only meaningful because the
+        # request above actually carries plaintext_crc32c - KMS reports False
+        # when no checksum was sent, since there was nothing to verify.
+        _require_verified(
+            getattr(response, "verified_plaintext_crc32c", None),
+            "verified_plaintext_crc32c", "data key")
+        _require_verified(
+            getattr(response, "verified_additional_authenticated_data_crc32c",
+                    None),
+            "verified_additional_authenticated_data_crc32c", "connection id")
+
+        # Inbound integrity: we confirm the ciphertext arrived intact.
+        self._require_matching_crc(
+            getattr(response, "ciphertext_crc32c", None),
+            "ciphertext_crc32c", ciphertext, "ciphertext")
         return SCHEME + SEPARATOR + bytes(ciphertext)
 
     def unwrap(self, wrapped, seat_id):
@@ -167,15 +254,26 @@ class KmsKeyProvider:
         if not ciphertext:
             raise KmsProviderError("wrapped data key is malformed")
 
+        associated = seat_id.encode("utf-8")
         response = self._call(self.client.decrypt, {
             "name": self.key_name,
             "ciphertext": ciphertext,
-            "additional_authenticated_data": seat_id.encode("utf-8"),
+            "ciphertext_crc32c": self.crc32c(ciphertext),
+            "additional_authenticated_data": associated,
+            "additional_authenticated_data_crc32c": self.crc32c(associated),
         })
         plaintext = getattr(response, "plaintext", None)
         if not isinstance(plaintext, (bytes, bytearray)):
             raise KmsProviderError("KMS returned no plaintext")
         plaintext = bytes(plaintext)
+
+        # DecryptResponse carries no "verified" flag - a corrupted request is
+        # rejected outright by the service - so the only check available here
+        # is that the plaintext came back intact.
+        self._require_matching_crc(
+            getattr(response, "plaintext_crc32c", None),
+            "plaintext_crc32c", plaintext, "data key")
+
         # A data key of the wrong length would be used as an AES key and fail
         # somewhere less obvious. Refuse here, where the cause is visible.
         if len(plaintext) != DATA_KEY_BYTES:
