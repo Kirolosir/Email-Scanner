@@ -55,6 +55,10 @@ __pycache__/
 venv/
 env/
 
+# A downloaded Cloud SDK is a machine tool, never project source.
+gcloud --version/
+google-cloud-sdk/
+
 # OS
 .DS_Store
 body.txt

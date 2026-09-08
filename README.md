@@ -1,8 +1,11 @@
+
 # Email Drafting Tool
 
 This is a Python tool for sorting a Gmail inbox and saving reply drafts. It
 never sends mail. The person using the account opens each draft in Gmail and
 decides whether to edit, send, or delete it.
+
+Built independently by a college Junior as a student software project.
 
 ## What it does
 

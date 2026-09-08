@@ -392,6 +392,7 @@ class HostedDashboardApp:
                        required autocomplete="current-password">
                 <button type="submit">Open dashboard</button>
               </form>
+              <p class="student-credit">Built independently by a college Junior.</p>
             </section>
           </main>
         """)
@@ -535,6 +536,7 @@ class HostedDashboardApp:
                 automated messages, and bulk mail from reply drafting.</p></div>
               <a class="secondary" href="https://mail.google.com/mail/u/0/#drafts">Open Gmail drafts</a>
             </section>
+            <p class="student-credit page-credit">Built independently by a college Junior.</p>
           </main>
         """)
 
@@ -667,6 +669,7 @@ class HostedDashboardApp:
                   <button class="danger" type="submit">Disconnect Gmail</button></div>
               </form>
             </section>
+            <p class="student-credit page-credit">Built independently by a college Junior.</p>
           </main>
         """)
 
@@ -726,6 +729,7 @@ input:not([type=hidden]):not([type=checkbox]),textarea{{width:100%;padding:13px 
 outline:none;background:white;color:var(--ink)}}textarea{{resize:vertical}}input:focus,textarea:focus{{border-color:var(--mint);box-shadow:0 0 0 4px #dff7f0}}
 .login-card button{{width:100%;margin-top:14px}}.notice{{padding:11px 13px;border-radius:10px}}
 .notice.bad{{background:#fff0ed;color:#9b3024}}.notice.good{{background:#e2f7ee;color:#116645}}
+.student-credit{{margin:24px 0 0;color:var(--muted);font-size:.8rem;text-align:center}}.page-credit{{margin-top:34px}}
 .settings-shell{{max-width:980px}}.account-hero.compact h1{{font-size:clamp(2rem,4vw,3rem)}}
 .settings-form{{display:grid;gap:16px}}.form-section{{display:grid;grid-template-columns:.75fr 1.25fr;gap:38px}}
 .form-copy p{{color:var(--muted)}}.form-section label{{margin:0 0 8px}}.form-section label:not(:first-child){{margin-top:18px}}
