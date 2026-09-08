@@ -62,6 +62,7 @@ PIPELINE_MODULES = [
     "connection.py",
     "connection_archive.py",
     "connection_expiry.py",
+    "connection_kms.py",
     "connection_notify.py",
     "connection_schedule.py",
     "connection_tokens.py",
