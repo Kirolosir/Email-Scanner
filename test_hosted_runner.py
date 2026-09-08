@@ -291,6 +291,12 @@ def test_the_runner_service_is_sandboxed_to_the_state_disk():
     assert "ReadWritePaths=/mnt/state" in unit
     assert "NoNewPrivileges=yes" in unit
     assert "hosted_runner.py" in unit
+    assert "EnvironmentFile=/etc/email-scanner/gemini.env" in unit
+
+
+def test_dashboard_service_cannot_read_the_gemini_key_file():
+    unit = Path("hosted-dashboard.service.example").read_text(encoding="utf-8")
+    assert "gemini.env" not in unit
 
 
 def test_no_plaintext_token_file_api_exists_in_the_runner():

@@ -11,6 +11,7 @@ User=email-scanner
 Group=email-scanner
 WorkingDirectory=/opt/email-scanner
 EnvironmentFile=/etc/email-scanner/hosted.env
+EnvironmentFile=/etc/email-scanner/gemini.env
 ExecStart=/opt/email-scanner/.venv/bin/python /opt/email-scanner/hosted_runner.py
 
 ProtectSystem=strict
