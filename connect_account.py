@@ -38,9 +38,11 @@ is reported.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import connection as conn
@@ -165,21 +167,84 @@ def build_provider(key_name, client_factory=None, crc32c=None):
 # The operation
 # ---------------------------------------------------------------------
 
+@contextmanager
+def connection_lifecycle_lock(root):
+    """Serialize lifecycle changes without creating another state artifact.
+
+    The directory itself is a valid advisory-lock target on the VM's POSIX
+    volume. Locking its descriptor means even a refused attempt writes
+    nothing, while two web/CLI attempts cannot both observe a vacant slot and
+    race their token and record writes into different final accounts.
+    """
+    try:
+        descriptor = os.open(Path(root), os.O_RDONLY)
+    except OSError as exc:
+        raise ConnectAccountError(
+            f"could not lock the deployment state ({type(exc).__name__})"
+        ) from exc
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    except OSError as exc:
+        raise ConnectAccountError(
+            f"connection lifecycle failed ({type(exc).__name__})"
+        ) from exc
+    finally:
+        os.close(descriptor)
+
 def connect_account(root, account, token_path, provider, *, timezone="UTC",
                     run_at="18:00", now=None, destroy_token_file=True):
     """Establish the connection and store its credential. Returns a summary.
 
-    Order matters. connect() runs first because it is the step that can refuse
-    - a different account already holding the connection - and a refusal must
-    leave the deployment untouched. Only once the record exists is anything
-    encrypted or written.
+    Order matters. The account is validated and occupancy checked first, but
+    the record is only published after token encryption and storage succeeds.
+    A failed KMS or filesystem write therefore leaves a vacant deployment
+    vacant, and a failed reauthorisation leaves its prior record intact.
     """
     document = read_token_document(token_path)
     check_account_agrees(document, account)
 
-    connection = conn.connect(root, account, timezone=timezone,
-                              run_at=run_at, now=now)
-    tokens.store_token(connection, document, provider)
+    with connection_lifecycle_lock(root):
+        existing = conn.current(root)
+        connection = conn.prepare_connection(
+            root, account, timezone=timezone, run_at=run_at, now=now
+        )
+        try:
+            tokens.store_token(connection, document, provider)
+        except tokens.TokenStoreError:
+            raise
+        except OSError as exc:
+            raise ConnectAccountError(
+                f"could not store the encrypted credential "
+                f"({type(exc).__name__})"
+            ) from exc
+
+        try:
+            conn.persist_connection(connection)
+        except OSError as exc:
+            # On a first connection there was no live token to preserve. Do
+            # not leave a disconnected account's encrypted credential behind
+            # if publishing the occupancy record failed.
+            if existing is None:
+                try:
+                    removed = tokens.forget_token(connection)
+                except OSError as cleanup_exc:
+                    raise ConnectAccountError(
+                        "could not publish the connection record, and cleanup "
+                        "of the unpublished encrypted credential could not be "
+                        f"confirmed ({type(cleanup_exc).__name__})"
+                    ) from exc
+                if not removed:
+                    raise ConnectAccountError(
+                        "could not publish the connection record, and cleanup "
+                        "of the unpublished encrypted credential could not be "
+                        "confirmed"
+                    ) from exc
+            raise ConnectAccountError(
+                f"could not publish the connection record "
+                f"({type(exc).__name__})"
+            ) from exc
+
     # Drop the plaintext reference before touching the filesystem again.
     document = None
 

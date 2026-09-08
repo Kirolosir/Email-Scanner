@@ -181,6 +181,64 @@ def test_a_failing_kms_leaves_the_credential_file_in_place(tmp_path):
 
     assert token.exists()
     assert json.loads(token.read_text(encoding="utf-8"))["refresh_token"] == SECRET
+    assert conn.occupied_by(root) is None
+    assert not (root / "active" / "token.enc.json").exists()
+
+
+def test_a_token_write_failure_never_publishes_the_connection(tmp_path,
+                                                               monkeypatch):
+    """The KMS may succeed before the encrypted file write fails."""
+    root, token = _root(tmp_path), _token_file(tmp_path)
+
+    def fail_write(*_args, **_kwargs):
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr(tokens, "atomic_write_json", fail_write)
+    with pytest.raises(ConnectAccountError) as caught:
+        wire(root, A, token, _provider())
+
+    assert "encrypted credential" in str(caught.value)
+    assert conn.occupied_by(root) is None
+    assert token.exists()
+
+
+def test_a_record_write_failure_removes_the_orphaned_token(tmp_path,
+                                                            monkeypatch):
+    """Two files cannot commit atomically; the safe rollback stays vacant."""
+    root, token = _root(tmp_path), _token_file(tmp_path)
+
+    def fail_write(*_args, **_kwargs):
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr(conn, "atomic_write_json", fail_write)
+    with pytest.raises(ConnectAccountError) as caught:
+        wire(root, A, token, _provider())
+
+    assert "connection record" in str(caught.value)
+    assert conn.occupied_by(root) is None
+    assert not (root / "active" / "token.enc.json").exists()
+    assert token.exists()
+
+
+def test_a_failed_orphan_cleanup_is_reported_not_assumed(tmp_path,
+                                                          monkeypatch):
+    root, token = _root(tmp_path), _token_file(tmp_path)
+
+    def fail_record(*_args, **_kwargs):
+        raise OSError("disk unavailable")
+
+    def fail_cleanup(*_args, **_kwargs):
+        raise OSError("unlink unavailable")
+
+    monkeypatch.setattr(conn, "atomic_write_json", fail_record)
+    monkeypatch.setattr(tokens, "forget_token", fail_cleanup)
+    with pytest.raises(ConnectAccountError) as caught:
+        wire(root, A, token, _provider())
+
+    assert "cleanup" in str(caught.value)
+    assert "could not be confirmed" in str(caught.value)
+    assert conn.occupied_by(root) is None
+    assert token.exists()
 
 
 def test_the_credential_can_be_kept_deliberately(tmp_path):

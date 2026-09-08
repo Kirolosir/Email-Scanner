@@ -241,9 +241,15 @@ def occupied_by(root):
     return connection.account if connection else None
 
 
-def connect(root, account, *, timezone="UTC", run_at="18:00", now=None,
-            limits=None):
-    """Establish or refresh the single connection.
+def prepare_connection(root, account, *, timezone="UTC", run_at="18:00",
+                       now=None, limits=None):
+    """Build the connection record that ``connect`` would persist.
+
+    This is deliberately side-effect free. A caller that also has to store a
+    credential can prepare the record, finish the fallible encryption step,
+    and only then make the connection visible. Marking the deployment
+    occupied before its credential exists creates a connected-looking account
+    that can never run.
 
     Vacant            -> connect, recording both timestamps.
     Same account      -> a re-authorisation. Only last_authorized_at moves;
@@ -267,8 +273,6 @@ def connect(root, account, *, timezone="UTC", run_at="18:00", now=None,
         document = existing.as_document()
         document["last_authorized_at"] = stamp
         _validate(document)
-        ensure_private_directory(Path(root))
-        atomic_write_json(record_path(root), document)
         return Connection(document, root)
 
     document = {
@@ -283,8 +287,29 @@ def connect(root, account, *, timezone="UTC", run_at="18:00", now=None,
         **(limits or {}),
     }
     _validate(document)
-    ensure_private_directory(Path(root))
-    connection = Connection(document, root)
+    return Connection(document, root)
+
+
+def persist_connection(connection):
+    """Atomically publish one already-validated connection record."""
+    root = connection.root
+    _validate(connection.as_document())
+    ensure_private_directory(root)
     ensure_private_directory(connection.directory)
-    atomic_write_json(record_path(root), document)
+    atomic_write_json(record_path(root), connection.as_document())
     return connection
+
+
+def connect(root, account, *, timezone="UTC", run_at="18:00", now=None,
+            limits=None):
+    """Establish or refresh the single connection.
+
+    Callers that also store a token should use ``prepare_connection`` and
+    ``persist_connection`` so the token can be committed first. This compact
+    wrapper preserves the original API for connection-only callers.
+    """
+    connection = prepare_connection(
+        root, account, timezone=timezone, run_at=run_at, now=now,
+        limits=limits,
+    )
+    return persist_connection(connection)
