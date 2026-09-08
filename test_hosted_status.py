@@ -37,6 +37,10 @@ SOURCE = Path("hosted_status.py").read_text(encoding="utf-8")
 
 def _config(tmp_path, **kwargs):
     kwargs.setdefault("require_forwarded_https", False)
+    # A pytest temporary directory is legitimately not a mount point. The
+    # mountpoint requirement has its own tests below rather than being
+    # switched off there too.
+    kwargs.setdefault("require_mountpoint", False)
     return HostedConfig(tmp_path, BEARER, **kwargs)
 
 
@@ -561,3 +565,96 @@ def test_the_entry_point_builds_nothing_at_import():
     """Importing must not require a configured environment."""
     import hosted_wsgi
     assert hosted_wsgi._app is None
+
+
+# ---------------------------------------------------------------------
+# The mountpoint requirement (the VM-only failure)
+# ---------------------------------------------------------------------
+
+def test_an_unmounted_directory_is_refused_when_a_mount_is_required(tmp_path):
+    """The failure Cloud Run did not have.
+
+    An unmounted disk leaves the mountpoint directory in place on the boot
+    disk, where it is a perfectly good ext4 directory: writable, atomically
+    renameable, lockable. Every other probe passes. Only ismount separates
+    "the disk is mounted" from "the disk is missing and you are writing to
+    the wrong one".
+    """
+    with pytest.raises(HostedConfigError) as caught:
+        verify_durable_state_root(tmp_path, require_mountpoint=True)
+    assert "boot disk" in str(caught.value)
+
+
+def test_a_mounted_directory_passes_the_same_check(tmp_path, monkeypatch):
+    monkeypatch.setattr(hosted_status.os.path, "ismount", lambda _p: True)
+    assert verify_durable_state_root(tmp_path, require_mountpoint=True) is True
+
+
+def test_the_mountpoint_check_is_off_by_default(tmp_path):
+    """A local checkout is legitimately not a mount point."""
+    assert verify_durable_state_root(tmp_path) is True
+
+
+def test_the_mountpoint_requirement_defaults_on_in_configuration(tmp_path):
+    """Off by default in the function, ON by default in a real deployment."""
+    with pytest.raises(HostedConfigError) as caught:
+        HostedConfig.from_environment({
+            "HOSTED_STATE_ROOT": str(tmp_path),
+            "HOSTED_OPERATOR_BEARER": BEARER,
+        })
+    assert "mounted" in str(caught.value)
+
+
+def test_the_mountpoint_requirement_can_be_switched_off_explicitly(tmp_path):
+    config = HostedConfig.from_environment({
+        "HOSTED_STATE_ROOT": str(tmp_path),
+        "HOSTED_OPERATOR_BEARER": BEARER,
+        "HOSTED_REQUIRE_MOUNTPOINT": "false",
+    })
+    assert config.require_mountpoint is False
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("", True), ("true", True), ("yes", True), ("anything", True),
+    ("false", False), ("0", False), ("no", False), ("  FALSE  ", False),
+])
+def test_only_an_explicit_denial_turns_the_requirement_off(value, expected):
+    assert HostedConfig._is_false(value) is not expected
+
+
+# ---------------------------------------------------------------------
+# The command-line check used by the deployment runbook
+# ---------------------------------------------------------------------
+
+def test_the_cli_reports_a_usable_volume(tmp_path, capsys):
+    assert hosted_status.main(["--check-state-root", str(tmp_path)]) == 0
+    assert "OK" in capsys.readouterr().out
+
+
+def test_the_cli_fails_on_an_unusable_volume(tmp_path, capsys):
+    code = hosted_status.main(
+        ["--check-state-root", str(tmp_path / "missing")]
+    )
+    assert code == 1
+    assert "UNSUITABLE" in capsys.readouterr().err
+
+
+def test_the_cli_can_require_a_mount_point(tmp_path, capsys):
+    code = hosted_status.main(
+        ["--check-state-root", str(tmp_path), "--require-mountpoint"]
+    )
+    assert code == 1
+    assert "boot disk" in capsys.readouterr().err
+
+
+def test_the_cli_reports_failure_on_stderr_so_it_can_gate_a_deploy(
+        tmp_path, capsys):
+    hosted_status.main(["--check-state-root", str(tmp_path / "missing")])
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.strip()
+
+
+def test_the_cli_writes_nothing_into_the_directory_it_checks(tmp_path):
+    hosted_status.main(["--check-state-root", str(tmp_path)])
+    assert list(tmp_path.iterdir()) == []

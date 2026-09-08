@@ -1,0 +1,75 @@
+# systemd unit for the hosted status service on a single Compute Engine VM.
+#
+# Copy to /etc/systemd/system/hosted-status.service and adjust the three
+# paths. Tracked as an example because the real one names a deployment's own
+# directories, exactly like launchd/*.plist.example.
+#
+# WHY NOT A CONTAINER. On a single VM serving one connection, an image buys a
+# registry, a pull credential on the instance and a build step, and nothing
+# else: this is one Python process with one dependency. systemd gives what
+# actually matters here instead - RequiresMountsFor, so the service cannot
+# start before the state disk is mounted, and a sandbox in which the code
+# itself is read-only.
+
+[Unit]
+Description=Email-Scanner hosted status service (read-only)
+Documentation=file:///opt/email-scanner/DETAILS.md
+
+# THE LOAD-BEARING LINE. Without it, systemd would happily start the service
+# before the persistent disk is mounted; the mountpoint directory exists on
+# the boot disk, is ext4, and passes every probe the app can make from inside
+# itself. The connection record would be written to the wrong disk and lost
+# the moment the real one was mounted over it. HOSTED_REQUIRE_MOUNTPOINT is
+# the app's own second check on the same failure.
+RequiresMountsFor=/mnt/state
+
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=email-scanner
+Group=email-scanner
+WorkingDirectory=/opt/email-scanner
+
+# Secrets live outside the working tree, owned by root and readable only by
+# the service user. Never in the repository, never on a command line.
+EnvironmentFile=/etc/email-scanner/hosted.env
+
+# Bound to loopback. There is no public listener: reach it over an SSH tunnel
+#   gcloud compute ssh <VM> -- -N -L 8080:127.0.0.1:8080
+# The bearer check still applies. The binding is a deployment choice and the
+# code cannot verify it, so the code does not rely on it.
+ExecStart=/opt/email-scanner/.venv/bin/gunicorn hosted_wsgi:application \
+    --workers 1 --threads 8 \
+    --bind 127.0.0.1:8080 \
+    --timeout 30 \
+    --access-logfile - --error-logfile -
+
+Restart=on-failure
+RestartSec=5
+
+# --- Sandbox -----------------------------------------------------------
+# The state disk is the ONLY writable path. The code is read-only to the
+# process running it, so a compromise of the service cannot rewrite the
+# service.
+ProtectSystem=strict
+ReadWritePaths=/mnt/state
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

@@ -12,18 +12,26 @@ changes nothing.
 
 WHY JSON AND NOT A PAGE. web_status.py is the human interface and it stays
 where it is - bound to 127.0.0.1, reachable only by the person at the machine.
-This is a different thing: an operator and monitoring endpoint on a public
-host. Returning JSON means there is no markup to escape and therefore no way
-to get an injection wrong, and it is what a health check or an alerting rule
+This is a different thing: an operator endpoint on a server nobody is sitting
+at. Returning JSON means there is no markup to escape and therefore no way to
+get an injection wrong, and it is what a health check or an alerting rule
 actually wants to read.
 
+WHY IT STILL AUTHENTICATES ON A PRIVATE PORT. The deployment binds this to
+loopback on a single VM and reaches it through an SSH tunnel, so there is no
+public listener at all. The bearer and the forwarded-https check remain
+because the binding is a deployment choice and this module cannot verify it:
+if the service is ever put behind a load balancer, the code must not be the
+part that has to change. Defence that only works while a config file says so
+is not defence.
+
 WHY NO ADDRESS APPEARS. The local page may show the connected address; the
-person reading it already knows it. This endpoint is reachable from the
-internet and protected only by a bearer token, so a leaked or logged URL
-response must not disclose who uses the system. The opaque connection id says
-whether a connection exists without saying whose it is. Configuration -
-schedule, timezone, limits - carries no such risk and is included, because
-verifying a deploy without it means guessing.
+person reading it already knows it. A response from here can be logged,
+forwarded, or piped into a monitoring system, so it must not disclose who uses
+the system. The opaque connection id says whether a connection exists without
+saying whose it is. Configuration - schedule, timezone, limits - carries no
+such risk and is included, because verifying a deploy without it means
+guessing.
 
 WHY IT CANNOT REACH A TOKEN. This module deliberately imports neither
 connection_tokens nor connection_kms nor anything in the Gmail stack. A
@@ -33,11 +41,13 @@ way rather than trusting the intention.
 """
 from __future__ import annotations
 
+import argparse
 import datetime as dt
 import fcntl
 import hmac
 import json
 import os
+import sys
 import tempfile
 from pathlib import Path
 
@@ -68,26 +78,44 @@ class HostedConfigError(RuntimeError):
 # The state volume has to be a real filesystem
 # ---------------------------------------------------------------------
 
-def verify_durable_state_root(root):
+def verify_durable_state_root(root, *, require_mountpoint=False):
     """Prove the volume supports what the state layer actually relies on.
 
     This is not defensive decoration. The whole connection lifecycle is built
     on two POSIX primitives: atomic_write_json uses os.replace, and
-    ExclusiveRunLock uses fcntl.flock. A container's own writable layer is
-    ephemeral and a GCS-FUSE mount supports neither reliably, so deploying
-    onto either loses the connection record, the journal and the archive on
-    the first instance recycle - silently, and looking exactly like a
-    deployment that simply had nothing in it.
+    ExclusiveRunLock uses fcntl.flock. A GCS-FUSE mount supports neither
+    reliably and a container's own writable layer is discarded on recycle, so
+    deploying onto either loses the connection record, the journal and the
+    archive - silently, and looking exactly like a deployment that simply had
+    nothing in it.
 
-    Probing at boot converts that into a refusal to start. It costs one
+    require_mountpoint covers the failure that only appears on a VM. There,
+    an unmounted disk does NOT make the path disappear: the mountpoint
+    directory still exists on the boot disk, is ext4, and passes both probes
+    below perfectly. The service would run, write a real connection record to
+    the wrong disk, and lose it the moment the intended disk was mounted over
+    the top. Checking that the path is genuinely a mount point is the only
+    thing that distinguishes those two cases from inside the process, and it
+    is off by default because a local checkout and a test directory are
+    legitimately not mount points.
+
+    Probing at boot converts all of this into a refusal to start. It costs one
     temporary file.
     """
     root = Path(root)
     if not root.is_dir():
         raise HostedConfigError(
-            "HOSTED_STATE_ROOT is not an existing directory. Mount a durable "
-            "POSIX volume there; a container's own filesystem is discarded on "
-            "every instance recycle"
+            "HOSTED_STATE_ROOT is not an existing directory. Create the "
+            "directory and mount a durable POSIX volume on it"
+        )
+
+    if require_mountpoint and not os.path.ismount(root):
+        raise HostedConfigError(
+            "HOSTED_STATE_ROOT is a directory but nothing is mounted on it. "
+            "It is on the boot disk, so state written there would be lost "
+            "the moment the real volume is mounted over it. Mount the disk, "
+            "or set HOSTED_REQUIRE_MOUNTPOINT=false if this path is "
+            "deliberately not a separate volume"
         )
 
     descriptor, temporary = None, None
@@ -140,7 +168,8 @@ class HostedConfig:
     """Environment-derived configuration. The bearer never leaves this object."""
 
     def __init__(self, state_root, operator_bearer, *,
-                 require_forwarded_https=True, verify_root=True):
+                 require_forwarded_https=True, require_mountpoint=True,
+                 verify_root=True):
         if not state_root:
             raise HostedConfigError("HOSTED_STATE_ROOT is required")
         if len(operator_bearer or "") < MIN_BEARER_CHARS:
@@ -151,8 +180,11 @@ class HostedConfig:
         self.state_root = Path(state_root)
         self._operator_bearer = operator_bearer
         self.require_forwarded_https = require_forwarded_https
+        self.require_mountpoint = require_mountpoint
         if verify_root:
-            verify_durable_state_root(self.state_root)
+            verify_durable_state_root(
+                self.state_root, require_mountpoint=require_mountpoint
+            )
 
     def bearer_matches(self, presented):
         return hmac.compare_digest(self._operator_bearer, presented or "")
@@ -167,14 +199,23 @@ class HostedConfig:
                 value = value[1:-1].strip()
         return value
 
+    @staticmethod
+    def _is_false(value):
+        """Both switches default ON. Only an explicit denial turns one off."""
+        return value.strip().lower() in {"false", "0", "no"}
+
     @classmethod
     def from_environment(cls, env=None, *, verify_root=True):
         env = env if env is not None else os.environ
-        flag = cls._clean(env.get("HOSTED_REQUIRE_FORWARDED_HTTPS", "true"))
         return cls(
             cls._clean(env.get("HOSTED_STATE_ROOT", "")),
             cls._clean(env.get("HOSTED_OPERATOR_BEARER", "")),
-            require_forwarded_https=flag.lower() not in {"false", "0", "no"},
+            require_forwarded_https=not cls._is_false(
+                cls._clean(env.get("HOSTED_REQUIRE_FORWARDED_HTTPS", "true"))
+            ),
+            require_mountpoint=not cls._is_false(
+                cls._clean(env.get("HOSTED_REQUIRE_MOUNTPOINT", "true"))
+            ),
             verify_root=verify_root,
         )
 
@@ -343,3 +384,50 @@ class HostedStatusApp:
             start_response, "200 OK",
             status_document(self.config.state_root, self.clock()),
         )
+
+
+# ---------------------------------------------------------------------
+# Checking a volume before anything is entrusted to it
+# ---------------------------------------------------------------------
+
+def main(argv=None):
+    """Verify a state root from the command line, before connecting anything.
+
+    The deployment runbook needs a way to prove a freshly formatted and
+    mounted disk actually supports what the lifecycle relies on, at the point
+    where the answer is still cheap to act on. Reasoning that ext4 on a
+    persistent disk provides atomic rename and advisory locking is correct but
+    it is reasoning; this runs the same probe the service runs at boot and
+    says so out loud.
+
+    Exits nonzero on an unsuitable volume so it can gate a deploy script.
+    """
+    parser = argparse.ArgumentParser(
+        description="Check that a directory can hold the connection state.",
+    )
+    parser.add_argument(
+        "--check-state-root", required=True, metavar="PATH",
+        help="directory to probe for atomic rename and advisory locking",
+    )
+    parser.add_argument(
+        "--require-mountpoint", action="store_true",
+        help="also require that a volume is actually mounted there, which is "
+             "what distinguishes a mounted disk from an empty directory "
+             "sitting on the boot disk",
+    )
+    args = parser.parse_args(argv)
+
+    target = args.check_state_root
+    try:
+        verify_durable_state_root(
+            target, require_mountpoint=args.require_mountpoint
+        )
+    except HostedConfigError as exc:
+        print(f"UNSUITABLE: {exc}", file=sys.stderr)
+        return 1
+    print(f"OK: {target} supports atomic rename and advisory locking")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,7 +1,0 @@
-# Dependencies for the hosted STATUS service only.
-#
-# Deliberately short. hosted_status.py reads the connection record and
-# computes an expiry estimate; it cannot reach a token, so it needs neither
-# `cryptography` nor `google-cloud-kms`. Those belong to whatever process
-# actually loads a credential, which is not this one.
-gunicorn>=21.2

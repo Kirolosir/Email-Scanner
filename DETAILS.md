@@ -934,28 +934,59 @@ address — the opaque connection id says whether a connection exists without
 saying whose — and the module imports nothing that can reach a token, so a
 compromise there yields status, not mail.
 
-**The state volume must be a real filesystem.** The lifecycle rests on
-`os.replace` for every state write and `fcntl.flock` for the run lease. A
-container's own filesystem is discarded on recycle, and a GCS-FUSE mount
-supports neither primitive reliably, so either would lose the connection
-record, the journal and the archive silently — looking exactly like a
-deployment that had nothing in it. On Cloud Run that means a Filestore (NFS)
-mount. The service probes for both primitives at boot and refuses to start
-rather than losing state quietly.
+**The state volume must be a real filesystem, and must actually be mounted.**
+The lifecycle rests on `os.replace` for every state write and `fcntl.flock` for
+the run lease. A GCS-FUSE mount supports neither reliably, which is why the
+target is a Compute Engine persistent disk formatted ext4: it provides both
+natively.
+
+The subtler trap is specific to a VM. An unmounted disk does *not* make the
+path disappear — the mountpoint directory still exists on the boot disk, is
+ext4, and passes every probe the process can make from inside itself. The
+service would run, write a real connection record to the wrong disk, and lose
+it the moment the intended disk was mounted over the top. Two independent
+defences: `RequiresMountsFor=` in the systemd unit, which stops the service
+before it starts, and `HOSTED_REQUIRE_MOUNTPOINT` (default true), which is the
+application's own check. Verify a freshly mounted disk before trusting it:
+
+```
+python hosted_status.py --check-state-root /mnt/state --require-mountpoint
+```
+
+**It runs under systemd, not in a container.** On a single VM serving one
+connection an image buys a registry, a pull credential on the instance and a
+build step, for one Python process with one dependency. systemd gives what
+matters here instead: `RequiresMountsFor`, and a sandbox in which
+`ProtectSystem=strict` plus a single `ReadWritePaths` makes the state disk the
+only writable path — so a compromise of the service cannot rewrite the
+service.
+
+**There is no public listener.** The unit binds gunicorn to `127.0.0.1`;
+reach it over an SSH tunnel:
+
+```
+gcloud compute ssh <VM> -- -N -L 8080:127.0.0.1:8080
+```
+
+The bearer and forwarded-https checks remain in the code regardless. The
+binding is a deployment choice the module cannot verify, and defence that only
+holds while a config file says so is not defence.
 
 Deployment order, when it happens:
 
-1. Provision the KMS key ring and key; grant the encrypter/decrypter role.
-2. Create the Filestore instance and note its mount path.
-3. Build and push the image (`Dockerfile`, `.dockerignore`).
-4. Deploy to Cloud Run with the Filestore volume mounted at
-   `HOSTED_STATE_ROOT` and the variables in `hosted.env.example` set in the
-   platform's own environment settings, never in a file.
-5. Confirm `/healthz` answers and `/` refuses without a bearer.
-6. Only then connect an account, deliberately and separately.
+1. Provision the KMS key ring and key; grant the VM's service account
+   `roles/cloudkms.cryptoKeyEncrypterDecrypter` on that key alone.
+2. Create the VM and attach a persistent disk; format ext4, mount at
+   `/mnt/state`, and add it to `/etc/fstab` so it survives a reboot.
+3. Deploy the code, the virtualenv, `/etc/email-scanner/hosted.env` and the
+   unit; verify the disk with `--check-state-root --require-mountpoint`
+   before enabling the service.
+4. Confirm `/healthz` answers through the tunnel and `/` refuses without a
+   bearer.
+5. Only then connect an account, deliberately and separately.
 
-Steps 1, 2, 4 and 6 touch a real cloud account and a real mailbox. They are
-the operator's to perform.
+Steps 1, 2, 3 and 5 touch a real cloud account or mailbox. They are the
+operator's to perform.
 
 ## Required rollout order
 

@@ -1,18 +1,16 @@
 """Guards on the deployment configuration itself.
 
-A Dockerfile is code that runs with the deployment's privileges, and a
-.dockerignore is a security control: it decides what gets republished to a
-registry on every build. Neither is covered by the Python guards, so they get
-their own.
+A systemd unit runs with the deployment's privileges and decides what the
+service may touch, so it gets guards rather than a read-through. The
+properties, in the order they matter:
 
-The properties:
-
-  D1  every secret .gitignore protects is also excluded from the image
-  D2  the image copies only what the status service imports
-  D3  the container does not run as root
-  D4  the deployment's own modules stay importable with no environment
+  D1  the service cannot start before the state disk is mounted
+  D2  the state disk is the only writable path - the code is read-only
+  D3  it does not run as root, and cannot regain privilege
+  D4  it starts the status service, never anything that touches Gmail
+  D5  it listens on loopback, not on every interface
+  D6  secrets live outside the working tree, and the example holds none
 """
-import ast
 import re
 from pathlib import Path
 
@@ -20,210 +18,241 @@ import pytest
 
 
 ROOT = Path(__file__).parent
-DOCKERFILE = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-DOCKERIGNORE = (ROOT / ".dockerignore").read_text(encoding="utf-8")
-GITIGNORE = (ROOT / ".gitignore").read_text(encoding="utf-8")
+UNIT = (ROOT / "hosted-status.service.example").read_text(encoding="utf-8")
+ENV_EXAMPLE = (ROOT / "hosted.env.example").read_text(encoding="utf-8")
+STATUS_SOURCE = (ROOT / "hosted_status.py").read_text(encoding="utf-8")
 
 
-def _patterns(text):
-    """Ignore-file lines that actually exclude something.
+def _directive(name):
+    """Every value given for a directive, in order."""
+    return re.findall(rf"^{name}=(.*)$", UNIT, re.MULTILINE)
 
-    A trailing slash is stripped: `accounts/` and `accounts` exclude the same
-    directory in both formats, and comparing spelling rather than meaning
-    would make this guard fail over punctuation while missing a real gap.
+
+def _one(name):
+    values = _directive(name)
+    assert values, f"{name} is not set in the unit"
+    return values[-1].strip()
+
+
+def _exec_start():
+    """ExecStart including its line continuations.
+
+    Joined by walking lines rather than by regex: a pattern greedy enough to
+    reach the end of a line also eats the trailing backslash it then needs to
+    match on, which silently yields only the first line and a guard that
+    inspects a fragment.
     """
-    return {
-        line.strip().rstrip("/") for line in text.splitlines()
-        if line.strip() and not line.strip().startswith("#")
-        and not line.strip().startswith("!")
-    }
+    lines = UNIT.splitlines()
+    start = next((i for i, line in enumerate(lines)
+                  if line.startswith("ExecStart=")), None)
+    assert start is not None, "the unit has no ExecStart"
+
+    collected = [lines[start][len("ExecStart="):]]
+    while collected[-1].rstrip().endswith("\\"):
+        start += 1
+        collected[-1] = collected[-1].rstrip().rstrip("\\")
+        collected.append(lines[start])
+    return " ".join(part.strip() for part in collected)
+
+
+def _state_root():
+    return _one("ReadWritePaths")
 
 
 # ---------------------------------------------------------------------
-# D1  secrets cannot enter the image
+# D1  it cannot start before the disk is mounted
 # ---------------------------------------------------------------------
 
-# Directories excluded wholesale by .dockerignore cover their contents, so a
-# .gitignore entry inside one of them needs no separate line.
-COVERED_BY_PARENT = ("launchd/",)
+def test_the_unit_refuses_to_start_before_the_state_disk_is_mounted():
+    """D1: the failure the target switch introduced.
 
-
-def test_every_gitignored_secret_is_also_excluded_from_the_image():
-    """D1: the two files must not drift.
-
-    A secret kept out of the repository but copied into a pushed image is
-    arguably worse off than one merely committed: images are pulled by layer
-    cache and by anything with registry read access.
+    On Cloud Run an unmounted volume meant a missing directory and the app's
+    own probe caught it. On a VM the mountpoint directory still exists on the
+    boot disk, is ext4, and passes every probe the process can make from
+    inside itself. Only systemd can tell the difference before start-up.
     """
-    ignored = _patterns(GITIGNORE)
-    excluded = _patterns(DOCKERIGNORE)
-
-    missing = sorted(
-        pattern for pattern in ignored - excluded
-        if not any(pattern.startswith(prefix) for prefix in COVERED_BY_PARENT)
-    )
-    assert missing == [], (
-        "these are kept out of git but would be copied into the image: "
-        f"{missing}"
+    assert _directive("RequiresMountsFor"), (
+        "without RequiresMountsFor the service can start on an unmounted "
+        "path and write the connection record to the boot disk"
     )
 
 
-@pytest.mark.parametrize("secret", [
-    ".env", "*.key", "credentials.json", "token*.json", "client_secret*.json",
-    "broker-operator*", "accounts", "review", "draft-logs",
+def test_the_mount_requirement_names_the_state_root():
+    """A RequiresMountsFor for some other path guards nothing."""
+    assert _one("RequiresMountsFor") == _state_root()
+
+
+def test_the_application_checks_the_same_thing_independently():
+    """Two layers, because this failure is silent and unrecoverable."""
+    assert "HOSTED_REQUIRE_MOUNTPOINT" in STATUS_SOURCE
+    assert "ismount" in STATUS_SOURCE
+
+
+def test_the_mountpoint_check_defaults_to_on():
+    assert 'env.get("HOSTED_REQUIRE_MOUNTPOINT", "true")' in STATUS_SOURCE
+
+
+# ---------------------------------------------------------------------
+# D2  only the state disk is writable
+# ---------------------------------------------------------------------
+
+def test_the_filesystem_is_read_only_apart_from_the_state_disk():
+    assert _one("ProtectSystem") == "strict"
+    assert _directive("ReadWritePaths") == [_state_root()], (
+        "more than one writable path; the state disk should be the only one"
+    )
+
+
+def test_the_code_directory_is_not_writable():
+    """A compromise of the service must not be able to rewrite the service."""
+    working = _one("WorkingDirectory")
+    for writable in _directive("ReadWritePaths"):
+        assert not working.startswith(writable.rstrip("/") + "/")
+        assert working != writable.rstrip("/")
+
+
+def test_the_home_directory_and_tmp_are_not_shared():
+    assert _one("ProtectHome") == "yes"
+    assert _one("PrivateTmp") == "yes"
+
+
+# ---------------------------------------------------------------------
+# D3  not root, and cannot become root
+# ---------------------------------------------------------------------
+
+def test_the_service_does_not_run_as_root():
+    user = _one("User")
+    assert user not in ("root", "0", "")
+
+
+def test_privilege_cannot_be_regained():
+    assert _one("NoNewPrivileges") == "yes"
+
+
+@pytest.mark.parametrize("directive", [
+    "ProtectKernelTunables", "ProtectKernelModules", "ProtectControlGroups",
+    "RestrictNamespaces", "LockPersonality", "MemoryDenyWriteExecute",
+    "PrivateDevices",
 ])
-def test_a_named_secret_is_excluded(secret):
-    """The positive half: named explicitly so a rewrite cannot lose one."""
-    assert secret in _patterns(DOCKERIGNORE)
+def test_the_sandbox_directives_are_present(directive):
+    assert _one(directive) == "yes"
 
 
-def test_the_git_directory_is_excluded():
-    """History contains every file ever committed, including deleted ones."""
-    assert ".git" in _patterns(DOCKERIGNORE)
-
-
-def test_example_files_are_not_excluded():
-    """The negations must survive; they are what makes the examples shippable."""
-    for kept in (".env.example", "broker.env.example", "hosted.env.example"):
-        assert f"!{kept}" in DOCKERIGNORE
+def test_the_service_cannot_open_unexpected_socket_families():
+    families = set(_one("RestrictAddressFamilies").split())
+    assert families <= {"AF_INET", "AF_INET6", "AF_UNIX"}
 
 
 # ---------------------------------------------------------------------
-# D2  the image carries only what it needs
+# D4  it runs the status service and nothing else
 # ---------------------------------------------------------------------
 
-def _copied_modules():
-    copied = set()
-    for line in DOCKERFILE.splitlines():
-        stripped = line.strip().rstrip("\\").strip()
-        if stripped.startswith("COPY "):
-            stripped = stripped[len("COPY "):]
-        elif not copied and not stripped.endswith(".py"):
-            continue
-        copied.update(part for part in stripped.split() if part.endswith(".py"))
-    return copied
+def test_the_unit_starts_the_status_service():
+    assert "hosted_wsgi:application" in _exec_start()
 
 
-def test_the_image_does_not_copy_the_whole_tree():
-    """A broad COPY would pull in the Gmail and drafting modules."""
-    for line in DOCKERFILE.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("COPY "):
-            assert stripped not in ("COPY . .", "COPY . /app", "COPY ./ ./"), (
-                "the image copies the whole tree; it would carry modules this "
-                "process has no business holding"
-            )
-
-
-def test_the_image_carries_exactly_the_status_service_import_closure():
-    """D2: what is copied must match what hosted_status actually needs.
-
-    Computed from the imports rather than retyped, so adding an import to
-    hosted_status without adding it to the Dockerfile fails here instead of
-    at the first request on a real deployment.
-    """
-    local = {path.name for path in ROOT.glob("*.py")}
-    needed, seen = set(), set()
-    pending = ["hosted_wsgi.py"]
-
-    while pending:
-        name = pending.pop()
-        if name in seen:
-            continue
-        seen.add(name)
-        needed.add(name)
-        tree = ast.parse((ROOT / name).read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            modules = []
-            if isinstance(node, ast.Import):
-                modules = [a.name.split(".")[0] for a in node.names]
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                modules = [node.module.split(".")[0]]
-            for module in modules:
-                if f"{module}.py" in local:
-                    pending.append(f"{module}.py")
-
-    copied = _copied_modules()
-    assert needed - copied == set(), (
-        f"the service imports these but the image does not copy them: "
-        f"{sorted(needed - copied)}"
-    )
-    assert copied - needed == set(), (
-        f"the image copies these but the service never imports them: "
-        f"{sorted(copied - needed)}"
-    )
-
-
-def test_no_gmail_or_drafting_module_reaches_the_image():
-    forbidden = {
-        "gmail_auth.py", "gmail_common.py", "gmail_reader.py",
-        "gmail_labeler.py", "drafting.py", "gemini_client.py", "triage.py",
-        "daily_triage.py", "connection_tokens.py", "connection_kms.py",
-        "connection_archive.py", "campaign.py",
-    }
-    assert _copied_modules() & forbidden == set()
-
-
-# ---------------------------------------------------------------------
-# D3  the container is not root
-# ---------------------------------------------------------------------
-
-def test_the_container_drops_to_an_unprivileged_user():
-    users = re.findall(r"^USER\s+(\S+)", DOCKERFILE, re.MULTILINE)
-    assert users, "the Dockerfile never leaves root"
-    assert users[-1] not in ("root", "0")
-
-
-def test_the_user_is_a_fixed_uid_so_a_volume_can_be_owned_to_match():
-    users = re.findall(r"^USER\s+(\S+)", DOCKERFILE, re.MULTILINE)
-    assert users[-1].isdigit(), (
-        "USER must be a numeric uid; a name cannot be matched against a "
-        "mounted volume's ownership"
-    )
-
-
-def test_the_user_switch_is_the_last_thing_before_the_command():
-    """A RUN after USER would either fail or run unprivileged by surprise."""
-    lines = [l.strip() for l in DOCKERFILE.splitlines()]
-    user_at = max(i for i, l in enumerate(lines) if l.startswith("USER "))
-    for later in lines[user_at + 1:]:
-        assert not later.startswith(("RUN ", "COPY ", "ADD ")), (
-            f"{later!r} runs after the USER switch"
+def test_the_unit_starts_nothing_that_touches_gmail():
+    command = _exec_start()
+    for forbidden in ("daily_triage", "triage.py", "campaign", "setup_labels",
+                      "drafting", "gmail_", "approve_account",
+                      "discover_taxonomy", "connection_archive"):
+        assert forbidden not in command, (
+            f"the unit's ExecStart references {forbidden}; this service is "
+            "the read-only status endpoint"
         )
 
 
+def test_the_unit_runs_the_service_from_a_virtualenv_not_system_python():
+    """Pins the dependency set to the deployment, not to the distribution."""
+    assert re.search(r"ExecStart=\S*/\.venv/bin/", UNIT)
+
+
 # ---------------------------------------------------------------------
-# The environment example matches what the code reads
+# D5  loopback only
 # ---------------------------------------------------------------------
 
-def test_every_variable_the_service_reads_is_documented():
-    source = (ROOT / "hosted_status.py").read_text(encoding="utf-8")
-    example = (ROOT / "hosted.env.example").read_text(encoding="utf-8")
-    for variable in re.findall(r'env\.get\("([A-Z_]+)"', source):
-        assert variable in example, (
-            f"{variable} is read but absent from hosted.env.example"
+def test_the_service_binds_to_loopback_and_not_every_interface():
+    """The VM target removes the need for a public listener entirely."""
+    binds = re.findall(r"--bind\s+(\S+)", _exec_start())
+    assert binds, "ExecStart does not specify a bind address"
+    for bind in binds:
+        host = bind.rsplit(":", 1)[0]
+        assert host in ("127.0.0.1", "localhost", "[::1]"), (
+            f"binds to {host}; this service has no reason to be reachable "
+            "from outside the VM"
         )
+        assert host != "0.0.0.0"
+
+
+def test_the_tunnel_is_documented_since_there_is_no_public_listener():
+    assert "-L" in UNIT and "ssh" in UNIT.lower()
+
+
+# ---------------------------------------------------------------------
+# D6  secrets
+# ---------------------------------------------------------------------
+
+def test_secrets_are_loaded_from_outside_the_working_tree():
+    """An EnvironmentFile inside the checkout is a secret in the repository."""
+    environment_file = _one("EnvironmentFile")
+    working = _one("WorkingDirectory").rstrip("/")
+    assert not environment_file.startswith(working + "/")
+
+
+def test_no_secret_is_passed_on_the_command_line():
+    """A command line is visible in ps output to every user on the box."""
+    command = _exec_start()
+    for leaked in ("BEARER", "bearer=", "--bearer", "SECRET", "password"):
+        assert leaked not in command
 
 
 def test_the_example_holds_no_filled_in_secret():
-    """An example file with a real value in it is a committed secret."""
-    for line in (ROOT / "hosted.env.example").read_text(
-            encoding="utf-8").splitlines():
+    for line in ENV_EXAMPLE.splitlines():
         if line.startswith("HOSTED_OPERATOR_BEARER"):
             assert line.strip() == "HOSTED_OPERATOR_BEARER="
 
 
+def test_every_variable_the_service_reads_is_documented():
+    for variable in re.findall(r'env\.get\("([A-Z_]+)"', STATUS_SOURCE):
+        assert variable in ENV_EXAMPLE, (
+            f"{variable} is read but absent from hosted.env.example"
+        )
+
+
 def test_the_state_root_requirement_is_stated_where_it_will_be_read():
-    """The GCS-FUSE trap must be documented, not only enforced."""
-    for document in (DOCKERFILE, (ROOT / "hosted.env.example").read_text(
-            encoding="utf-8")):
-        assert "GCS-FUSE" in document or "GCS FUSE" in document
-        assert "Filestore" in document
+    """The silent-data-loss traps must be documented, not only enforced."""
+    assert "persistent disk" in ENV_EXAMPLE.lower()
+    assert "GCS-FUSE" in ENV_EXAMPLE or "GCS FUSE" in ENV_EXAMPLE
+    assert "boot disk" in ENV_EXAMPLE
+    assert "boot disk" in UNIT
+
+
+def test_the_check_command_is_documented_where_the_disk_is_configured():
+    assert "--check-state-root" in ENV_EXAMPLE
 
 
 # ---------------------------------------------------------------------
-# D4  nothing constructs at import
+# The unit is a valid unit
 # ---------------------------------------------------------------------
+
+@pytest.mark.parametrize("section", ["[Unit]", "[Service]", "[Install]"])
+def test_the_unit_has_its_sections(section):
+    assert section in UNIT
+
+
+def test_the_unit_restarts_on_failure():
+    assert _one("Restart") == "on-failure"
+
+
+def test_no_directive_sits_outside_a_section():
+    seen_section = False
+    for line in UNIT.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            seen_section = True
+        elif stripped and not stripped.startswith("#") and "=" in stripped:
+            assert seen_section, f"{stripped!r} appears before any section"
+
 
 def test_the_entry_point_needs_no_environment_to_import(monkeypatch):
     for variable in ("HOSTED_STATE_ROOT", "HOSTED_OPERATOR_BEARER"):
