@@ -1,0 +1,60 @@
+# What must never enter a container image.
+#
+# .gitignore keeps secrets out of the repository. This keeps them out of the
+# image, which is a separate and in some ways worse exposure: an image is
+# pushed to a registry, cached by layer, and pulled by anything with read
+# access, so a key copied in by a broad `COPY . .` is republished every build.
+# test_hosted_deployment.py asserts this file covers everything .gitignore
+# protects, so the two cannot drift apart.
+
+# --- Credentials and keys ---
+credentials.json
+token*.json
+tokens/
+client_secret*.json
+*.key
+broker-operator*
+broker.env
+.env
+.env.*
+!.env.example
+!broker.env.example
+!hosted.env.example
+
+# --- Private per-account runtime state ---
+accounts/
+review/
+audit-reports/
+draft-logs/
+automation-logs/
+triage-state/
+daily-state*.json
+*.log
+account-config*.json
+!account-config.ai.example.json
+!account-config.prepared.json
+campaign-approval*.json
+!campaign-approval.example.json
+template-approval*.json
+!template-approval.example.json
+ai-drafting-approval*.json
+!ai-drafting-approval.example.json
+taxonomy-confirmation*.json
+launchd/*.plist
+!launchd/*.plist.example
+
+# --- Not needed at runtime, and large ---
+.git
+.venv
+venv
+env
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+test_*.py
+demo_*.py
+.DS_Store
+body.txt
+testbody.txt

@@ -898,6 +898,65 @@ protected-label messages needs `allow_protected_labels` on top of that, and the
 longer confirmation phrase ending in `including messages under protected
 labels`.
 
+## Hosted status service (built, not deployed)
+
+The single connection can be run from a hosted instance rather than a laptop.
+Three pieces exist for that; none of them has been deployed, and no real
+account has been connected.
+
+**The key-encrypting key lives in Cloud KMS.** `connection_tokens.py` wraps
+each token under a fresh data key and wraps that key with a KEK.
+`FileKeyProvider` keeps the KEK in a 0600 file next to the data, which is
+honest about its own limit. `KmsKeyProvider` (`connection_kms.py`) keeps it in
+Cloud KMS instead, so a stolen disk, snapshot or backup yields ciphertext and
+nothing more, and every unwrap appears in Cloud Audit Logs. A compromise of the
+*running* host still reaches the mailbox; that is inherent to a scheduler that
+must open a sleeping person's mail, and it is stated rather than engineered
+around.
+
+The provider cannot create its own key. Provision it once, yourself:
+
+```
+gcloud kms keyrings create triage --location <LOCATION>
+gcloud kms keys create connection-kek --location <LOCATION> \
+    --keyring triage --purpose encryption
+```
+
+Grant the runtime service account `roles/cloudkms.cryptoKeyEncrypterDecrypter`
+on that key alone.
+
+**The hosted endpoint is read-only.** `hosted_status.py` serves `GET /healthz`
+(no credential, liveness only) and `GET /` (bearer, JSON status). It answers
+questions and changes nothing: connecting and disconnecting stay operator acts
+run against the instance deliberately, for the same reason
+`oauth_broker.py` mints invites offline. No response carries the connected
+address — the opaque connection id says whether a connection exists without
+saying whose — and the module imports nothing that can reach a token, so a
+compromise there yields status, not mail.
+
+**The state volume must be a real filesystem.** The lifecycle rests on
+`os.replace` for every state write and `fcntl.flock` for the run lease. A
+container's own filesystem is discarded on recycle, and a GCS-FUSE mount
+supports neither primitive reliably, so either would lose the connection
+record, the journal and the archive silently — looking exactly like a
+deployment that had nothing in it. On Cloud Run that means a Filestore (NFS)
+mount. The service probes for both primitives at boot and refuses to start
+rather than losing state quietly.
+
+Deployment order, when it happens:
+
+1. Provision the KMS key ring and key; grant the encrypter/decrypter role.
+2. Create the Filestore instance and note its mount path.
+3. Build and push the image (`Dockerfile`, `.dockerignore`).
+4. Deploy to Cloud Run with the Filestore volume mounted at
+   `HOSTED_STATE_ROOT` and the variables in `hosted.env.example` set in the
+   platform's own environment settings, never in a file.
+5. Confirm `/healthz` answers and `/` refuses without a bearer.
+6. Only then connect an account, deliberately and separately.
+
+Steps 1, 2, 4 and 6 touch a real cloud account and a real mailbox. They are
+the operator's to perform.
+
 ## Required rollout order
 
 1. Run all offline tests and fake Gmail demonstrations.
