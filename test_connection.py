@@ -22,6 +22,7 @@ from connection import (
     occupied_by,
     record_path,
     same_account,
+    update_settings,
 )
 
 
@@ -200,6 +201,37 @@ def test_connecting_an_invalid_address_is_refused(tmp_path):
     with pytest.raises(ConnectionConfigError, match="not valid"):
         connect(tmp_path, "nonsense", now=T0)
     assert current(tmp_path) is None
+
+
+def test_settings_update_preserves_identity_and_authorization(tmp_path):
+    first = connect(tmp_path, A, now=T0)
+    updated = update_settings(
+        tmp_path, A, timezone="America/New_York", run_at="19:30",
+        limits={"max_scan": 40, "limit": 30, "max_drafts": 8},
+    )
+    assert updated.account == A
+    assert updated.connected_at == first.connected_at
+    assert updated.last_authorized_at == first.last_authorized_at
+    assert updated.timezone_name == "America/New_York"
+    assert updated.run_at == "19:30"
+    assert (updated.max_scan, updated.limit, updated.max_drafts) == (40, 30, 8)
+
+
+def test_settings_cannot_create_or_take_over_a_connection(tmp_path):
+    with pytest.raises(ConnectionConfigError, match="no account"):
+        update_settings(tmp_path, A, run_at="19:00")
+    connect(tmp_path, A, now=T0)
+    with pytest.raises(ConnectionOccupied):
+        update_settings(tmp_path, B, run_at="19:00")
+    assert current(tmp_path).account == A
+
+
+def test_settings_validate_before_persisting(tmp_path):
+    connect(tmp_path, A, now=T0)
+    before = _snapshot(tmp_path)
+    with pytest.raises(ConnectionConfigError, match="run_at"):
+        update_settings(tmp_path, A, run_at="midnight")
+    assert _snapshot(tmp_path) == before
 
 
 # ---------------------------------------------------------------------

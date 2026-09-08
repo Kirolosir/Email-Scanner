@@ -1,0 +1,39 @@
+[Unit]
+Description=Email-Scanner account dashboard
+Documentation=file:///opt/email-scanner/DETAILS.md
+RequiresMountsFor=/mnt/state
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=email-scanner
+Group=email-scanner
+WorkingDirectory=/opt/email-scanner
+EnvironmentFile=/etc/email-scanner/hosted.env
+ExecStart=/opt/email-scanner/.venv/bin/gunicorn hosted_dashboard_wsgi:application \
+    --workers 1 --threads 8 \
+    --bind 127.0.0.1:8081 \
+    --timeout 60 \
+    --access-logfile /dev/null --error-logfile -
+
+ProtectSystem=strict
+ReadWritePaths=/mnt/state
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

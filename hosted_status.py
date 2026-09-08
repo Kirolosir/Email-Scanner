@@ -1,14 +1,10 @@
 """The hosted deployment's status surface. Read-only, by construction.
 
-WHY THIS SERVES NOTHING MUTABLE. oauth_broker.py already fixed this boundary
-for invites: "Nothing reachable over the network can create an invite. Adding
-one means editing this variable and restarting the instance." The same
-reasoning applies harder to the connection lifecycle. Disconnecting destroys a
-credential and archives somebody's journal; connecting decides whose mailbox
-this deployment opens at 6pm. Neither belongs behind an HTTP handler on the
-public internet, however well authenticated. Those stay operator acts run
-against the instance deliberately. This module answers two questions and
-changes nothing.
+WHY THIS SERVES NOTHING MUTABLE. The public-shaped machine endpoint has no
+reason to touch account state, so it cannot. The separate human dashboard is
+bound to loopback, reached through an SSH tunnel, requires its own authenticated
+session and explicit confirmations, and owns connection controls. This module
+answers two questions and changes nothing.
 
 WHY JSON AND NOT A PAGE. web_status.py is the human interface and it stays
 where it is - bound to 127.0.0.1, reachable only by the person at the machine.

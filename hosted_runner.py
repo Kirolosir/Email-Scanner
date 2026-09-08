@@ -24,12 +24,19 @@ from googleapiclient.discovery import build
 import connection
 import connection_schedule
 import connection_tokens
+import account_profile
 import campaign
 import daily_triage
 from connect_account import build_provider
 from gmail_auth import SCOPES
+from gmail_common import normalize_address
+from gmail_labeler import fetch_account_labels
+from gmail_retry import gmail_execute
 from hosted_status import verify_durable_state_root
+import hosted_settings
 from private_runtime import RunStatus, ensure_private_directory
+import setup_labels
+from triage_config import load_triage_label_config
 
 
 CONFIG_FILE = "account.json"
@@ -40,6 +47,7 @@ STATUS_FILE = "daily-status.json"
 LOCK_DIR = "locks"
 REVIEW_DIR = "review"
 DRAFT_LOG_DIR = "draft-logs"
+PENDING_LABEL_SETUP = hosted_settings.PENDING_LABEL_SETUP
 
 
 class HostedRunnerError(RuntimeError):
@@ -117,6 +125,83 @@ def _required_account_files(active):
     )
 
 
+def _read_json_object(path, description):
+    try:
+        with Path(path).open(encoding="utf-8") as handle:
+            document = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HostedRunnerError(
+            f"{description} is unavailable ({type(exc).__name__})"
+        ) from exc
+    if not isinstance(document, dict):
+        raise HostedRunnerError(f"{description} must be an object")
+    return document
+
+
+def _pending_label_plan(active, occupant):
+    """Validate a saved owner approval before constructing a Gmail client."""
+    pending_path = Path(active) / PENDING_LABEL_SETUP
+    if not pending_path.is_file():
+        return None
+
+    pending = _read_json_object(pending_path, "pending label setup")
+    if set(pending) != {"version", "account_config_digest", "labels"}:
+        raise HostedRunnerError("pending label setup has unsupported fields")
+    if pending.get("version") != 1:
+        raise HostedRunnerError("pending label setup has an unsupported version")
+
+    config_path = Path(active) / CONFIG_FILE
+    config_document = _read_json_object(config_path, "account configuration")
+    if pending.get("account_config_digest") != hosted_settings.document_digest(
+        config_document
+    ):
+        raise HostedRunnerError("pending label setup does not match current settings")
+
+    profile = account_profile.load_profile_document(config_document)
+    try:
+        account_profile.assert_profile_matches_account(profile, occupant.account)
+    except ValueError as exc:
+        raise HostedRunnerError("settings belong to a different account") from exc
+    config = load_triage_label_config(profile=profile)
+    expected = sorted(config.all_names)
+    if pending.get("labels") != expected:
+        raise HostedRunnerError("pending label setup does not match reviewed labels")
+    return pending_path, profile, config
+
+
+def _apply_pending_label_plan(service, prepared):
+    """Create only exact reviewed names after live Gmail identity checking."""
+    pending_path, profile, config = prepared
+    actual = normalize_address(
+        gmail_execute(service.users().getProfile(userId="me")).get(
+            "emailAddress", ""
+        )
+    )
+    try:
+        account_profile.assert_profile_matches_account(profile, actual)
+    except ValueError as exc:
+        raise HostedRunnerError(
+            "authenticated Gmail account does not match saved settings"
+        ) from exc
+
+    existing = fetch_account_labels(service)
+    try:
+        plan = setup_labels.plan_label_setup(existing, config)
+        _created, failures = setup_labels.apply_label_setup(
+            service, config, plan, dry_run=False
+        )
+    except ValueError as exc:
+        raise HostedRunnerError("reviewed Gmail label setup was refused") from exc
+    if failures:
+        raise HostedRunnerError("one or more reviewed Gmail labels were not created")
+    try:
+        pending_path.unlink()
+    except OSError as exc:
+        raise HostedRunnerError(
+            f"label setup completion could not be recorded ({type(exc).__name__})"
+        ) from exc
+
+
 def _record_blocked(status_path, code):
     status = RunStatus(status_path)
     status.start("hosted:configuration")
@@ -139,64 +224,83 @@ def run_if_due(env=None, *, now=None, service_builder=build):
         not in {"false", "0", "no"}
     verify_durable_state_root(root, require_mountpoint=require_mount)
 
-    occupant = connection.current(root)
-    if occupant is None:
-        print("No Gmail account is connected; nothing ran.")
-        return 0
+    with connection.lifecycle_lock(root):
+        occupant = connection.current(root)
+        if occupant is None:
+            print("No Gmail account is connected; nothing ran.")
+            return 0
 
-    active = Path(occupant.directory)
-    status_path = active / STATUS_FILE
-    missing = [path.name for path in _required_account_files(active)
-               if not path.is_file()]
-    if missing:
-        _record_blocked(status_path, "account_setup_incomplete")
-        print("Connected account setup is incomplete; no Gmail contact occurred.")
-        return 2
+        active = Path(occupant.directory)
+        status_path = active / STATUS_FILE
+        missing = [path.name for path in _required_account_files(active)
+                   if not path.is_file()]
+        if missing:
+            _record_blocked(status_path, "account_setup_incomplete")
+            print("Connected account setup is incomplete; no Gmail contact occurred.")
+            return 2
 
-    last_completed = _last_completed_date(active / STATE_FILE)
-    due, reason = connection_schedule.is_due(
-        occupant, now, last_completed_date=last_completed
-    )
-    if not due:
-        print(f"No run due: {reason}.")
-        return 0
+        try:
+            prepared_labels = _pending_label_plan(active, occupant)
+        except (HostedRunnerError, ValueError) as exc:
+            _record_blocked(status_path, "label_setup_invalid")
+            print(f"Gmail label setup stopped safely ({type(exc).__name__}).")
+            return 2
 
-    provider = build_provider(key_name)
-    token_document = connection_tokens.load_token(occupant, provider)
-    try:
-        credentials = hosted_credentials(token_document, client_path)
-    finally:
-        token_document = None
-    gmail_service = service_builder("gmail", "v1", credentials=credentials)
+        last_completed = _last_completed_date(active / STATE_FILE)
+        due, reason = connection_schedule.is_due(
+            occupant, now, last_completed_date=last_completed
+        )
+        if not due and prepared_labels is None:
+            print(f"No run due: {reason}.")
+            return 0
 
-    review_path = _review_path(active / REVIEW_DIR, now)
-    argv = [
-        "daily",
-        "--account-config", str(active / CONFIG_FILE),
-        "--taxonomy-confirmation", str(active / TAXONOMY_APPROVAL_FILE),
-        "--ai-drafting-approval", str(active / AI_APPROVAL_FILE),
-        "--templates", str(active / "templates"),
-        "--state-path", str(active / STATE_FILE),
-        "--status-path", str(status_path),
-        "--lock-dir", str(active / LOCK_DIR),
-        "--review-report", str(review_path),
-        "--max-scan", str(occupant.max_scan),
-        "--limit", str(occupant.limit),
-        "--max-drafts", str(occupant.max_drafts),
-        "--scheduled", "--apply", "--yes",
-    ]
+        provider = build_provider(key_name)
+        token_document = connection_tokens.load_token(occupant, provider)
+        try:
+            credentials = hosted_credentials(token_document, client_path)
+        finally:
+            token_document = None
+        gmail_service = service_builder("gmail", "v1", credentials=credentials)
 
-    # DraftLog uses the profile's configured path. Keep hosted artifacts on
-    # the durable active volume even if a restored profile names an old local
-    # path by changing only the process-local working value the runner owns.
-    old_log_dir = campaign.DRAFT_LOG_DIR
-    campaign.DRAFT_LOG_DIR = str(active / DRAFT_LOG_DIR)
-    try:
-        return daily_triage.main(argv, gmail_service=gmail_service)
-    finally:
-        campaign.DRAFT_LOG_DIR = old_log_dir
-        credentials = None
-        gmail_service = None
+        if prepared_labels is not None:
+            try:
+                _apply_pending_label_plan(gmail_service, prepared_labels)
+            except HostedRunnerError as exc:
+                _record_blocked(status_path, "label_setup_failed")
+                print(f"Gmail label setup stopped safely ({type(exc).__name__}).")
+                return 2
+            if not due:
+                print("Reviewed Gmail labels are ready; no daily run was due.")
+                return 0
+
+        review_path = _review_path(active / REVIEW_DIR, now)
+        argv = [
+            "daily",
+            "--account-config", str(active / CONFIG_FILE),
+            "--taxonomy-confirmation", str(active / TAXONOMY_APPROVAL_FILE),
+            "--ai-drafting-approval", str(active / AI_APPROVAL_FILE),
+            "--templates", str(active / "templates"),
+            "--state-path", str(active / STATE_FILE),
+            "--status-path", str(status_path),
+            "--lock-dir", str(active / LOCK_DIR),
+            "--review-report", str(review_path),
+            "--max-scan", str(occupant.max_scan),
+            "--limit", str(occupant.limit),
+            "--max-drafts", str(occupant.max_drafts),
+            "--scheduled", "--apply", "--yes",
+        ]
+
+        # DraftLog uses the profile's configured path. Keep hosted artifacts on
+        # the durable active volume even if a restored profile names an old local
+        # path by changing only the process-local working value the runner owns.
+        old_log_dir = campaign.DRAFT_LOG_DIR
+        campaign.DRAFT_LOG_DIR = str(active / DRAFT_LOG_DIR)
+        try:
+            return daily_triage.main(argv, gmail_service=gmail_service)
+        finally:
+            campaign.DRAFT_LOG_DIR = old_log_dir
+            credentials = None
+            gmail_service = None
 
 
 def main():

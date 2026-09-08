@@ -6,10 +6,19 @@ import pytest
 
 import connection
 import hosted_runner as runner
+import hosted_settings
 
 
 UTC = dt.timezone.utc
 A = "owner@example.test"
+
+
+class _ProfileService:
+    def users(self):
+        return self
+
+    def getProfile(self, **_kwargs):
+        return object()
 
 
 def _environment(tmp_path, monkeypatch):
@@ -31,6 +40,37 @@ def _environment(tmp_path, monkeypatch):
         ),
         "GMAIL_CREDENTIALS_PATH": str(client),
     }
+
+
+def _settings_form():
+    return {
+        "labels": "Scheduling | AI/Scheduling\nFinance | AI/Finance",
+        "timezone": "America/New_York",
+        "run_at": "18:00",
+        "display_name": "Owner",
+        "signature": "Owner",
+        "max_scan": "50",
+        "limit": "40",
+        "max_drafts": "8",
+        "confirm_unsent_drafts": "yes",
+    }
+
+
+def _stub_connected_service(monkeypatch, service):
+    marker_provider = object()
+    monkeypatch.setattr(runner, "build_provider", lambda _key: marker_provider)
+    monkeypatch.setattr(
+        runner.connection_tokens, "load_token",
+        lambda _occupant, provider: (
+            {"refresh_token": "refresh-value"}
+            if provider is marker_provider else pytest.fail("wrong provider")
+        ),
+    )
+    return lambda api, version, *, credentials: (
+        service if (api, version, credentials.refresh_token)
+        == ("gmail", "v1", "refresh-value")
+        else pytest.fail("wrong service build")
+    )
 
 
 def test_vacant_runner_contacts_nothing(tmp_path, monkeypatch):
@@ -100,7 +140,7 @@ def test_due_runner_injects_gmail_service_and_all_safety_limits(
         (seat.directory / name).write_text("{}", encoding="utf-8")
 
     marker_provider = object()
-    marker_service = object()
+    marker_service = _ProfileService()
     monkeypatch.setattr(runner, "build_provider",
                         lambda _key: marker_provider)
     monkeypatch.setattr(
@@ -141,6 +181,100 @@ def test_due_runner_injects_gmail_service_and_all_safety_limits(
     assert argv[argv.index("--max-scan") + 1] == str(seat.max_scan)
     assert argv[argv.index("--limit") + 1] == str(seat.limit)
     assert argv[argv.index("--max-drafts") + 1] == str(seat.max_drafts)
+
+
+def test_stale_pending_label_approval_blocks_before_token_or_gmail(
+        tmp_path, monkeypatch):
+    root, _client, env = _environment(tmp_path, monkeypatch)
+    seat = connection.connect(root, A, timezone="UTC", run_at="18:00")
+    hosted_settings.save_settings(root, _settings_form())
+    config = json.loads((seat.directory / runner.CONFIG_FILE).read_text())
+    config["timezone"] = "UTC"
+    (seat.directory / runner.CONFIG_FILE).write_text(
+        json.dumps(config), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        runner, "build_provider", lambda *_a: pytest.fail("KMS reached")
+    )
+
+    code = runner.run_if_due(
+        env, now=dt.datetime(2026, 9, 8, 17, 0, tzinfo=UTC),
+        service_builder=lambda *_a, **_k: pytest.fail("Gmail reached"),
+    )
+
+    assert code == 2
+    assert json.loads((seat.directory / runner.STATUS_FILE).read_text())[
+        "last_run"
+    ]["safe_error_codes"] == ["label_setup_invalid"]
+
+
+def test_pending_label_setup_checks_live_gmail_identity_before_label_reads(
+        tmp_path, monkeypatch):
+    root, _client, env = _environment(tmp_path, monkeypatch)
+    seat = connection.connect(root, A, timezone="UTC", run_at="18:00")
+    hosted_settings.save_settings(root, _settings_form())
+    marker_service = _ProfileService()
+    service_builder = _stub_connected_service(monkeypatch, marker_service)
+    monkeypatch.setattr(
+        runner, "gmail_execute",
+        lambda _request: {"emailAddress": "different@example.test"},
+    )
+    monkeypatch.setattr(
+        runner, "fetch_account_labels",
+        lambda _service: pytest.fail("labels were read for the wrong account"),
+    )
+
+    code = runner.run_if_due(
+        env, now=dt.datetime(2026, 9, 8, 17, 0, tzinfo=UTC),
+        service_builder=service_builder,
+    )
+
+    assert code == 2
+    assert (seat.directory / runner.PENDING_LABEL_SETUP).is_file()
+
+
+def test_successful_pending_setup_uses_reviewed_plan_then_clears_marker(
+        tmp_path, monkeypatch):
+    root, _client, env = _environment(tmp_path, monkeypatch)
+    seat = connection.connect(root, A, timezone="UTC", run_at="18:00")
+    hosted_settings.save_settings(root, _settings_form())
+    marker_service = _ProfileService()
+    service_builder = _stub_connected_service(monkeypatch, marker_service)
+    monkeypatch.setattr(
+        runner, "gmail_execute", lambda _request: {"emailAddress": A}
+    )
+    monkeypatch.setattr(
+        runner, "fetch_account_labels", lambda service: (
+            {} if service is marker_service else pytest.fail("wrong service")
+        )
+    )
+    plans = []
+    monkeypatch.setattr(
+        runner.setup_labels, "plan_label_setup",
+        lambda existing, config: plans.append((existing, config.all_names)) or {
+            "already_present": [], "create": list(config.all_names),
+        },
+    )
+    applied = []
+    monkeypatch.setattr(
+        runner.setup_labels, "apply_label_setup",
+        lambda service, config, plan, *, dry_run: (
+            applied.append((service, config.all_names, plan, dry_run)) or ([], [])
+        ),
+    )
+    monkeypatch.setattr(
+        runner.daily_triage, "main", lambda *_a, **_k: pytest.fail("not due")
+    )
+
+    code = runner.run_if_due(
+        env, now=dt.datetime(2026, 9, 8, 17, 0, tzinfo=UTC),
+        service_builder=service_builder,
+    )
+
+    assert code == 0
+    assert len(plans) == len(applied) == 1
+    assert applied[0][0] is marker_service and applied[0][3] is False
+    assert not (seat.directory / runner.PENDING_LABEL_SETUP).exists()
 
 
 def test_the_timer_checks_often_but_the_runner_owns_due_decisions():

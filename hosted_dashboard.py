@@ -1,0 +1,755 @@
+"""Authenticated human dashboard for the single hosted Gmail connection.
+
+The machine-readable hosted_status endpoint remains small and address-free.
+This separate surface is for the account owner: it shows the connected
+address, schedule, safe run counts, and reviewed label names after an explicit
+operator-bearer login. It reads no token and imports nothing from the Gmail,
+Gemini, or KMS stacks.
+"""
+from __future__ import annotations
+
+import datetime as dt
+import hashlib
+import hmac
+import html
+import json
+from pathlib import Path
+from urllib.parse import parse_qs
+
+import connection
+import connection_schedule
+import hosted_settings
+from hosted_status import HostedConfig, status_document
+
+
+SESSION_COOKIE = "email_scanner_session"
+MAX_FORM_BYTES = 8192
+COUNT_KEYS = (
+    "scanned", "classified", "labeled", "drafted", "needs_review",
+    "skipped", "failures", "deferred_draft_limit",
+    "deferred_write_limit",
+)
+
+HTML_HEADERS = [
+    ("Content-Type", "text/html; charset=utf-8"),
+    ("Cache-Control", "no-store"),
+    ("X-Content-Type-Options", "nosniff"),
+    ("X-Frame-Options", "DENY"),
+    ("Referrer-Policy", "no-referrer"),
+    ("Content-Security-Policy", (
+        "default-src 'none'; style-src 'unsafe-inline'; "
+        "form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+    )),
+]
+
+
+def _escape(value, fallback="—"):
+    value = str(value or "").strip()
+    return html.escape(value[:300] if value else fallback)
+
+
+def _read_json(path):
+    try:
+        with Path(path).open(encoding="utf-8") as handle:
+            document = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return document if isinstance(document, dict) else None
+
+
+def _safe_counts(active):
+    document = _read_json(Path(active) / "daily-status.json") or {}
+    run = document.get("last_run")
+    run = run if isinstance(run, dict) else {}
+    raw = run.get("counts")
+    raw = raw if isinstance(raw, dict) else {}
+    return {
+        key: value for key in COUNT_KEYS
+        if isinstance((value := raw.get(key)), int)
+        and not isinstance(value, bool) and value >= 0
+    }
+
+
+def _safe_labels(active):
+    document = _read_json(Path(active) / "account.json") or {}
+    taxonomy = document.get("taxonomy")
+    taxonomy = taxonomy if isinstance(taxonomy, list) else []
+    labels = []
+    for item in taxonomy:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("label")
+        display = item.get("display")
+        drafting = item.get("drafting")
+        drafting = drafting if isinstance(drafting, dict) else {}
+        if isinstance(name, str) and name.strip():
+            labels.append({
+                "name": name.strip()[:225],
+                "display": str(display or name).strip()[:128],
+                "drafting": drafting.get("mode") == "generic",
+            })
+    return labels
+
+
+def _cookie_map(environ):
+    result = {}
+    for part in str(environ.get("HTTP_COOKIE", "")).split(";"):
+        key, separator, value = part.strip().partition("=")
+        if separator and key:
+            result[key] = value
+    return result
+
+
+class HostedDashboardApp:
+    def __init__(self, config, clock=None, control=None):
+        self.config = config
+        self.clock = clock or (lambda: dt.datetime.now(dt.timezone.utc))
+        self.control = control
+
+    def _session_value(self):
+        return hmac.new(
+            self.config._operator_bearer.encode("utf-8"),
+            b"email-scanner-dashboard-session-v1",
+            hashlib.sha256,
+        ).hexdigest()
+
+    def _session_ok(self, environ):
+        presented = _cookie_map(environ).get(SESSION_COOKIE, "")
+        return hmac.compare_digest(self._session_value(), presented)
+
+    def _csrf_value(self):
+        return hmac.new(
+            self.config._operator_bearer.encode("utf-8"),
+            b"email-scanner-dashboard-csrf-v1",
+            hashlib.sha256,
+        ).hexdigest()
+
+    def _csrf_ok(self, form):
+        return hmac.compare_digest(
+            self._csrf_value(), str(form.get("csrf", ""))
+        )
+
+    def _https_ok(self, environ):
+        if not self.config.require_forwarded_https:
+            return True
+        forwarded = environ.get("HTTP_X_FORWARDED_PROTO", "")
+        return forwarded.split(",")[0].strip().lower() == "https"
+
+    @staticmethod
+    def _respond(start_response, status, body, headers=(), head=False):
+        payload = body.encode("utf-8")
+        response_headers = list(HTML_HEADERS) + list(headers)
+        response_headers.append(("Content-Length", str(len(payload))))
+        start_response(status, response_headers)
+        return [b"" if head else payload]
+
+    @staticmethod
+    def _redirect(start_response, location, headers=()):
+        response_headers = list(HTML_HEADERS) + list(headers) + [
+            ("Location", location), ("Content-Length", "0")
+        ]
+        start_response("303 See Other", response_headers)
+        return [b""]
+
+    @staticmethod
+    def _form(environ):
+        try:
+            length = int(environ.get("CONTENT_LENGTH", "0") or 0)
+        except ValueError:
+            length = -1
+        if length < 0 or length > MAX_FORM_BYTES:
+            return None
+        raw = environ.get("wsgi.input").read(length)
+        try:
+            values = parse_qs(raw.decode("utf-8"), keep_blank_values=True)
+        except UnicodeDecodeError:
+            return None
+        return {key: entries[-1] for key, entries in values.items() if entries}
+
+    def __call__(self, environ, start_response):
+        try:
+            return self._route(environ, start_response)
+        except Exception:  # noqa: BLE001 - private detail stays server-side
+            return self._respond(
+                start_response, "500 Internal Server Error",
+                self._page("Something went wrong", (
+                    '<section class="panel"><h1>Dashboard unavailable</h1>'
+                    '<p>Nothing was changed. Try again shortly.</p></section>'
+                )),
+            )
+
+    def _route(self, environ, start_response):
+        method = environ.get("REQUEST_METHOD", "GET").upper()
+        path = environ.get("PATH_INFO", "") or "/"
+        head = method == "HEAD"
+
+        if not self._https_ok(environ):
+            return self._respond(
+                start_response, "400 Bad Request",
+                self._page("HTTPS required", "<h1>HTTPS is required.</h1>"),
+                head=head,
+            )
+
+        # OAuth state is the callback's authentication. SameSite=Strict may
+        # withhold the dashboard cookie on Google's cross-site redirect, so
+        # this route must be handled before the ordinary session gate.
+        if path == "/oauth/callback" and method == "GET":
+            if self.control is None:
+                return self._redirect(start_response, "/?connect=failed")
+            try:
+                self.control.complete_connect(environ.get("QUERY_STRING", ""))
+            except Exception:  # noqa: BLE001 - OAuth detail must not reach HTML
+                return self._redirect(start_response, "/?connect=failed")
+            return self._redirect(start_response, "/?connected=1")
+
+        if path == "/login" and method in {"GET", "HEAD"}:
+            return self._respond(
+                start_response, "200 OK", self._login_page(), head=head
+            )
+        if path == "/login" and method == "POST":
+            form = self._form(environ)
+            if form is None:
+                return self._respond(
+                    start_response, "400 Bad Request", self._login_page(True)
+                )
+            if not self.config.bearer_matches(form.get("access_key", "")):
+                return self._respond(
+                    start_response, "401 Unauthorized", self._login_page(True)
+                )
+            secure = "; Secure" if self.config.require_forwarded_https else ""
+            cookie = (
+                f"{SESSION_COOKIE}={self._session_value()}; Path=/; "
+                f"HttpOnly; SameSite=Strict{secure}"
+            )
+            return self._redirect(
+                start_response, "/", [("Set-Cookie", cookie)]
+            )
+
+        if not self._session_ok(environ):
+            return self._redirect(start_response, "/login")
+
+        if path == "/connect" and method == "POST":
+            form = self._form(environ)
+            if form is None or not self._csrf_ok(form):
+                return self._respond(
+                    start_response, "403 Forbidden",
+                    self._page("Request refused", "<h1>Request refused.</h1>"),
+                )
+            if self.control is None:
+                return self._redirect(start_response, "/?connect=failed")
+            try:
+                location = self.control.begin_connect()
+            except Exception:  # noqa: BLE001 - config/secret detail stays private
+                return self._redirect(start_response, "/?connect=failed")
+            return self._redirect(start_response, location)
+
+        if path == "/logout" and method == "POST":
+            form = self._form(environ)
+            if form is None or not self._csrf_ok(form):
+                return self._respond(
+                    start_response, "403 Forbidden",
+                    self._page("Request refused", "<h1>Request refused.</h1>"),
+                )
+            cookie = (
+                f"{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; "
+                "Max-Age=0"
+            )
+            return self._redirect(
+                start_response, "/login", [("Set-Cookie", cookie)]
+            )
+
+        if path == "/" and method in {"GET", "HEAD"}:
+            query = parse_qs(
+                str(environ.get("QUERY_STRING", "")), keep_blank_values=True
+            )
+            return self._respond(
+                start_response, "200 OK",
+                self._dashboard(
+                    saved=query.get("saved") == ["1"],
+                    connected=query.get("connected") == ["1"],
+                    disconnected=query.get("disconnected") == ["1"],
+                    connect_failed=query.get("connect") == ["failed"],
+                ),
+                head=head,
+            )
+        if path == "/settings" and method in {"GET", "HEAD"}:
+            try:
+                occupant = connection.current(self.config.state_root)
+            except connection.ConnectionConfigError:
+                occupant = None
+            if occupant is None:
+                return self._redirect(start_response, "/")
+            return self._respond(
+                start_response, "200 OK", self._settings_page(occupant),
+                head=head,
+            )
+        if path == "/settings" and method == "POST":
+            form = self._form(environ)
+            if form is None:
+                return self._respond(
+                    start_response, "400 Bad Request",
+                    self._page(
+                        "Settings not saved",
+                        '<main class="login-shell"><section class="login-card">'
+                        '<h1>Settings not saved</h1><p>The form was too large '
+                        'or unreadable.</p><a class="secondary" href="/settings">'
+                        'Return to settings</a></section></main>',
+                    ),
+                )
+            if not self._csrf_ok(form):
+                return self._respond(
+                    start_response, "403 Forbidden",
+                    self._page("Request refused", "<h1>Request refused.</h1>"),
+                )
+            occupant = None
+            try:
+                occupant = connection.current(self.config.state_root)
+                if occupant is None:
+                    return self._redirect(start_response, "/")
+                hosted_settings.save_settings(self.config.state_root, form)
+            except hosted_settings.SettingsError as exc:
+                return self._respond(
+                    start_response, "400 Bad Request",
+                    self._settings_page(occupant, form=form, error=str(exc)),
+                )
+            except (connection.ConnectionError,
+                    connection.ConnectionConfigError):
+                if occupant is None:
+                    return self._respond(
+                        start_response, "409 Conflict",
+                        self._page(
+                            "Settings unavailable",
+                            '<main class="login-shell"><section class="login-card">'
+                            '<h1>Settings unavailable</h1><p>Nothing was changed.'
+                            '</p><a class="secondary" href="/">Return to dashboard'
+                            '</a></section></main>',
+                        ),
+                    )
+                return self._respond(
+                    start_response, "409 Conflict",
+                    self._settings_page(
+                        occupant, form=form,
+                        error="settings could not be saved; nothing was activated",
+                    ),
+                )
+            return self._redirect(start_response, "/?saved=1")
+        if path == "/disconnect" and method == "POST":
+            form = self._form(environ)
+            if form is None or not self._csrf_ok(form):
+                return self._respond(
+                    start_response, "403 Forbidden",
+                    self._page("Request refused", "<h1>Request refused.</h1>"),
+                )
+            if self.control is None:
+                return self._redirect(start_response, "/?connect=failed")
+            try:
+                self.control.disconnect(form.get("confirmation", ""))
+            except Exception:  # noqa: BLE001 - KMS/revocation detail stays private
+                try:
+                    occupant = connection.current(self.config.state_root)
+                except connection.ConnectionConfigError:
+                    occupant = None
+                if occupant is None:
+                    return self._redirect(start_response, "/")
+                return self._respond(
+                    start_response, "400 Bad Request",
+                    self._settings_page(
+                        occupant, error=(
+                            "disconnect was refused; type the connected Gmail "
+                            "address exactly"
+                        ),
+                    ),
+                )
+            return self._redirect(start_response, "/?disconnected=1")
+        if method not in {"GET", "HEAD", "POST"}:
+            return self._respond(
+                start_response, "405 Method Not Allowed",
+                self._page("Method refused", "<h1>Method refused.</h1>"),
+            )
+        return self._respond(
+            start_response, "404 Not Found",
+            self._page("Not found", "<h1>Page not found.</h1>"),
+            head=head,
+        )
+
+    def _login_page(self, failed=False):
+        error = (
+            '<p class="notice bad">That access key was not accepted.</p>'
+            if failed else ""
+        )
+        return self._page("Sign in", f"""
+          <main class="login-shell">
+            <section class="login-card">
+              <div class="mark">ES</div>
+              <p class="eyebrow">Email Scanner</p>
+              <h1>Open your inbox control room</h1>
+              <p class="lede">See what the daily assistant organized and
+              which reply drafts are waiting in Gmail.</p>
+              {error}
+              <form method="post" action="/login">
+                <label for="access_key">Private access key</label>
+                <input id="access_key" name="access_key" type="password"
+                       required autocomplete="current-password">
+                <button type="submit">Open dashboard</button>
+              </form>
+            </section>
+          </main>
+        """)
+
+    def _dashboard(self, saved=False, connected=False, disconnected=False,
+                   connect_failed=False):
+        now = self.clock()
+        public = status_document(self.config.state_root, now)
+        state = public.get("connection", {})
+        try:
+            occupant = connection.current(self.config.state_root)
+        except connection.ConnectionConfigError:
+            occupant = None
+
+        if occupant is None:
+            account = "No Gmail account connected"
+            next_run = "—"
+            labels = []
+            counts = {}
+        else:
+            account = occupant.account
+            next_run = connection_schedule.next_run(occupant, now).strftime(
+                "%a, %b %-d at %-I:%M %p %Z"
+            )
+            labels = _safe_labels(occupant.directory)
+            counts = _safe_counts(occupant.directory)
+
+        expiry = public.get("expiry") or {}
+        last = public.get("last_run") or {}
+        connected = state.get("state") == "connected"
+        status_tone = "good" if connected else "warn"
+        status_text = "Active" if connected else state.get("state", "Vacant")
+
+        count_cards = "".join(
+            f'<div class="metric"><span>{_escape(key.replace("_", " "))}</span>'
+            f'<strong>{value}</strong></div>'
+            for key, value in counts.items()
+        ) or '<p class="empty">Results will appear after the first run.</p>'
+        label_rows = "".join(
+            '<li><div><strong>' + _escape(item["display"]) + '</strong>'
+            '<span>' + _escape(item["name"]) + '</span></div>'
+            '<span class="tag">' + (
+                "labels + drafts" if item["drafting"] else "labels only"
+            ) + '</span></li>'
+            for item in labels
+        ) or '<li class="empty">Label setup is not finished yet.</li>'
+
+        saved_notice = (
+            '<p class="notice good">Settings saved. The reviewed Gmail labels '
+            'will be prepared before the next daily run.</p>' if saved else ""
+        )
+        connection_notice = ""
+        if connected:
+            connection_notice = (
+                '<p class="notice good">Gmail connected securely. Review your '
+                'labels and schedule before the first daily run.</p>'
+            )
+        elif disconnected:
+            connection_notice = (
+                '<p class="notice good">Gmail was removed. The local credential '
+                'was destroyed and account records were archived.</p>'
+            )
+        elif connect_failed:
+            connection_notice = (
+                '<p class="notice bad">Google sign-in did not finish. Nothing '
+                'new was connected; you can try again.</p>'
+            )
+        settings_link = (
+            '<a class="secondary" href="/settings">Edit labels &amp; schedule</a>'
+            if occupant is not None else ""
+        )
+        connect_label = "Reconnect Gmail" if occupant is not None else "Connect Gmail"
+        connect_form = f"""
+          <form method="post" action="/connect">
+            <input type="hidden" name="csrf" value="{self._csrf_value()}">
+            <button class="ghost" type="submit">{connect_label}</button>
+          </form>""" if self.control is not None else ""
+
+        return self._page("Dashboard", f"""
+          <header class="topbar">
+            <a class="brand" href="/"><span class="mark small">ES</span>
+              <span>Email Scanner</span></a>
+            <form method="post" action="/logout">
+              <input type="hidden" name="csrf" value="{self._csrf_value()}">
+              <button class="ghost" type="submit">Sign out</button>
+            </form>
+          </header>
+          <main class="workspace">
+            {saved_notice}
+            {connection_notice}
+            <section class="account-hero">
+              <div>
+                <p class="eyebrow">Connected inbox</p>
+                <h1>{_escape(account)}</h1>
+                <p class="lede">AI organizes eligible mail and prepares
+                unsent Gmail drafts for review. Nothing is auto-sent.</p>
+              </div>
+              <div class="hero-actions"><span class="status {status_tone}"><i></i>{_escape(status_text)}</span>
+                {connect_form}</div>
+            </section>
+
+            <section class="overview-grid">
+              <article class="panel schedule">
+                <p class="eyebrow">Next daily run</p>
+                <h2>{_escape(next_run)}</h2>
+                <p>Up to {_escape(state.get("limits", {}).get("max_scan"))}
+                messages scanned and {_escape(state.get("limits", {}).get("max_drafts"))}
+                new drafts per run.</p>
+              </article>
+              <article class="panel health">
+                <p class="eyebrow">Gmail connection</p>
+                <h2>{_escape(expiry.get("summary"), "Waiting for connection")}</h2>
+                <p>Last authorized {_escape(state.get("last_authorized_at"))}</p>
+              </article>
+              <article class="panel last-run">
+                <p class="eyebrow">Last run</p>
+                <h2>{_escape(last.get("outcome"), "Not run yet")}</h2>
+                <p>{_escape(last.get("finished_at"), "No completed run yet")}</p>
+              </article>
+            </section>
+
+            <section class="content-grid">
+              <article class="panel results">
+                <div class="section-head"><div><p class="eyebrow">Activity</p>
+                  <h2>Latest run results</h2></div></div>
+                <div class="metrics">{count_cards}</div>
+              </article>
+              <article class="panel labels">
+                <div class="section-head"><div><p class="eyebrow">Rules</p>
+                  <h2>Your AI labels</h2></div>
+                  <div class="section-actions"><span class="count-badge">{len(labels)}</span>
+                  {settings_link}</div></div>
+                <ul>{label_rows}</ul>
+              </article>
+            </section>
+
+            <section class="panel safety">
+              <div><p class="eyebrow">Review queue</p>
+                <h2>Every response stays in Gmail Drafts</h2>
+                <p>The assistant excludes spam, trash, sent mail, drafts,
+                automated messages, and bulk mail from reply drafting.</p></div>
+              <a class="secondary" href="https://mail.google.com/mail/u/0/#drafts">Open Gmail drafts</a>
+            </section>
+          </main>
+        """)
+
+    @staticmethod
+    def _settings_values(occupant):
+        document = _read_json(Path(occupant.directory) / "account.json") or {}
+        taxonomy = document.get("taxonomy")
+        taxonomy = taxonomy if isinstance(taxonomy, list) else []
+        lines = []
+        for item in taxonomy:
+            if not isinstance(item, dict):
+                continue
+            display = str(item.get("display", "")).strip()
+            label = str(item.get("label", "")).strip()
+            if display and label:
+                lines.append(f"{display} | {label}")
+        ai = document.get("ai_drafting")
+        ai = ai if isinstance(ai, dict) else {}
+        return {
+            "labels": "\n".join(lines) or (
+                "Action needed | AI/Action Needed\n"
+                "Scheduling | AI/Scheduling\n"
+                "Finance | AI/Finance\n"
+                "Newsletters | AI/Newsletters\n"
+                "Other | AI/Other"
+            ),
+            "timezone": str(document.get("timezone")
+                            or occupant.timezone_name),
+            "run_at": occupant.run_at,
+            "display_name": str(ai.get("display_name", "")),
+            "signature": str(ai.get("signature", "")),
+            "max_scan": str(occupant.max_scan),
+            "limit": str(occupant.limit),
+            "max_drafts": str(occupant.max_drafts),
+        }
+
+    def _settings_page(self, occupant, form=None, error=""):
+        values = dict(form) if form is not None else self._settings_values(occupant)
+        fields = {
+            key: html.escape(str(values.get(key, ""))) for key in (
+                "labels", "timezone", "run_at", "display_name", "signature",
+                "max_scan", "limit", "max_drafts",
+            )
+        }
+        error_notice = (
+            f'<p class="notice bad">{html.escape(str(error))}</p>' if error else ""
+        )
+        return self._page("Settings", f"""
+          <header class="topbar">
+            <a class="brand" href="/"><span class="mark small">ES</span>
+              <span>Email Scanner</span></a>
+            <div class="top-actions"><a class="ghost-link" href="/">Dashboard</a>
+              <form method="post" action="/logout">
+                <input type="hidden" name="csrf" value="{self._csrf_value()}">
+                <button class="ghost" type="submit">Sign out</button>
+              </form></div>
+          </header>
+          <main class="workspace settings-shell">
+            <section class="account-hero compact">
+              <div><p class="eyebrow">Inbox settings</p>
+                <h1>Shape your daily assistant</h1>
+                <p class="lede">Choose the labels, schedule, and safety limits
+                for {_escape(occupant.account)}.</p></div>
+            </section>
+            {error_notice}
+            <form class="settings-form" method="post" action="/settings">
+              <input type="hidden" name="csrf" value="{self._csrf_value()}">
+              <section class="panel form-section">
+                <div class="form-copy"><p class="eyebrow">1 · Organize</p>
+                  <h2>Gmail labels</h2><p>Enter one label per line. Use
+                  <strong>Display name | Gmail label</strong>. “Other” is added
+                  automatically if omitted.</p></div>
+                <div><label for="labels">Labels, up to 12</label>
+                  <textarea id="labels" name="labels" rows="8" required
+                    spellcheck="false">{fields['labels']}</textarea>
+                  <p class="field-note">Example: Scheduling | AI/Scheduling</p></div>
+              </section>
+              <section class="panel form-section">
+                <div class="form-copy"><p class="eyebrow">2 · Schedule</p>
+                  <h2>Daily run</h2><p>This local time controls when the
+                  assistant checks eligible inbox mail.</p></div>
+                <div class="field-grid">
+                  <div><label for="run_at">Start time</label><input id="run_at"
+                    name="run_at" type="time" value="{fields['run_at']}" required></div>
+                  <div><label for="timezone">Timezone</label><input id="timezone"
+                    name="timezone" value="{fields['timezone']}" required
+                    autocomplete="off"><p class="field-note">Use an IANA
+                    city-based timezone name or UTC.</p></div>
+                  <div><label for="max_scan">Messages scanned</label><input
+                    id="max_scan" name="max_scan" type="number" min="1" max="500"
+                    value="{fields['max_scan']}" required></div>
+                  <div><label for="limit">Changes per run</label><input id="limit"
+                    name="limit" type="number" min="1" max="250"
+                    value="{fields['limit']}" required></div>
+                  <div><label for="max_drafts">Drafts per run</label><input
+                    id="max_drafts" name="max_drafts" type="number" min="0" max="50"
+                    value="{fields['max_drafts']}" required></div>
+                </div>
+              </section>
+              <section class="panel form-section">
+                <div class="form-copy"><p class="eyebrow">3 · Replies</p>
+                  <h2>Draft voice</h2><p>These details help AI prepare a short
+                  reply. Every result remains an unsent Gmail draft.</p></div>
+                <div><label for="display_name">Your name</label><input
+                  id="display_name" name="display_name" maxlength="120"
+                  value="{fields['display_name']}" required>
+                  <label for="signature">Draft signature</label><textarea
+                  id="signature" name="signature" rows="3" maxlength="500"
+                  required>{fields['signature']}</textarea></div>
+              </section>
+              <section class="panel confirmation">
+                <label class="check-row"><input type="checkbox"
+                  name="confirm_unsent_drafts" value="yes" required>
+                  <span><strong>I approve these labels and AI drafts.</strong>
+                  Responses must stay unsent in Gmail until I review and send
+                  them myself.</span></label>
+                <div class="save-row"><a href="/">Cancel</a>
+                  <button type="submit">Save and prepare labels</button></div>
+              </section>
+            </form>
+            <section class="panel danger-zone">
+              <div><p class="eyebrow">Disconnect</p><h2>Remove this Gmail account</h2>
+                <p>This revokes Google access when available, destroys the local
+                credential, stops daily runs, and archives prior settings and history.</p></div>
+              <form method="post" action="/disconnect">
+                <input type="hidden" name="csrf" value="{self._csrf_value()}">
+                <label for="confirmation">Type {_escape(occupant.account)} to confirm</label>
+                <div class="disconnect-row"><input id="confirmation"
+                  name="confirmation" type="email" required autocomplete="off">
+                  <button class="danger" type="submit">Disconnect Gmail</button></div>
+              </form>
+            </section>
+          </main>
+        """)
+
+    @staticmethod
+    def _page(title, content):
+        return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{html.escape(title)} · Email Scanner</title>
+<style>
+:root{{--ink:#102a2a;--muted:#58706e;--line:#d9e5e2;--paper:#f4f8f7;
+--card:#fff;--mint:#16a085;--mint-dark:#0d6f61;--blue:#255f85;
+--shadow:0 18px 48px rgba(20,63,59,.08)}}
+*{{box-sizing:border-box}}body{{margin:0;background:var(--paper);color:var(--ink);
+font:16px/1.5 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}}
+button,input,textarea{{font:inherit}}a{{color:inherit}}.topbar{{height:72px;display:flex;
+align-items:center;justify-content:space-between;padding:0 max(24px,calc((100vw - 1180px)/2));
+background:rgba(255,255,255,.92);border-bottom:1px solid var(--line)}}
+.brand{{display:flex;align-items:center;gap:12px;text-decoration:none;font-weight:750}}
+.mark{{display:grid;place-items:center;width:52px;height:52px;border-radius:16px;
+background:linear-gradient(145deg,var(--mint),var(--blue));color:white;font-weight:850;
+letter-spacing:-.04em;box-shadow:var(--shadow)}}.mark.small{{width:38px;height:38px;border-radius:12px}}
+.workspace{{max-width:1180px;margin:auto;padding:44px 24px 72px}}.account-hero{{display:flex;
+justify-content:space-between;gap:28px;align-items:flex-start;margin-bottom:30px}}
+h1,h2,p{{margin-top:0}}h1{{font-size:clamp(2rem,5vw,3.5rem);line-height:1.05;
+letter-spacing:-.045em;margin-bottom:14px}}h2{{font-size:1.3rem;line-height:1.25;
+letter-spacing:-.02em;margin-bottom:8px}}.eyebrow{{font-size:.78rem;letter-spacing:.14em;
+text-transform:uppercase;font-weight:800;color:var(--mint-dark);margin-bottom:10px}}
+.lede{{font-size:1.05rem;color:var(--muted);max-width:650px}}.status{{display:inline-flex;
+align-items:center;gap:9px;border:1px solid var(--line);background:white;border-radius:999px;
+padding:9px 14px;font-weight:750;white-space:nowrap}}.status i{{width:9px;height:9px;
+border-radius:50%;background:#d48a18}}.status.good i{{background:#18a66d;box-shadow:0 0 0 5px #e2f7ee}}
+.hero-actions{{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end}}
+.overview-grid{{display:grid;grid-template-columns:1.15fr 1fr 1fr;gap:16px;margin-bottom:16px}}
+.content-grid{{display:grid;grid-template-columns:1.15fr .85fr;gap:16px;margin-bottom:16px}}
+.panel{{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:24px;
+box-shadow:var(--shadow)}}.panel p:last-child{{margin-bottom:0;color:var(--muted)}}
+.section-head{{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:20px}}
+.section-actions,.top-actions{{display:flex;align-items:center;gap:10px}}.section-actions .secondary{{font-size:.8rem;padding:7px 10px}}
+.metrics{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}}.metric{{padding:14px;
+background:#f3f8f7;border:1px solid #e4eeeb;border-radius:14px}}.metric span{{display:block;
+font-size:.78rem;color:var(--muted);text-transform:capitalize}}.metric strong{{display:block;
+font-size:1.75rem;line-height:1.1;margin-top:5px}}.labels ul{{list-style:none;padding:0;margin:0}}
+.labels li{{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:13px 0;
+border-top:1px solid #edf2f1}}.labels li:first-child{{border-top:0}}.labels li div span{{display:block;
+font-size:.8rem;color:var(--muted)}}.tag,.count-badge{{font-size:.75rem;font-weight:750;
+background:#e5f5f1;color:var(--mint-dark);border-radius:999px;padding:5px 9px;white-space:nowrap}}
+.count-badge{{font-size:.9rem}}.safety{{display:flex;align-items:center;justify-content:space-between;gap:24px}}
+.secondary,button{{border:0;border-radius:12px;padding:11px 16px;font-weight:750;cursor:pointer}}
+.secondary{{background:var(--ink);color:white;text-decoration:none;white-space:nowrap}}button{{background:var(--mint-dark);color:white}}
+.ghost{{background:transparent;color:var(--muted);border:1px solid var(--line)}}.ghost-link{{color:var(--muted);text-decoration:none;font-weight:700}}.empty{{color:var(--muted)}}
+.login-shell{{min-height:100vh;display:grid;place-items:center;padding:24px;background:radial-gradient(circle at 20% 10%,#dff7f0,transparent 38%),var(--paper)}}
+.login-card{{width:min(460px,100%);padding:42px;background:white;border:1px solid var(--line);
+border-radius:24px;box-shadow:var(--shadow)}}.login-card .mark{{margin-bottom:26px}}
+.login-card h1{{font-size:2.35rem}}label{{display:block;font-weight:750;margin:24px 0 8px}}
+input:not([type=hidden]):not([type=checkbox]),textarea{{width:100%;padding:13px 14px;border:1px solid #b9cdca;border-radius:12px;
+outline:none;background:white;color:var(--ink)}}textarea{{resize:vertical}}input:focus,textarea:focus{{border-color:var(--mint);box-shadow:0 0 0 4px #dff7f0}}
+.login-card button{{width:100%;margin-top:14px}}.notice{{padding:11px 13px;border-radius:10px}}
+.notice.bad{{background:#fff0ed;color:#9b3024}}.notice.good{{background:#e2f7ee;color:#116645}}
+.settings-shell{{max-width:980px}}.account-hero.compact h1{{font-size:clamp(2rem,4vw,3rem)}}
+.settings-form{{display:grid;gap:16px}}.form-section{{display:grid;grid-template-columns:.75fr 1.25fr;gap:38px}}
+.form-copy p{{color:var(--muted)}}.form-section label{{margin:0 0 8px}}.form-section label:not(:first-child){{margin-top:18px}}
+.field-grid{{display:grid;grid-template-columns:1fr 1fr;gap:18px}}.field-note{{font-size:.8rem;color:var(--muted);margin:7px 0 0}}
+.confirmation{{display:grid;gap:22px}}.check-row{{display:flex;gap:13px;align-items:flex-start;margin:0}}
+.check-row input{{margin-top:5px;accent-color:var(--mint-dark)}}.check-row span{{color:var(--muted)}}.check-row strong{{color:var(--ink)}}
+.save-row{{display:flex;align-items:center;justify-content:flex-end;gap:18px}}.save-row a{{color:var(--muted)}}
+.danger-zone{{margin-top:26px;border-color:#f0cbc5;box-shadow:none;display:grid;grid-template-columns:.8fr 1.2fr;gap:38px}}
+.danger-zone p{{color:var(--muted)}}.danger-zone label{{margin:0 0 8px}}.disconnect-row{{display:flex;gap:10px;align-items:center}}
+.danger{{background:#a33b2e;white-space:nowrap}}
+@media(max-width:850px){{.overview-grid,.content-grid{{grid-template-columns:1fr}}.account-hero,
+.safety{{flex-direction:column;align-items:flex-start}}.metrics{{grid-template-columns:repeat(2,1fr)}}.form-section,.danger-zone{{grid-template-columns:1fr;gap:18px}}}}
+@media(max-width:480px){{.workspace{{padding:30px 16px 56px}}.topbar{{padding:0 16px}}
+.panel{{padding:20px}}.metrics,.field-grid{{grid-template-columns:1fr}}h1{{font-size:2rem}}.brand>span:last-child,.ghost-link{{display:none}}.section-actions{{align-items:flex-end;flex-direction:column}}.disconnect-row{{align-items:stretch;flex-direction:column}}}}
+</style></head><body>{content}</body></html>"""
+
+
+def build_application(env=None):
+    import os
+    from hosted_control import HostedControl, HostedControlConfig
+
+    values = env if env is not None else os.environ
+    config = HostedConfig.from_environment(values, verify_root=True)
+    control_config = HostedControlConfig.from_environment(
+        values, config.state_root
+    )
+    return HostedDashboardApp(config, control=HostedControl(control_config))

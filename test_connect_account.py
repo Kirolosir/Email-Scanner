@@ -28,6 +28,7 @@ from connect_account import (
     address_in_document,
     check_account_agrees,
     connect_account as wire,
+    connect_token_document,
     read_token_document,
 )
 from test_connection_kms import KEY, FakeKms, reference_crc32c
@@ -89,6 +90,19 @@ def test_the_stored_token_round_trips(tmp_path):
 
     connection = conn.current(root)
     assert tokens.load_token(connection, provider)["refresh_token"] == SECRET
+
+
+def test_an_in_memory_credential_connects_without_a_plaintext_file(tmp_path):
+    root = _root(tmp_path)
+    provider = _provider()
+    summary = connect_token_document(
+        root, A, {"refresh_token": SECRET}, provider
+    )
+    assert summary["account"] == A
+    assert tokens.load_token(conn.current(root), provider)[
+        "refresh_token"
+    ] == SECRET
+    assert list(tmp_path.glob("*.json")) == []
 
 
 def test_the_stored_record_holds_no_plaintext(tmp_path):

@@ -925,14 +925,21 @@ gcloud kms keys create connection-kek --location <LOCATION> \
 Grant the runtime service account `roles/cloudkms.cryptoKeyEncrypterDecrypter`
 on that key alone.
 
-**The hosted endpoint is read-only.** `hosted_status.py` serves `GET /healthz`
-(no credential, liveness only) and `GET /` (bearer, JSON status). It answers
-questions and changes nothing: connecting and disconnecting stay operator acts
-run against the instance deliberately, for the same reason
-`oauth_broker.py` mints invites offline. No response carries the connected
-address — the opaque connection id says whether a connection exists without
-saying whose — and the module imports nothing that can reach a token, so a
-compromise there yields status, not mail.
+**The machine status endpoint is read-only.** `hosted_status.py` serves
+`GET /healthz` (no credential, liveness only) and `GET /` (bearer, JSON
+status). No response carries the connected address — the opaque connection id
+says whether a connection exists without saying whose — and the module imports
+nothing that can reach a token, so a compromise there yields status, not mail.
+
+The separate human dashboard on port 8081 requires an authenticated session
+and remains bound to loopback. It can start a PKCE-protected Google OAuth flow,
+save a complete label/schedule/draft approval bundle, and disconnect only after
+the owner types the connected address. Its OAuth callback consumes ten-minute,
+single-use state before token exchange. A returned refresh token exists only in
+memory until Cloud KMS encryption. Disconnect attempts Google revocation, then
+destroys the local encrypted credential even when revocation cannot be
+confirmed. Gunicorn access logging is disabled for this service so callback
+authorization codes never enter the system journal.
 
 **The state volume must be a real filesystem, and must actually be mounted.**
 The lifecycle rests on `os.replace` for every state write and `fcntl.flock` for
@@ -965,7 +972,9 @@ service.
 reach it over an SSH tunnel:
 
 ```
-gcloud compute ssh <VM> -- -N -L 8080:127.0.0.1:8080
+gcloud compute ssh <VM> -- -N \
+  -L 8080:127.0.0.1:8080 \
+  -L 8081:127.0.0.1:8081
 ```
 
 The bearer and forwarded-https checks remain in the code regardless. The
@@ -978,12 +987,14 @@ Deployment order, when it happens:
    `roles/cloudkms.cryptoKeyEncrypterDecrypter` on that key alone.
 2. Create the VM and attach a persistent disk; format ext4, mount at
    `/mnt/state`, and add it to `/etc/fstab` so it survives a reboot.
-3. Deploy the code, the virtualenv, `/etc/email-scanner/hosted.env` and the
-   unit; verify the disk with `--check-state-root --require-mountpoint`
-   before enabling the service.
-4. Confirm `/healthz` answers through the tunnel and `/` refuses without a
-   bearer.
-5. Only then connect an account, deliberately and separately:
+3. Deploy the code, virtualenv, installed-app OAuth client,
+   `/etc/email-scanner/hosted.env`, and the status/dashboard/runner units;
+   verify the disk with `--check-state-root --require-mountpoint` before
+   enabling a service.
+4. Confirm `/healthz` answers through the tunnel, the status endpoint refuses
+   without a bearer, and the dashboard accepts the same private access key.
+5. Connect Gmail through the dashboard. The command-line broker flow below
+   remains a recovery option:
 
 ```
 python broker_client.py mint-invite

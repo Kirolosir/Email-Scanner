@@ -26,8 +26,11 @@ half-written replacement is the same failure with extra steps.
 from __future__ import annotations
 
 import datetime as dt
+import fcntl
 import json
+import os
 import re
+from contextlib import contextmanager
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -70,6 +73,27 @@ class ConnectionOccupied(ConnectionError):
 
 class ConnectionConfigError(ValueError):
     pass
+
+
+@contextmanager
+def lifecycle_lock(root):
+    """Serialize connection, settings, disconnect, and scheduled-run changes.
+
+    A directory descriptor can be flocked without creating a lock artifact,
+    so even an operation that is refused still writes nothing. The state root
+    is required to exist before a hosted lifecycle operation begins.
+    """
+    try:
+        descriptor = os.open(Path(root), os.O_RDONLY)
+    except OSError as exc:
+        raise ConnectionConfigError(
+            f"connection state cannot be locked ({type(exc).__name__})"
+        ) from exc
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
 
 
 def normalize_account(value):
@@ -313,3 +337,30 @@ def connect(root, account, *, timezone="UTC", run_at="18:00", now=None,
         limits=limits,
     )
     return persist_connection(connection)
+
+
+def update_settings(root, account, *, timezone=None, run_at=None,
+                    enabled=None, limits=None):
+    """Update the connected account's schedule and bounded run limits.
+
+    Identity and authorization timestamps are never accepted from the caller.
+    The account must already hold the connection, so a settings request cannot
+    create or take over occupancy.
+    """
+    existing = current(root)
+    if existing is None:
+        raise ConnectionConfigError("no account is connected")
+    if not same_account(existing.account, account):
+        raise ConnectionOccupied(existing.account)
+    document = existing.as_document()
+    if timezone is not None:
+        document["timezone"] = str(timezone).strip()
+    if run_at is not None:
+        document["run_at"] = str(run_at).strip()
+    if enabled is not None:
+        document["enabled"] = enabled
+    for key, value in dict(limits or {}).items():
+        _require(key in DEFAULT_LIMITS, f"unsupported limit {key!r}")
+        document[key] = value
+    _validate(document)
+    return persist_connection(Connection(document, root))

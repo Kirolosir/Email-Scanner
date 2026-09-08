@@ -38,11 +38,9 @@ is reported.
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import os
 import sys
-from contextlib import contextmanager
 from pathlib import Path
 
 import connection as conn
@@ -167,44 +165,23 @@ def build_provider(key_name, client_factory=None, crc32c=None):
 # The operation
 # ---------------------------------------------------------------------
 
-@contextmanager
-def connection_lifecycle_lock(root):
-    """Serialize lifecycle changes without creating another state artifact.
-
-    The directory itself is a valid advisory-lock target on the VM's POSIX
-    volume. Locking its descriptor means even a refused attempt writes
-    nothing, while two web/CLI attempts cannot both observe a vacant slot and
-    race their token and record writes into different final accounts.
-    """
-    try:
-        descriptor = os.open(Path(root), os.O_RDONLY)
-    except OSError as exc:
-        raise ConnectAccountError(
-            f"could not lock the deployment state ({type(exc).__name__})"
-        ) from exc
-    try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
-        yield
-    except OSError as exc:
-        raise ConnectAccountError(
-            f"connection lifecycle failed ({type(exc).__name__})"
-        ) from exc
-    finally:
-        os.close(descriptor)
-
-def connect_account(root, account, token_path, provider, *, timezone="UTC",
-                    run_at="18:00", now=None, destroy_token_file=True):
-    """Establish the connection and store its credential. Returns a summary.
+def connect_token_document(root, account, document, provider, *,
+                           timezone="UTC", run_at="18:00", now=None):
+    """Establish a connection from an in-memory credential document.
 
     Order matters. The account is validated and occupancy checked first, but
     the record is only published after token encryption and storage succeeds.
     A failed KMS or filesystem write therefore leaves a vacant deployment
     vacant, and a failed reauthorisation leaves its prior record intact.
     """
-    document = read_token_document(token_path)
+    if not isinstance(document, dict) or not document.get(REQUIRED_TOKEN_FIELD):
+        raise ConnectAccountError(
+            "credential carries no refresh_token; a token that cannot be "
+            "refreshed is no use to a scheduled run"
+        )
     check_account_agrees(document, account)
 
-    with connection_lifecycle_lock(root):
+    with conn.lifecycle_lock(root):
         existing = conn.current(root)
         connection = conn.prepare_connection(
             root, account, timezone=timezone, run_at=run_at, now=now
@@ -245,6 +222,23 @@ def connect_account(root, account, token_path, provider, *, timezone="UTC",
                 f"({type(exc).__name__})"
             ) from exc
 
+    return {
+        "account": connection.account,
+        "connected_at": connection.connected_at,
+        "last_authorized_at": connection.last_authorized_at,
+        "run_at": connection.run_at,
+        "timezone": connection.timezone_name,
+    }
+
+
+def connect_account(root, account, token_path, provider, *, timezone="UTC",
+                    run_at="18:00", now=None, destroy_token_file=True):
+    """Connect from a broker file, deleting its plaintext only on success."""
+    document = read_token_document(token_path)
+    summary = connect_token_document(
+        root, account, document, provider,
+        timezone=timezone, run_at=run_at, now=now,
+    )
     # Drop the plaintext reference before touching the filesystem again.
     document = None
 
@@ -256,14 +250,7 @@ def connect_account(root, account, token_path, provider, *, timezone="UTC",
         except OSError:
             destroyed = False
 
-    return {
-        "account": connection.account,
-        "connected_at": connection.connected_at,
-        "last_authorized_at": connection.last_authorized_at,
-        "run_at": connection.run_at,
-        "timezone": connection.timezone_name,
-        "token_file_destroyed": destroyed,
-    }
+    return {**summary, "token_file_destroyed": destroyed}
 
 
 def schedule_conflict(root, timezone, run_at, provided):

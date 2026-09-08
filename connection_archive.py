@@ -63,6 +63,7 @@ DISPOSITION = {
     "token.enc.json": (DESTROY, "credential"),
     "taxonomy-confirmation.json": (ARCHIVE, "consent"),
     "ai-drafting-approval.json": (ARCHIVE, "consent"),
+    "label-setup-pending.json": (ARCHIVE, "consent"),
     "account.json": (ARCHIVE_RESTORABLE, "config"),
     "daily-state.json": (ARCHIVE_RESTORABLE, "history"),
     "daily-status.json": (ARCHIVE, "history"),

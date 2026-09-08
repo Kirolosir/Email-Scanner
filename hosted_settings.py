@@ -1,0 +1,218 @@
+"""Validated, fail-closed settings updates for the hosted dashboard.
+
+Saving settings is the account owner's explicit approval of the displayed
+label set and unsent-draft policy. The connection is disabled before any of
+the related files change and re-enabled only after the config, taxonomy
+confirmation, AI approval, and pending Gmail-label setup record all exist.
+A crash or partial disk failure therefore stops scheduled work instead of
+running with a half-old approval bundle.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+import account_profile
+import approve_account
+import connection
+from private_runtime import atomic_write_json
+from taxonomy import sanitize_slug, validate_label_name
+
+
+MAX_CATEGORIES = 12
+PENDING_LABEL_SETUP = "label-setup-pending.json"
+DEFAULT_SYSTEM_LABELS = {
+    "needs_review": "AI/Needs Review",
+    "processed": "AI/Processed",
+}
+
+
+class SettingsError(ValueError):
+    pass
+
+
+def _bounded_int(value, name, minimum, maximum):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise SettingsError(f"{name} must be a number") from exc
+    if isinstance(value, bool) or not minimum <= parsed <= maximum:
+        raise SettingsError(f"{name} must be from {minimum} to {maximum}")
+    return parsed
+
+
+def parse_label_lines(raw):
+    """Parse ``Display | Gmail/Label`` lines into reviewed categories."""
+    lines = [line.strip() for line in str(raw or "").splitlines()
+             if line.strip()]
+    if not lines:
+        raise SettingsError("add at least one label")
+    if len(lines) > MAX_CATEGORIES:
+        raise SettingsError(f"use at most {MAX_CATEGORIES} labels")
+
+    categories = []
+    slugs = set()
+    names = set()
+    for line in lines:
+        display, separator, label = line.partition("|")
+        display = display.strip()
+        label = label.strip() if separator else f"AI/{display}"
+        if not display:
+            raise SettingsError("every label needs a display name")
+        try:
+            slug = sanitize_slug(display)
+            validate_label_name(label)
+        except ValueError as exc:
+            raise SettingsError(str(exc)) from exc
+        folded = label.casefold()
+        if slug in slugs:
+            raise SettingsError(f"duplicate category {display!r}")
+        if folded in names:
+            raise SettingsError(f"duplicate Gmail label {label!r}")
+        slugs.add(slug)
+        names.add(folded)
+        categories.append({
+            "slug": slug,
+            "display": display[:128],
+            "description": f"Messages best categorized as {display[:128]}.",
+            "examples": [],
+            "label": label,
+            "drafting": {"mode": "generic"},
+        })
+
+    if "other" not in slugs:
+        if len(categories) >= MAX_CATEGORIES:
+            raise SettingsError(
+                "include an Other category within the 12-label limit"
+            )
+        categories.append({
+            "slug": "other",
+            "display": "Other",
+            "description": "Replyable messages that fit no narrower category.",
+            "examples": [],
+            "label": "AI/Other",
+            "drafting": {"mode": "generic"},
+        })
+        names.add("ai/other")
+
+    for system_name in DEFAULT_SYSTEM_LABELS.values():
+        if system_name.casefold() in names:
+            raise SettingsError(
+                f"{system_name!r} is reserved for the assistant"
+            )
+    return categories
+
+
+def build_settings_document(occupant, form):
+    categories = parse_label_lines(form.get("labels"))
+    timezone = str(form.get("timezone", "")).strip()
+    try:
+        ZoneInfo(timezone)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise SettingsError("choose a valid timezone") from exc
+    run_at = str(form.get("run_at", "")).strip()
+    if not connection.RUN_AT.fullmatch(run_at):
+        raise SettingsError("daily run time must use HH:MM")
+    display_name = str(form.get("display_name", "")).strip()
+    signature = str(form.get("signature", "")).strip()
+    if not display_name or len(display_name) > 120:
+        raise SettingsError("display name is required and must be under 120 characters")
+    if not signature or len(signature) > 500:
+        raise SettingsError("signature is required and must be under 500 characters")
+    if form.get("confirm_unsent_drafts") != "yes":
+        raise SettingsError(
+            "confirm that AI responses are unsent drafts requiring review"
+        )
+
+    document = {
+        "version": 1,
+        "account": occupant.account,
+        "timezone": timezone,
+        "taxonomy": categories,
+        "system_labels": dict(DEFAULT_SYSTEM_LABELS),
+        "draft_all_replyable_messages": True,
+        "fallback_category": "other",
+        "ai_drafting": {
+            "display_name": display_name,
+            "signature": signature,
+            "default_guidance": (
+                "Create a concise, helpful draft. Never claim an action was "
+                "completed, promise a commitment, or include sensitive data. "
+                "The account owner will review and edit before sending."
+            ),
+            "max_words": 160,
+        },
+    }
+    # This performs the same strict schema and drafting-policy validation the
+    # scheduled run will perform later, before any state file changes.
+    try:
+        profile = account_profile.load_profile_document(document)
+    except ValueError as exc:
+        raise SettingsError("settings could not be validated") from exc
+    limits = {
+        "max_scan": _bounded_int(form.get("max_scan"), "scan limit", 1, 500),
+        "limit": _bounded_int(form.get("limit"), "write limit", 1, 250),
+        "max_drafts": _bounded_int(
+            form.get("max_drafts"), "draft limit", 0, 50
+        ),
+    }
+    return document, profile, run_at, limits
+
+
+def document_digest(document):
+    payload = json.dumps(
+        document, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def save_settings(root, form):
+    """Validate and commit a complete settings/approval bundle."""
+    root = Path(root)
+    with connection.lifecycle_lock(root):
+        occupant = connection.current(root)
+        if occupant is None:
+            raise SettingsError("connect Gmail before saving settings")
+        document, profile, run_at, limits = build_settings_document(
+            occupant, form
+        )
+        try:
+            taxonomy_document, ai_document = approve_account.build_documents(
+                profile
+            )
+        except ValueError as exc:
+            raise SettingsError("settings approval could not be created") from exc
+        if ai_document is None:
+            raise SettingsError("AI draft approval was not produced")
+
+        # Stop the timer before the multi-file bundle changes. Re-enabling is
+        # the commit marker; any failure in between remains visibly disabled.
+        connection.update_settings(root, occupant.account, enabled=False)
+        active = Path(occupant.directory)
+        try:
+            atomic_write_json(active / "account.json", document)
+            atomic_write_json(
+                active / "taxonomy-confirmation.json", taxonomy_document
+            )
+            atomic_write_json(active / "ai-drafting-approval.json", ai_document)
+            atomic_write_json(active / PENDING_LABEL_SETUP, {
+                "version": 1,
+                "account_config_digest": document_digest(document),
+                "labels": sorted(
+                    [entry["label"] for entry in document["taxonomy"]]
+                    + list(document["system_labels"].values())
+                ),
+            })
+        except OSError as exc:
+            raise SettingsError(
+                f"settings could not be saved ({type(exc).__name__}); "
+                "daily runs remain paused"
+            ) from exc
+
+        return connection.update_settings(
+            root, occupant.account,
+            timezone=profile.timezone, run_at=run_at, enabled=True,
+            limits=limits,
+        )

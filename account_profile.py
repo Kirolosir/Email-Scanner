@@ -220,6 +220,11 @@ def load_profile(path=None):
     return _load_account_config(path)
 
 
+def load_profile_document(document):
+    """Validate an in-memory account configuration document."""
+    return _load_account_document(document)
+
+
 def assert_profile_matches_account(profile, actual_account):
     """Bind a loaded account config to the authenticated mailbox.
 
@@ -260,6 +265,14 @@ def _load_account_config(path):
 
     with open(path, encoding="utf-8") as handle:
         document = json.load(handle)
+
+    return _load_account_document(document)
+
+
+def _load_account_document(document):
+    """Shared strict validation for file and authenticated-web settings."""
+    import drafting as drafting_module
+    import taxonomy as taxonomy_module
 
     _require(isinstance(document, dict), "account config must be an object")
     _require(document.get("version") == ACCOUNT_CONFIG_VERSION,
