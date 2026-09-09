@@ -9,6 +9,7 @@ local encrypted credential while archiving non-credential account records.
 from __future__ import annotations
 
 import json
+import logging
 import secrets
 import threading
 import time
@@ -30,6 +31,7 @@ from gmail_retry import gmail_execute
 
 OAUTH_TTL_SECONDS = 600
 GOOGLE_REVOCATION_ENDPOINT = "https://oauth2.googleapis.com/revoke"
+logger = logging.getLogger(__name__)
 
 
 class HostedControlError(RuntimeError):
@@ -181,9 +183,8 @@ class HostedControl:
         stage = "token_exchange_failed"
         try:
             flow.fetch_token(
-                authorization_response=(
-                    self.config.redirect_uri + "?" + str(query_string)
-                )
+                code=code,
+                include_client_id=True,
             )
             credentials = flow.credentials
             stage = "gmail_profile_failed"
@@ -214,6 +215,10 @@ class HostedControl:
                 code="account_mismatch",
             ) from exc
         except Exception as exc:
+            logger.warning(
+                "Google connection failed during %s (%s)",
+                stage, type(exc).__name__,
+            )
             raise HostedControlError(
                 f"Google sign-in could not be completed ({type(exc).__name__})",
                 code=stage,

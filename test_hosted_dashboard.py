@@ -432,8 +432,14 @@ def test_oauth_callback_explains_a_different_account_without_leaking_it(tmp_path
     assert failed["headers"]["Location"] == "/login?connect=account_mismatch"
 
     page = _call(app, "/login", query="connect=account_mismatch")
-    assert "A different Gmail account is already linked" in page["body"]
+    assert "One Gmail account is already connected" in page["body"]
     assert "private provider detail" not in page["body"]
+
+
+def test_login_explains_any_gmail_is_allowed_but_only_one_at_a_time(tmp_path):
+    page = _call(_app(tmp_path, control=object()), "/login")
+    assert "Connect any Gmail account" in page["body"]
+    assert "supports one account at a time" in page["body"]
 
 
 def test_disconnect_requires_csrf_and_passes_typed_address(tmp_path):

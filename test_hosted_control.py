@@ -85,6 +85,9 @@ def test_oauth_callback_verifies_gmail_then_stores_only_encrypted_token(
     assert (root / "active" / "token.enc.json").is_file()
     assert not any(path.name == "token.json" for path in root.rglob("*"))
     exchange = [call for call in calls if call[0] == "exchange"]
+    assert exchange[0][1] == {
+        "code": "one-time-code", "include_client_id": True,
+    }
     assert exchange[0][2]["state"] == "state-value"
     assert exchange[0][2]["code_verifier"] == "v" * 64
 

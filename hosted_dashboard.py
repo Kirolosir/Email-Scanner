@@ -47,8 +47,8 @@ HTML_HEADERS = [
 
 CONNECT_ERROR_MESSAGES = {
     "account_mismatch": (
-        "A different Gmail account is already linked. Choose the previously "
-        "connected account, or use the recovery option to disconnect it first."
+        "One Gmail account is already connected. Disconnect it before linking "
+        "a different account."
     ),
     "consent_cancelled": (
         "Google access was cancelled or declined. Try again and approve the "
@@ -623,8 +623,8 @@ class HostedDashboardApp:
               <div class="mark">ES</div>
               <p class="eyebrow">Email Scanner</p>
               <h1>Continue with Google</h1>
-              <p class="lede">Link or reconnect Gmail, then open your inbox
-              dashboard in one step.</p>
+              <p class="lede">Connect any Gmail account. This installation
+              supports one account at a time.</p>
               {connect_notice}
               {google_link}
               <details class="key-fallback"><summary>Use private access key instead</summary>
