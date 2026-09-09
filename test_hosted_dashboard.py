@@ -5,6 +5,7 @@ import json
 from urllib.parse import urlencode
 
 import connection
+import connection_archive
 from hosted_dashboard import HostedDashboardApp
 from hosted_status import HostedConfig
 
@@ -167,6 +168,66 @@ def test_logout_requires_csrf(tmp_path):
     assert _call(app, "/logout", "POST", "csrf=wrong", cookie)[
         "status"
     ].startswith("403")
+
+
+def test_signout_confirmation_disconnects_gmail_and_clears_session(tmp_path):
+    address = "owner@example.test"
+    connection.connect(tmp_path, address)
+
+    class Control:
+        def __init__(self):
+            self.confirmations = []
+
+        def begin_connect(self):
+            return "https://accounts.example.test/authorize"
+
+        def disconnect(self, confirmation):
+            self.confirmations.append(confirmation)
+            connection_archive.disconnect(connection.current(tmp_path), tmp_path)
+
+    control = Control()
+    app = _app(tmp_path, control=control)
+    cookie = _login(app)
+
+    confirmation = _call(app, "/signout", cookie=cookie)
+    assert confirmation["status"].startswith("200")
+    assert "Sign out &amp; disconnect" in confirmation["body"]
+    assert address in confirmation["body"]
+
+    response = _call(
+        app, "/logout", "POST",
+        urlencode({"csrf": app._csrf_value(), "confirmation": address}),
+        cookie,
+    )
+    assert response["status"].startswith("303")
+    assert response["headers"]["Location"] == "/login?signed_out=1"
+    assert "Max-Age=0" in response["headers"]["Set-Cookie"]
+    assert control.confirmations == [address]
+    assert connection.current(tmp_path) is None
+
+    page = _call(app, "/login", query="signed_out=1")
+    assert "account slot is ready for a different Gmail account" in page["body"]
+
+
+def test_signout_refuses_wrong_address_without_clearing_session(tmp_path):
+    address = "owner@example.test"
+    connection.connect(tmp_path, address)
+
+    class Control:
+        def disconnect(self, confirmation):
+            raise ValueError("private disconnect detail")
+
+    app = _app(tmp_path, control=Control())
+    response = _call(
+        app, "/logout", "POST",
+        urlencode({"csrf": app._csrf_value(), "confirmation": "wrong@example.test"}),
+        _login(app),
+    )
+    assert response["status"].startswith("400")
+    assert "Type the connected Gmail address exactly" in response["body"]
+    assert "Set-Cookie" not in response["headers"]
+    assert connection.current(tmp_path).account == address
+    assert "private disconnect detail" not in response["body"]
 
 
 def test_connected_owner_can_open_and_save_settings(tmp_path):

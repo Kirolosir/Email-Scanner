@@ -47,8 +47,8 @@ HTML_HEADERS = [
 
 CONNECT_ERROR_MESSAGES = {
     "account_mismatch": (
-        "One Gmail account is already connected. Disconnect it before linking "
-        "a different account."
+        "One Gmail account is already connected. Continue with that account, "
+        "then choose Sign out & disconnect before linking a different account."
     ),
     "consent_cancelled": (
         "Google access was cancelled or declined. Try again and approve the "
@@ -368,7 +368,8 @@ class HostedDashboardApp:
             return self._respond(
                 start_response, "200 OK",
                 self._login_page(
-                    connect_error=(query.get("connect") or [""])[-1]
+                    connect_error=(query.get("connect") or [""])[-1],
+                    signed_out=query.get("signed_out") == ["1"],
                 ),
                 head=head,
             )
@@ -453,9 +454,47 @@ class HostedDashboardApp:
                     start_response, "403 Forbidden",
                     self._page("Request refused", "<h1>Request refused.</h1>"),
                 )
+            try:
+                occupant = connection.current(self.config.state_root)
+            except connection.ConnectionConfigError:
+                occupant = None
+            if occupant is not None:
+                if self.control is None:
+                    return self._respond(
+                        start_response, "503 Service Unavailable",
+                        self._signout_page(
+                            occupant, "Gmail disconnect is temporarily unavailable."
+                        ),
+                    )
+                try:
+                    self.control.disconnect(form.get("confirmation", ""))
+                except Exception:  # noqa: BLE001 - keep provider detail private
+                    try:
+                        occupant = connection.current(self.config.state_root)
+                    except connection.ConnectionConfigError:
+                        occupant = None
+                    if occupant is not None:
+                        return self._respond(
+                            start_response, "400 Bad Request",
+                            self._signout_page(
+                                occupant,
+                                "Sign out was refused. Type the connected Gmail "
+                                "address exactly.",
+                            ),
+                        )
             return self._redirect(
-                start_response, "/login",
+                start_response, "/login?signed_out=1",
                 [("Set-Cookie", self._session_cookie(clear=True))],
+            )
+
+        if path == "/signout" and method in {"GET", "HEAD"}:
+            try:
+                occupant = connection.current(self.config.state_root)
+            except connection.ConnectionConfigError:
+                occupant = None
+            return self._respond(
+                start_response, "200 OK", self._signout_page(occupant),
+                head=head,
             )
 
         if path == "/" and method in {"GET", "HEAD"}:
@@ -599,7 +638,7 @@ class HostedDashboardApp:
             head=head,
         )
 
-    def _login_page(self, failed=False, connect_error=""):
+    def _login_page(self, failed=False, connect_error="", signed_out=False):
         if failed and not connect_error:
             connect_error = "connect_failed"
         connect_notice = (
@@ -610,6 +649,12 @@ class HostedDashboardApp:
             + '</p>'
             if connect_error else ""
         )
+        if signed_out:
+            connect_notice = (
+                '<p class="notice good">Signed out. Google access was revoked '
+                'when available, the stored Gmail credential was removed, and '
+                'the account slot is ready for a different Gmail account.</p>'
+            )
         google_link = ""
         if self.control is not None:
             try:
@@ -727,10 +772,7 @@ class HostedDashboardApp:
           <header class="topbar">
             <a class="brand" href="/"><span class="mark small">ES</span>
               <span>Email Scanner</span></a>
-            <form method="post" action="/logout">
-              <input type="hidden" name="csrf" value="{self._csrf_value()}">
-              <button class="ghost" type="submit">Sign out</button>
-            </form>
+            <a class="ghost-link" href="/signout">Sign out &amp; disconnect</a>
           </header>
           <main class="workspace">
             {saved_notice}
@@ -846,10 +888,8 @@ class HostedDashboardApp:
             <a class="brand" href="/"><span class="mark small">ES</span>
               <span>Email Scanner</span></a>
             <div class="top-actions"><a class="ghost-link" href="/">Dashboard</a>
-              <form method="post" action="/logout">
-                <input type="hidden" name="csrf" value="{self._csrf_value()}">
-                <button class="ghost" type="submit">Sign out</button>
-              </form></div>
+              <a class="ghost-link" href="/signout">Sign out &amp; disconnect</a>
+            </div>
           </header>
           <main class="workspace settings-shell">
             <section class="account-hero compact">
@@ -930,6 +970,49 @@ class HostedDashboardApp:
                   name="confirmation" type="email" required autocomplete="off">
                   <button class="danger" type="submit">Disconnect Gmail</button></div>
               </form>
+            </section>
+          </main>
+        """)
+
+    def _signout_page(self, occupant, error=""):
+        error_notice = (
+            f'<p class="notice bad">{html.escape(str(error))}</p>' if error else ""
+        )
+        if occupant is None:
+            confirmation = ""
+            copy = (
+                "No Gmail account is connected. Signing out will only clear "
+                "this dashboard session."
+            )
+            field = ""
+            button = "Sign out"
+        else:
+            confirmation = _escape(occupant.account)
+            copy = (
+                "This revokes Google access when available, removes the encrypted "
+                "Gmail credential, stops future runs, and frees the one-account "
+                "slot. Existing Gmail labels and drafts stay in the mailbox."
+            )
+            field = f"""
+              <label for="confirmation">Type {confirmation} to confirm</label>
+              <input id="confirmation" name="confirmation" type="email"
+                required autocomplete="off">"""
+            button = "Sign out &amp; disconnect"
+        return self._page("Sign out", f"""
+          <main class="login-shell">
+            <section class="login-card">
+              <div class="mark">ES</div>
+              <p class="eyebrow">Account safety</p>
+              <h1>Sign out of Email Scanner?</h1>
+              <p class="lede">{copy}</p>
+              {error_notice}
+              <form method="post" action="/logout">
+                <input type="hidden" name="csrf" value="{self._csrf_value()}">
+                {field}
+                <button class="danger" type="submit">{button}</button>
+              </form>
+              <p class="browser-note"><a href="/">Cancel and return to the
+              dashboard</a></p>
             </section>
           </main>
         """)
