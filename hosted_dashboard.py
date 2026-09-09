@@ -348,8 +348,18 @@ class HostedDashboardApp:
         # the login page before a dashboard session exists. The hidden token is
         # still required, and the OAuth callback's one-time state is the second
         # request-binding layer.
-        if path == "/connect" and method == "POST":
-            form = self._form(environ)
+        if path == "/connect" and method in {"GET", "POST"}:
+            if method == "GET":
+                values = parse_qs(
+                    str(environ.get("QUERY_STRING", "")),
+                    keep_blank_values=True,
+                )
+                form = {
+                    key: entries[-1]
+                    for key, entries in values.items() if entries
+                }
+            else:
+                form = self._form(environ)
             if form is None or not self._csrf_ok(form):
                 return self._respond(
                     start_response, "403 Forbidden",
@@ -551,12 +561,11 @@ class HostedDashboardApp:
             '<p class="notice bad">Google sign-in did not finish. Try again.'
             '</p>' if connect_failed else ""
         )
-        google_form = f"""
-              <form method="post" action="/connect">
-                <input type="hidden" name="csrf" value="{self._csrf_value()}">
-                <button class="google-button" type="submit"><span aria-hidden="true">G</span>
-                  Continue with Google</button>
-              </form>""" if self.control is not None else ""
+        google_link = f"""
+              <a class="google-button" target="_top"
+                 href="/connect?csrf={self._csrf_value()}">
+                <span aria-hidden="true">G</span>Continue with Google</a>""" \
+            if self.control is not None else ""
         return self._page("Sign in", f"""
           <main class="login-shell">
             <section class="login-card">
@@ -566,7 +575,7 @@ class HostedDashboardApp:
               <p class="lede">Link or reconnect Gmail, then open your inbox
               dashboard in one step.</p>
               {connect_error}
-              {google_form}
+              {google_link}
               <details class="key-fallback"><summary>Use private access key instead</summary>
                 {key_error}
                 <form method="post" action="/login">
@@ -576,7 +585,6 @@ class HostedDashboardApp:
                   <button type="submit">Open dashboard</button>
                 </form>
               </details>
-              <p class="student-credit">Built independently by a college Junior.</p>
             </section>
           </main>
         """)
@@ -649,11 +657,11 @@ class HostedDashboardApp:
             '<a class="secondary" href="/settings">Edit labels &amp; schedule</a>'
             if occupant is not None else ""
         )
-        connect_form = f"""
-          <form method="post" action="/connect">
-            <input type="hidden" name="csrf" value="{self._csrf_value()}">
-            <button class="ghost" type="submit">Link Google account</button>
-          </form>""" if self.control is not None else ""
+        connect_link = (
+            f'<a class="ghost secondary" target="_top" '
+            f'href="/connect?csrf={self._csrf_value()}">Link Google account</a>'
+            if self.control is not None else ""
+        )
         run_form = f"""
           <form method="post" action="/run-now">
             <input type="hidden" name="csrf" value="{self._csrf_value()}">
@@ -682,7 +690,7 @@ class HostedDashboardApp:
                 unsent Gmail drafts for review. Nothing is auto-sent.</p>
               </div>
               <div class="hero-actions"><span class="status {status_tone}"><i></i>{_escape(status_text)}</span>
-                {connect_form}{run_form}</div>
+                {connect_link}{run_form}</div>
             </section>
 
             <section class="overview-grid">
@@ -727,7 +735,6 @@ class HostedDashboardApp:
                 automated messages, and bulk mail from reply drafting.</p></div>
               <a class="secondary" href="https://mail.google.com/mail/u/0/#drafts">Open Gmail drafts</a>
             </section>
-            <p class="student-credit page-credit">Built independently by a college Junior.</p>
           </main>
         """)
 
@@ -869,7 +876,6 @@ class HostedDashboardApp:
                   <button class="danger" type="submit">Disconnect Gmail</button></div>
               </form>
             </section>
-            <p class="student-credit page-credit">Built independently by a college Junior.</p>
           </main>
         """)
 
@@ -930,13 +936,13 @@ input:not([type=hidden]):not([type=checkbox]),textarea{{width:100%;padding:13px 
 outline:none;background:white;color:var(--ink)}}textarea{{resize:vertical}}input:focus,textarea:focus{{border-color:var(--mint);box-shadow:0 0 0 4px #dff7f0}}
 .login-card button{{width:100%;margin-top:14px}}.google-button{{display:flex;align-items:center;
 justify-content:center;gap:11px;background:#fff;color:#223;border:1px solid #aebfbd;
+border-radius:12px;padding:12px 16px;margin-top:14px;text-decoration:none;font-weight:750;
 box-shadow:0 4px 14px rgba(20,63,59,.08)}}.google-button span{{display:grid;place-items:center;
 width:24px;height:24px;border-radius:50%;background:#fff;color:#1769e0;font-weight:850}}
 .key-fallback{{margin-top:22px;border-top:1px solid var(--line);padding-top:18px}}
 .key-fallback summary{{cursor:pointer;color:var(--muted);font-weight:700;text-align:center}}
 .notice{{padding:11px 13px;border-radius:10px}}.notice.bad{{background:#fff0ed;color:#9b3024}}
 .notice.good{{background:#e2f7ee;color:#116645}}.notice.progress{{background:#eaf3f8;color:#24556f}}
-.student-credit{{margin:24px 0 0;color:var(--muted);font-size:.8rem;text-align:center}}.page-credit{{margin-top:34px}}
 .settings-shell{{max-width:980px}}.account-hero.compact h1{{font-size:clamp(2rem,4vw,3rem)}}
 .settings-form{{display:grid;gap:16px}}.form-section{{display:grid;grid-template-columns:.75fr 1.25fr;gap:38px}}
 .form-copy p{{color:var(--muted)}}.form-section label{{margin:0 0 8px}}.form-section label:not(:first-child){{margin-top:18px}}

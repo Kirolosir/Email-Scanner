@@ -85,7 +85,8 @@ def test_google_is_the_primary_login_and_key_is_only_a_fallback(tmp_path):
     page = _call(_app(tmp_path, control=object()), "/login")
     assert page["status"].startswith("200")
     assert "Continue with Google" in page["body"]
-    assert 'action="/connect"' in page["body"]
+    assert 'href="/connect?csrf=' in page["body"]
+    assert 'target="_top"' in page["body"]
     assert "Use private access key instead" in page["body"]
 
 
@@ -248,6 +249,17 @@ def test_connect_is_csrf_protected_and_redirects_to_google(tmp_path):
     assert anonymous["headers"]["Location"].startswith("https://accounts.")
     assert control.calls == 2
 
+    direct = _call(
+        app, "/connect", query=urlencode({"csrf": app._csrf_value()})
+    )
+    assert direct["status"].startswith("303")
+    assert direct["headers"]["Location"].startswith("https://accounts.")
+    assert control.calls == 3
+
+    refused_direct = _call(app, "/connect", query="csrf=wrong")
+    assert refused_direct["status"].startswith("403")
+    assert control.calls == 3
+
 
 def test_dashboard_has_google_link_and_immediate_run_controls(tmp_path):
     app = _app(tmp_path, control=object())
@@ -258,7 +270,7 @@ def test_dashboard_has_google_link_and_immediate_run_controls(tmp_path):
 
     connection.connect(tmp_path, "owner@example.test")
     connected = _call(app, cookie=_login(app))
-    assert 'action="/connect"' in connected["body"]
+    assert 'href="/connect?csrf=' in connected["body"]
     assert 'action="/run-now"' in connected["body"]
 
 

@@ -28,14 +28,6 @@ def test_no_agent_brand_is_present_in_tracked_project_content():
     assert offenders == []
 
 
-def test_student_authorship_is_clear():
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    dashboard = (ROOT / "hosted_dashboard.py").read_text(encoding="utf-8")
-    statement = "Built independently by a college Junior"
-    assert statement in readme
-    assert statement in dashboard
-
-
 def test_no_large_binary_or_sdk_artifact_is_tracked():
     oversized = [
         path.relative_to(ROOT).as_posix() for path in _tracked_files()
