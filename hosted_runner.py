@@ -33,6 +33,7 @@ from gmail_common import normalize_address
 from gmail_labeler import fetch_account_labels
 from gmail_retry import gmail_execute
 from hosted_status import verify_durable_state_root
+import hosted_run_request
 import hosted_settings
 from private_runtime import RunStatus, ensure_private_directory
 import setup_labels
@@ -232,6 +233,24 @@ def run_if_due(env=None, *, now=None, service_builder=build):
 
         active = Path(occupant.directory)
         status_path = active / STATUS_FILE
+        try:
+            force_requested = hosted_run_request.consume_request(
+                active, occupant, now=now
+            )
+        except hosted_run_request.RunRequestError as exc:
+            try:
+                hosted_run_request.discard_request(active)
+            except hosted_run_request.RunRequestError:
+                pass
+            _record_blocked(status_path, "run_request_invalid")
+            print(f"Immediate run stopped safely ({type(exc).__name__}).")
+            return 2
+
+        if force_requested and not occupant.enabled:
+            _record_blocked(status_path, "account_disabled")
+            print("The connected account is disabled; no Gmail contact occurred.")
+            return 2
+
         missing = [path.name for path in _required_account_files(active)
                    if not path.is_file()]
         if missing:
@@ -250,7 +269,7 @@ def run_if_due(env=None, *, now=None, service_builder=build):
         due, reason = connection_schedule.is_due(
             occupant, now, last_completed_date=last_completed
         )
-        if not due and prepared_labels is None:
+        if not due and not force_requested and prepared_labels is None:
             print(f"No run due: {reason}.")
             return 0
 
@@ -269,7 +288,7 @@ def run_if_due(env=None, *, now=None, service_builder=build):
                 _record_blocked(status_path, "label_setup_failed")
                 print(f"Gmail label setup stopped safely ({type(exc).__name__}).")
                 return 2
-            if not due:
+            if not due and not force_requested:
                 print("Reviewed Gmail labels are ready; no daily run was due.")
                 return 0
 
@@ -289,6 +308,8 @@ def run_if_due(env=None, *, now=None, service_builder=build):
             "--max-drafts", str(occupant.max_drafts),
             "--scheduled", "--apply", "--yes",
         ]
+        if force_requested:
+            argv.append("--force")
 
         # DraftLog uses the profile's configured path. Keep hosted artifacts on
         # the durable active volume even if a restored profile names an old local

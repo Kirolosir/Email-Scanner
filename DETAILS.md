@@ -898,11 +898,12 @@ protected-label messages needs `allow_protected_labels` on top of that, and the
 longer confirmation phrase ending in `including messages under protected
 labels`.
 
-## Hosted status service (built, not deployed)
+## Hosted VM services
 
 The single connection can be run from a hosted instance rather than a laptop.
-Three pieces exist for that; none of them has been deployed, and no real
-account has been connected.
+The private VM deployment keeps four boundaries separate: machine status,
+the authenticated owner dashboard, the short-lived Gmail runner, and the
+timer/path units that start that runner.
 
 **The key-encrypting key lives in Cloud KMS.** `connection_tokens.py` wraps
 each token under a fresh data key and wraps that key with a KEK.
@@ -940,6 +941,15 @@ memory until Cloud KMS encryption. Disconnect attempts Google revocation, then
 destroys the local encrypted credential even when revocation cannot be
 confirmed. Gunicorn access logging is disabled for this service so callback
 authorization codes never enter the system journal.
+
+The dashboard's **Run now** action does not import Gmail code, decrypt a token,
+or launch a privileged command. It writes one private, account-bound request
+under `/mnt/state/active`. `hosted-triage.path` notices that exact file and
+starts the same sandboxed oneshot service used by the daily timer. The runner
+consumes the request before mailbox access, refuses altered or hour-old
+requests, and bypasses only the schedule/same-day gate. Reviewed settings,
+account identity checks, spam and automated-mail exclusions, per-message
+journaling, and all scan/write/draft limits still apply.
 
 **The state volume must be a real filesystem, and must actually be mounted.**
 The lifecycle rests on `os.replace` for every state write and `fcntl.flock` for
@@ -981,19 +991,22 @@ The bearer and forwarded-https checks remain in the code regardless. The
 binding is a deployment choice the module cannot verify, and defence that only
 holds while a config file says so is not defence.
 
-Deployment order, when it happens:
+Installation or recovery order:
 
 1. Provision the KMS key ring and key; grant the VM's service account
    `roles/cloudkms.cryptoKeyEncrypterDecrypter` on that key alone.
 2. Create the VM and attach a persistent disk; format ext4, mount at
    `/mnt/state`, and add it to `/etc/fstab` so it survives a reboot.
 3. Deploy the code, virtualenv, installed-app OAuth client,
-   `/etc/email-scanner/hosted.env`, and the status/dashboard/runner units;
+   `/etc/email-scanner/hosted.env`, and the status, dashboard, runner, timer,
+   and path units;
    verify the disk with `--check-state-root --require-mountpoint` before
    enabling a service.
 4. Confirm `/healthz` answers through the tunnel, the status endpoint refuses
    without a bearer, and the dashboard accepts the same private access key.
-5. Connect Gmail through the dashboard. The command-line broker flow below
+5. Use **Link Google account** in the dashboard, save the reviewed labels and
+   schedule, then use **Run now** for an immediate bounded run when needed.
+   The command-line broker flow below
    remains a recovery option:
 
 ```

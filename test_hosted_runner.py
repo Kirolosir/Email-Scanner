@@ -6,6 +6,7 @@ import pytest
 
 import connection
 import hosted_runner as runner
+import hosted_run_request
 import hosted_settings
 
 
@@ -181,6 +182,63 @@ def test_due_runner_injects_gmail_service_and_all_safety_limits(
     assert argv[argv.index("--max-scan") + 1] == str(seat.max_scan)
     assert argv[argv.index("--limit") + 1] == str(seat.limit)
     assert argv[argv.index("--max-drafts") + 1] == str(seat.max_drafts)
+    assert "--force" not in argv
+
+
+def test_run_now_bypasses_schedule_but_keeps_the_runner_limits(
+        tmp_path, monkeypatch):
+    root, _client, env = _environment(tmp_path, monkeypatch)
+    seat = connection.connect(root, A, timezone="UTC", run_at="18:00")
+    for name in (runner.CONFIG_FILE, runner.TAXONOMY_APPROVAL_FILE,
+                 runner.AI_APPROVAL_FILE):
+        (seat.directory / name).write_text("{}", encoding="utf-8")
+    now = dt.datetime(2026, 9, 8, 17, 0, tzinfo=UTC)
+    hosted_run_request.request_run(root, now=now)
+
+    marker_service = _ProfileService()
+    service_builder = _stub_connected_service(monkeypatch, marker_service)
+    calls = []
+    monkeypatch.setattr(
+        runner.daily_triage, "main",
+        lambda argv, *, gmail_service=None: calls.append(
+            (argv, gmail_service)
+        ) or 0,
+    )
+
+    assert runner.run_if_due(
+        env, now=now, service_builder=service_builder
+    ) == 0
+    assert len(calls) == 1 and calls[0][1] is marker_service
+    argv = calls[0][0]
+    assert "--force" in argv
+    assert argv[argv.index("--max-scan") + 1] == str(seat.max_scan)
+    assert argv[argv.index("--limit") + 1] == str(seat.limit)
+    assert argv[argv.index("--max-drafts") + 1] == str(seat.max_drafts)
+    assert not hosted_run_request.request_path(seat.directory).exists()
+
+
+def test_invalid_run_request_is_removed_before_secrets_or_gmail(
+        tmp_path, monkeypatch):
+    root, _client, env = _environment(tmp_path, monkeypatch)
+    seat = connection.connect(root, A, timezone="UTC", run_at="18:00")
+    for name in (runner.CONFIG_FILE, runner.TAXONOMY_APPROVAL_FILE,
+                 runner.AI_APPROVAL_FILE):
+        (seat.directory / name).write_text("{}", encoding="utf-8")
+    path = hosted_run_request.request_path(seat.directory)
+    path.write_text("not-json", encoding="utf-8")
+    monkeypatch.setattr(
+        runner, "build_provider", lambda *_a: pytest.fail("KMS reached")
+    )
+
+    code = runner.run_if_due(
+        env, now=dt.datetime(2026, 9, 8, 17, 0, tzinfo=UTC),
+        service_builder=lambda *_a, **_k: pytest.fail("Gmail reached"),
+    )
+
+    assert code == 2
+    assert not path.exists()
+    status = json.loads((seat.directory / runner.STATUS_FILE).read_text())
+    assert status["last_run"]["safe_error_codes"] == ["run_request_invalid"]
 
 
 def test_stale_pending_label_approval_blocks_before_token_or_gmail(
@@ -281,6 +339,14 @@ def test_the_timer_checks_often_but_the_runner_owns_due_decisions():
     timer = Path("hosted-triage.timer.example").read_text(encoding="utf-8")
     assert "OnCalendar=*:0/15" in timer
     assert "Persistent=true" in timer
+
+
+def test_the_run_request_path_starts_only_the_sandboxed_runner():
+    unit = Path("hosted-triage.path.example").read_text(encoding="utf-8")
+    assert "PathExists=/mnt/state/active/run-now-request.json" in unit
+    assert "Unit=hosted-triage.service" in unit
+    assert "RequiresMountsFor=/mnt/state" in unit
+    assert "*" not in unit
 
 
 def test_the_runner_service_is_sandboxed_to_the_state_disk():

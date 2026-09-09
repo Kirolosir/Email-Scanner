@@ -72,6 +72,7 @@ DISPOSITION = {
     "review": (ARCHIVE, "history"),
     "draft-logs": (ARCHIVE, "history"),
     "locks": (DESTROY, "coordination"),
+    "run-now-request.json": (DESTROY, "coordination"),
 }
 
 # Restoration is deliberately narrow. There is no entry here for a token or a

@@ -44,6 +44,7 @@ PRODUCTION = [
     ROOT / "hosted_status.py",
     ROOT / "hosted_wsgi.py",
     ROOT / "hosted_runner.py",
+    ROOT / "hosted_run_request.py",
     ROOT / "hosted_dashboard.py",
     ROOT / "hosted_dashboard_wsgi.py",
     ROOT / "hosted_settings.py",

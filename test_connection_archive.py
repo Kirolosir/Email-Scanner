@@ -59,6 +59,8 @@ def _populated(tmp_path, account=A):
     (active / "daily-status.json").write_text(
         json.dumps({"version": 1, "last_run": {"outcome": "success"}}),
         encoding="utf-8")
+    (active / "run-now-request.json").write_text(
+        json.dumps({"version": 1}), encoding="utf-8")
     (active / "failures.log").write_text("===== a scrubbed trace\n", encoding="utf-8")
     for name in ("review", "draft-logs", "locks"):
         (active / name).mkdir(exist_ok=True)
@@ -82,9 +84,9 @@ def test_every_artifact_the_system_produces_has_an_explicit_disposition(tmp_path
     )
 
 
-def test_only_the_token_and_locks_are_destroyed():
+def test_only_credentials_and_coordination_artifacts_are_destroyed():
     destroyed = sorted(n for n, (k, _c) in DISPOSITION.items() if k == DESTROY)
-    assert destroyed == ["locks", "token.enc.json"]
+    assert destroyed == ["locks", "run-now-request.json", "token.enc.json"]
 
 
 def test_restorable_covers_config_and_journal_only():
@@ -183,6 +185,7 @@ def test_the_manifest_records_what_happened(tmp_path):
     assert manifest["version"] == arch.MANIFEST_VERSION
     assert "token.enc.json" in manifest["destroyed"]
     assert "locks" in manifest["destroyed"]
+    assert "run-now-request.json" in manifest["destroyed"]
     assert "account.json" in manifest["archived"]
     assert manifest["restorable"] == ["account.json", "daily-state.json"]
     assert read_manifest(tmp_path, A) == manifest

@@ -1,0 +1,12 @@
+[Unit]
+Description=Start Email-Scanner triage when the owner requests a run
+Documentation=file:///opt/email-scanner/DETAILS.md
+RequiresMountsFor=/mnt/state
+After=local-fs.target
+
+[Path]
+PathExists=/mnt/state/active/run-now-request.json
+Unit=hosted-triage.service
+
+[Install]
+WantedBy=multi-user.target

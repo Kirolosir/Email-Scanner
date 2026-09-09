@@ -18,6 +18,7 @@ from urllib.parse import parse_qs
 
 import connection
 import connection_schedule
+import hosted_run_request
 import hosted_settings
 from hosted_status import HostedConfig, status_document
 
@@ -101,10 +102,11 @@ def _cookie_map(environ):
 
 
 class HostedDashboardApp:
-    def __init__(self, config, clock=None, control=None):
+    def __init__(self, config, clock=None, control=None, run_requester=None):
         self.config = config
         self.clock = clock or (lambda: dt.datetime.now(dt.timezone.utc))
         self.control = control
+        self.run_requester = run_requester or hosted_run_request.request_run
 
     def _session_value(self):
         return hmac.new(
@@ -243,6 +245,24 @@ class HostedDashboardApp:
                 return self._redirect(start_response, "/?connect=failed")
             return self._redirect(start_response, location)
 
+        if path == "/run-now" and method == "POST":
+            form = self._form(environ)
+            if form is None or not self._csrf_ok(form):
+                return self._respond(
+                    start_response, "403 Forbidden",
+                    self._page("Request refused", "<h1>Request refused.</h1>"),
+                )
+            try:
+                self.run_requester(
+                    self.config.state_root, now=self.clock()
+                )
+            except hosted_run_request.RunRequestError:
+                return self._redirect(start_response, "/?run=not-ready")
+            except (connection.ConnectionError,
+                    connection.ConnectionConfigError, OSError):
+                return self._redirect(start_response, "/?run=failed")
+            return self._redirect(start_response, "/?run=requested")
+
         if path == "/logout" and method == "POST":
             form = self._form(environ)
             if form is None or not self._csrf_ok(form):
@@ -269,6 +289,7 @@ class HostedDashboardApp:
                     connected=query.get("connected") == ["1"],
                     disconnected=query.get("disconnected") == ["1"],
                     connect_failed=query.get("connect") == ["failed"],
+                    run_state=(query.get("run") or [""])[-1],
                 ),
                 head=head,
             )
@@ -398,7 +419,8 @@ class HostedDashboardApp:
         """)
 
     def _dashboard(self, saved=False, connected=False, disconnected=False,
-                   connect_failed=False):
+                   connect_failed=False, run_state=""):
+        just_connected = connected
         now = self.clock()
         public = status_document(self.config.state_root, now)
         state = public.get("connection", {})
@@ -445,7 +467,7 @@ class HostedDashboardApp:
             'will be prepared before the next daily run.</p>' if saved else ""
         )
         connection_notice = ""
-        if connected:
+        if just_connected:
             connection_notice = (
                 '<p class="notice good">Gmail connected securely. Review your '
                 'labels and schedule before the first daily run.</p>'
@@ -460,16 +482,37 @@ class HostedDashboardApp:
                 '<p class="notice bad">Google sign-in did not finish. Nothing '
                 'new was connected; you can try again.</p>'
             )
+        run_notice = ""
+        if run_state == "requested":
+            run_notice = (
+                '<p class="notice good">Run requested. It will start within a '
+                'few seconds; refresh shortly to see the result.</p>'
+            )
+        elif run_state == "not-ready":
+            run_notice = (
+                '<p class="notice bad">The run could not start. Link Google and '
+                'save your labels and schedule first.</p>'
+            )
+        elif run_state == "failed":
+            run_notice = (
+                '<p class="notice bad">The run could not be requested. Nothing '
+                'was changed; try again shortly.</p>'
+            )
         settings_link = (
             '<a class="secondary" href="/settings">Edit labels &amp; schedule</a>'
             if occupant is not None else ""
         )
-        connect_label = "Reconnect Gmail" if occupant is not None else "Connect Gmail"
         connect_form = f"""
           <form method="post" action="/connect">
             <input type="hidden" name="csrf" value="{self._csrf_value()}">
-            <button class="ghost" type="submit">{connect_label}</button>
+            <button class="ghost" type="submit">Link Google account</button>
           </form>""" if self.control is not None else ""
+        run_form = f"""
+          <form method="post" action="/run-now">
+            <input type="hidden" name="csrf" value="{self._csrf_value()}">
+            <button type="submit">Run now</button>
+          </form>""" if occupant is not None else """
+          <button type="button" disabled title="Link Google first">Run now</button>"""
 
         return self._page("Dashboard", f"""
           <header class="topbar">
@@ -483,6 +526,7 @@ class HostedDashboardApp:
           <main class="workspace">
             {saved_notice}
             {connection_notice}
+            {run_notice}
             <section class="account-hero">
               <div>
                 <p class="eyebrow">Connected inbox</p>
@@ -491,7 +535,7 @@ class HostedDashboardApp:
                 unsent Gmail drafts for review. Nothing is auto-sent.</p>
               </div>
               <div class="hero-actions"><span class="status {status_tone}"><i></i>{_escape(status_text)}</span>
-                {connect_form}</div>
+                {connect_form}{run_form}</div>
             </section>
 
             <section class="overview-grid">
@@ -720,6 +764,7 @@ background:#e5f5f1;color:var(--mint-dark);border-radius:999px;padding:5px 9px;wh
 .count-badge{{font-size:.9rem}}.safety{{display:flex;align-items:center;justify-content:space-between;gap:24px}}
 .secondary,button{{border:0;border-radius:12px;padding:11px 16px;font-weight:750;cursor:pointer}}
 .secondary{{background:var(--ink);color:white;text-decoration:none;white-space:nowrap}}button{{background:var(--mint-dark);color:white}}
+button:disabled{{opacity:.45;cursor:not-allowed}}
 .ghost{{background:transparent;color:var(--muted);border:1px solid var(--line)}}.ghost-link{{color:var(--muted);text-decoration:none;font-weight:700}}.empty{{color:var(--muted)}}
 .login-shell{{min-height:100vh;display:grid;place-items:center;padding:24px;background:radial-gradient(circle at 20% 10%,#dff7f0,transparent 38%),var(--paper)}}
 .login-card{{width:min(460px,100%);padding:42px;background:white;border:1px solid var(--line);

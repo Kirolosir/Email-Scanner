@@ -70,6 +70,7 @@ PIPELINE_MODULES = [
     "hosted_status.py",
     "hosted_wsgi.py",
     "hosted_runner.py",
+    "hosted_run_request.py",
     "hosted_dashboard.py",
     "hosted_dashboard_wsgi.py",
     "hosted_settings.py",

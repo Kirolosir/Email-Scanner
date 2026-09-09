@@ -11,12 +11,14 @@ from hosted_status import HostedConfig
 BEARER = "b" * 48
 
 
-def _app(tmp_path, control=None):
+def _app(tmp_path, control=None, run_requester=None):
     config = HostedConfig(
         tmp_path, BEARER, require_forwarded_https=False,
         require_mountpoint=False, verify_root=False,
     )
-    return HostedDashboardApp(config, control=control)
+    return HostedDashboardApp(
+        config, control=control, run_requester=run_requester
+    )
 
 
 def _call(app, path="/", method="GET", form="", cookie=""):
@@ -227,6 +229,41 @@ def test_connect_is_csrf_protected_and_redirects_to_google(tmp_path):
     assert response["status"].startswith("303")
     assert response["headers"]["Location"].startswith("https://accounts.")
     assert control.calls == 1
+
+
+def test_dashboard_has_google_link_and_immediate_run_controls(tmp_path):
+    app = _app(tmp_path, control=object())
+    vacant = _call(app, cookie=_login(app))
+    assert "Link Google account" in vacant["body"]
+    assert "Run now" in vacant["body"]
+    assert 'title="Link Google first"' in vacant["body"]
+
+    connection.connect(tmp_path, "owner@example.test")
+    connected = _call(app, cookie=_login(app))
+    assert 'action="/connect"' in connected["body"]
+    assert 'action="/run-now"' in connected["body"]
+
+
+def test_run_now_is_csrf_protected_and_queues_one_request(tmp_path):
+    connection.connect(tmp_path, "owner@example.test")
+    calls = []
+
+    def request_run(root, *, now):
+        calls.append((root, now))
+
+    app = _app(tmp_path, run_requester=request_run)
+    cookie = _login(app)
+    refused = _call(app, "/run-now", "POST", "csrf=wrong", cookie)
+    assert refused["status"].startswith("403")
+    assert calls == []
+
+    response = _call(
+        app, "/run-now", "POST",
+        urlencode({"csrf": app._csrf_value()}), cookie,
+    )
+    assert response["status"].startswith("303")
+    assert response["headers"]["Location"] == "/?run=requested"
+    assert len(calls) == 1 and calls[0][0] == tmp_path
 
 
 def test_oauth_callback_uses_state_without_dashboard_cookie(tmp_path):
