@@ -60,6 +60,28 @@ def test_saving_settings_writes_a_complete_approved_bundle(tmp_path):
     assert len(approval["policy_digest"]) == 64
     int(approval["policy_digest"], 16)
     assert pending["account_config_digest"] == settings.document_digest(config)
+    assert config["ai_drafting"]["default_guidance"] == (
+        settings.DEFAULT_DRAFT_GUIDANCE
+    )
+
+
+def test_draft_voice_is_editable_and_bounded(tmp_path):
+    connection.connect(tmp_path, A)
+    settings.save_settings(
+        tmp_path, _form(draft_guidance="Warm, direct, and conversational.")
+    )
+    config = json.loads(
+        (tmp_path / "active" / "account.json").read_text(encoding="utf-8")
+    )
+    assert config["ai_drafting"]["default_guidance"] == (
+        "Warm, direct, and conversational."
+    )
+
+    with pytest.raises(settings.SettingsError, match="under 1200"):
+        settings.build_settings_document(
+            connection.current(tmp_path),
+            _form(draft_guidance="x" * 1201),
+        )
 
 
 def test_unconfirmed_drafts_change_nothing(tmp_path):

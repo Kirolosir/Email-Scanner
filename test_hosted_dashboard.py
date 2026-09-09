@@ -1,6 +1,7 @@
+import ast
+import datetime as dt
 import io
 import json
-import ast
 from urllib.parse import urlencode
 
 import connection
@@ -11,17 +12,17 @@ from hosted_status import HostedConfig
 BEARER = "b" * 48
 
 
-def _app(tmp_path, control=None, run_requester=None):
+def _app(tmp_path, control=None, run_requester=None, clock=None):
     config = HostedConfig(
         tmp_path, BEARER, require_forwarded_https=False,
         require_mountpoint=False, verify_root=False,
     )
     return HostedDashboardApp(
-        config, control=control, run_requester=run_requester
+        config, control=control, run_requester=run_requester, clock=clock
     )
 
 
-def _call(app, path="/", method="GET", form="", cookie=""):
+def _call(app, path="/", method="GET", form="", cookie="", query=""):
     body = form.encode("utf-8")
     environ = {
         "REQUEST_METHOD": method,
@@ -29,6 +30,7 @@ def _call(app, path="/", method="GET", form="", cookie=""):
         "CONTENT_LENGTH": str(len(body)),
         "wsgi.input": io.BytesIO(body),
         "HTTP_COOKIE": cookie,
+        "QUERY_STRING": query,
     }
     captured = {}
 
@@ -77,6 +79,14 @@ def test_wrong_access_key_is_refused(tmp_path):
     )
     assert response["status"].startswith("401")
     assert "Set-Cookie" not in response["headers"]
+
+
+def test_google_is_the_primary_login_and_key_is_only_a_fallback(tmp_path):
+    page = _call(_app(tmp_path, control=object()), "/login")
+    assert page["status"].startswith("200")
+    assert "Continue with Google" in page["body"]
+    assert 'action="/connect"' in page["body"]
+    assert "Use private access key instead" in page["body"]
 
 
 def test_login_cookie_opens_the_dashboard(tmp_path):
@@ -230,6 +240,14 @@ def test_connect_is_csrf_protected_and_redirects_to_google(tmp_path):
     assert response["headers"]["Location"].startswith("https://accounts.")
     assert control.calls == 1
 
+    anonymous = _call(
+        app, "/connect", "POST",
+        urlencode({"csrf": app._csrf_value()}),
+    )
+    assert anonymous["status"].startswith("303")
+    assert anonymous["headers"]["Location"].startswith("https://accounts.")
+    assert control.calls == 2
+
 
 def test_dashboard_has_google_link_and_immediate_run_controls(tmp_path):
     app = _app(tmp_path, control=object())
@@ -250,6 +268,7 @@ def test_run_now_is_csrf_protected_and_queues_one_request(tmp_path):
 
     def request_run(root, *, now):
         calls.append((root, now))
+        return 1788969600
 
     app = _app(tmp_path, run_requester=request_run)
     cookie = _login(app)
@@ -262,8 +281,96 @@ def test_run_now_is_csrf_protected_and_queues_one_request(tmp_path):
         urlencode({"csrf": app._csrf_value()}), cookie,
     )
     assert response["status"].startswith("303")
-    assert response["headers"]["Location"] == "/?run=requested"
+    assert response["headers"]["Location"] == (
+        "/?run=requested&after=1788969600"
+    )
     assert len(calls) == 1 and calls[0][0] == tmp_path
+
+
+def test_run_page_auto_refreshes_while_working_then_reports_completion(tmp_path):
+    now = dt.datetime(2026, 9, 9, 16, 0, tzinfo=dt.timezone.utc)
+    seat = connection.connect(tmp_path, "owner@example.test", now=now)
+    app = _app(tmp_path, clock=lambda: now)
+    cookie = _login(app)
+    epoch = int(now.timestamp())
+    status_path = seat.directory / "daily-status.json"
+    status_path.write_text(json.dumps({
+        "version": 1,
+        "last_run": {
+            "outcome": "running", "started_at": now.isoformat(),
+            "finished_at": None, "safe_error_codes": [], "counts": {},
+        },
+    }), encoding="utf-8")
+
+    working = _call(
+        app, cookie=cookie, query=f"run=checking&after={epoch}"
+    )
+    assert working["headers"]["Refresh"].startswith("4;")
+    assert "Run in progress" in working["body"]
+
+    document = json.loads(status_path.read_text(encoding="utf-8"))
+    document["last_run"]["outcome"] = "success"
+    document["last_run"]["finished_at"] = now.isoformat()
+    status_path.write_text(json.dumps(document), encoding="utf-8")
+    complete = _call(
+        app, cookie=cookie, query=f"run=checking&after={epoch}"
+    )
+    assert "Refresh" not in complete["headers"]
+    assert "Run complete" in complete["body"]
+
+
+def test_run_page_ignores_impossible_request_timestamp(tmp_path):
+    now = dt.datetime(2026, 9, 9, 16, 0, tzinfo=dt.timezone.utc)
+    connection.connect(tmp_path, "owner@example.test", now=now)
+    app = _app(tmp_path, clock=lambda: now)
+    response = _call(
+        app, cookie=_login(app), query="run=checking&after=999999999999999999"
+    )
+    assert response["status"].startswith("200")
+    assert "Refresh" not in response["headers"]
+
+
+def test_dashboard_explains_when_google_must_be_reconnected(tmp_path):
+    now = dt.datetime(2026, 9, 9, 16, 0, tzinfo=dt.timezone.utc)
+    seat = connection.connect(
+        tmp_path, "owner@example.test", now=now - dt.timedelta(hours=1)
+    )
+    (seat.directory / "daily-status.json").write_text(json.dumps({
+        "version": 1,
+        "last_run": {
+            "outcome": "failed",
+            "started_at": now.isoformat(),
+            "finished_at": now.isoformat(),
+            "safe_error_codes": ["gmail_reauthorization_required"],
+            "counts": {"failures": 1},
+        },
+    }), encoding="utf-8")
+    app = _app(tmp_path, control=object(), clock=lambda: now)
+    response = _call(app, cookie=_login(app))
+    assert "Google needs to be reconnected" in response["body"]
+    assert "Link Google account" in response["body"]
+
+
+def test_successful_reconnection_clears_an_old_google_error(tmp_path):
+    now = dt.datetime(2026, 9, 9, 16, 0, tzinfo=dt.timezone.utc)
+    seat = connection.connect(
+        tmp_path, "owner@example.test", now=now - dt.timedelta(hours=2)
+    )
+    failed_at = now - dt.timedelta(hours=1)
+    (seat.directory / "daily-status.json").write_text(json.dumps({
+        "version": 1,
+        "last_run": {
+            "outcome": "failed",
+            "started_at": failed_at.isoformat(),
+            "finished_at": failed_at.isoformat(),
+            "safe_error_codes": ["gmail_reauthorization_required"],
+            "counts": {"failures": 1},
+        },
+    }), encoding="utf-8")
+    connection.connect(tmp_path, "owner@example.test", now=now)
+    app = _app(tmp_path, control=object(), clock=lambda: now)
+    response = _call(app, cookie=_login(app))
+    assert "Google needs to be reconnected" not in response["body"]
 
 
 def test_oauth_callback_uses_state_without_dashboard_cookie(tmp_path):
@@ -292,6 +399,8 @@ def test_oauth_callback_uses_state_without_dashboard_cookie(tmp_path):
     assert b"".join(app(environ, start_response)) == b""
     assert captured["status"].startswith("303")
     assert captured["headers"]["Location"] == "/?connected=1"
+    assert "HttpOnly" in captured["headers"]["Set-Cookie"]
+    assert "SameSite=Strict" in captured["headers"]["Set-Cookie"]
     assert queries == ["state=safe-state&code=one-time-code"]
 
 

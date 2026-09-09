@@ -34,9 +34,10 @@ def test_request_requires_a_connected_account_and_complete_setup(tmp_path):
 
 def test_request_is_private_account_bound_and_consumed_once(tmp_path):
     occupant = _ready_connection(tmp_path)
-    requests.request_run(tmp_path, now=NOW)
+    requested_epoch = requests.request_run(tmp_path, now=NOW)
     path = requests.request_path(occupant.directory)
 
+    assert requested_epoch == int(NOW.timestamp())
     document = json.loads(path.read_text(encoding="utf-8"))
     assert set(document) == {"version", "account_hash", "requested_at"}
     assert "@" not in path.read_text(encoding="utf-8")

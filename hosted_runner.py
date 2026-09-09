@@ -18,6 +18,8 @@ import os
 import sys
 from pathlib import Path
 
+from google.auth.exceptions import RefreshError
+from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
@@ -97,6 +99,11 @@ def hosted_credentials(token_document, client_path):
         client_secret=client_secret,
         scopes=SCOPES,
     )
+
+
+def _refresh_credentials(credentials):
+    """Validate the refresh grant before any Gmail operation begins."""
+    credentials.refresh(Request())
 
 
 def _last_completed_date(state_path):
@@ -215,7 +222,8 @@ def _review_path(directory, now):
     return directory / f"daily-{stamp}.json"
 
 
-def run_if_due(env=None, *, now=None, service_builder=build):
+def run_if_due(env=None, *, now=None, service_builder=build,
+               credential_refresher=None):
     env = env if env is not None else os.environ
     now = now or dt.datetime.now(dt.timezone.utc)
     root = Path(_required_env(env, "HOSTED_STATE_ROOT"))
@@ -279,6 +287,13 @@ def run_if_due(env=None, *, now=None, service_builder=build):
             credentials = hosted_credentials(token_document, client_path)
         finally:
             token_document = None
+        try:
+            (credential_refresher or _refresh_credentials)(credentials)
+        except RefreshError:
+            credentials = None
+            _record_blocked(status_path, "gmail_reauthorization_required")
+            print("Google authorization needs to be renewed; no Gmail contact occurred.")
+            return 2
         gmail_service = service_builder("gmail", "v1", credentials=credentials)
 
         if prepared_labels is not None:

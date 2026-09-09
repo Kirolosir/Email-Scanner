@@ -222,6 +222,11 @@ def test_reply_prompt_uses_editable_guidance_without_a_template():
     assert "Alex\nDirector" in prompt
     assert "no more than 90 words" in prompt
     assert "Do not promise" in prompt
+    assert "not a support bot or a form" in prompt
+    assert "Address the sender's main point directly" in prompt
+    assert "one specific, non-sensitive detail" in prompt
+    assert "Include a concrete next step" in prompt
+    assert "Thank you for reaching out" in prompt
 
 
 def test_generate_reply_uses_shared_rate_limited_text_path(monkeypatch):

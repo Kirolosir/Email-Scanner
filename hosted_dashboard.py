@@ -3,8 +3,8 @@
 The machine-readable hosted_status endpoint remains small and address-free.
 This separate surface is for the account owner: it shows the connected
 address, schedule, safe run counts, and reviewed label names after an explicit
-operator-bearer login. It reads no token and imports nothing from the Gmail,
-Gemini, or KMS stacks.
+Google OAuth sign-in or operator-key fallback. It reads no token and imports
+nothing from the Gmail, Gemini, or KMS stacks.
 """
 from __future__ import annotations
 
@@ -25,6 +25,8 @@ from hosted_status import HostedConfig, status_document
 
 SESSION_COOKIE = "email_scanner_session"
 MAX_FORM_BYTES = 8192
+RUN_REFRESH_SECONDS = 4
+MAX_RUN_FEEDBACK_AGE = dt.timedelta(minutes=10)
 COUNT_KEYS = (
     "scanned", "classified", "labeled", "drafted", "needs_review",
     "skipped", "failures", "deferred_draft_limit",
@@ -69,6 +71,107 @@ def _safe_counts(active):
         if isinstance((value := raw.get(key)), int)
         and not isinstance(value, bool) and value >= 0
     }
+
+
+def _safe_run_details(active):
+    document = _read_json(Path(active) / "daily-status.json") or {}
+    run = document.get("last_run")
+    run = run if isinstance(run, dict) else {}
+    raw_codes = run.get("safe_error_codes")
+    raw_codes = raw_codes if isinstance(raw_codes, list) else []
+    return {
+        "outcome": str(run.get("outcome") or ""),
+        "started_at": str(run.get("started_at") or ""),
+        "finished_at": str(run.get("finished_at") or ""),
+        "codes": {
+            value for value in raw_codes
+            if isinstance(value, str) and len(value) <= 80
+        },
+    }
+
+
+def _timestamp(value):
+    try:
+        parsed = dt.datetime.fromisoformat(str(value or ""))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def _run_feedback(occupant, now, run_state="", requested_epoch=None):
+    """Return human feedback and whether the page should refresh again."""
+    if run_state == "not-ready":
+        return (
+            '<p class="notice bad">The run could not start. Continue with '
+            'Google and save your labels and schedule first.</p>', False,
+        )
+    if run_state == "failed":
+        return (
+            '<p class="notice bad">The run could not be requested. Nothing '
+            'was changed; try again shortly.</p>', False,
+        )
+    if occupant is None:
+        return "", False
+
+    details = _safe_run_details(occupant.directory)
+    started = _timestamp(details["started_at"])
+    finished = _timestamp(details["finished_at"])
+    authorized = _timestamp(occupant.last_authorized_at)
+    auth_error_is_current = (
+        "gmail_reauthorization_required" in details["codes"]
+        and not (authorized and finished and authorized > finished)
+    )
+    if auth_error_is_current:
+        return (
+            '<p class="notice bad"><strong>Google needs to be reconnected.</strong> '
+            'Use Link Google account, then press Run now again.</p>', False,
+        )
+
+    if run_state not in {"requested", "checking"} or requested_epoch is None:
+        return "", False
+    requested = dt.datetime.fromtimestamp(
+        requested_epoch, tz=dt.timezone.utc
+    )
+    current = now.astimezone(dt.timezone.utc)
+    age = max(dt.timedelta(), current - requested)
+    is_current_run = bool(started and started >= requested - dt.timedelta(seconds=2))
+    can_refresh = age <= MAX_RUN_FEEDBACK_AGE
+
+    if is_current_run and details["outcome"] == "running":
+        return (
+            '<p class="notice progress"><strong>Run in progress.</strong> '
+            'This page will update automatically; larger inboxes can take a '
+            'few minutes.</p>', can_refresh,
+        )
+    if is_current_run and details["outcome"] == "success":
+        return (
+            '<p class="notice good"><strong>Run complete.</strong> The latest '
+            'counts are shown below.</p>', False,
+        )
+    if is_current_run and details["outcome"] == "failed":
+        return (
+            '<p class="notice bad"><strong>The run stopped safely.</strong> '
+            'No email was sent. Reconnect Google or review your settings, then '
+            'try again.</p>', False,
+        )
+
+    queued = hosted_run_request.request_path(occupant.directory).is_file()
+    if queued or (age <= dt.timedelta(seconds=30) and can_refresh):
+        return (
+            '<p class="notice progress"><strong>Starting your run…</strong> '
+            'You can leave this page; it will update automatically.</p>', True,
+        )
+    if can_refresh:
+        return (
+            '<p class="notice progress"><strong>Still waiting for the run.</strong> '
+            'The page will keep checking automatically.</p>', True,
+        )
+    return (
+        '<p class="notice bad"><strong>The run is taking longer than expected.'
+        '</strong> Reconnect Google, then try Run now again.</p>', False,
+    )
 
 
 def _safe_labels(active):
@@ -118,6 +221,15 @@ class HostedDashboardApp:
     def _session_ok(self, environ):
         presented = _cookie_map(environ).get(SESSION_COOKIE, "")
         return hmac.compare_digest(self._session_value(), presented)
+
+    def _session_cookie(self, clear=False):
+        secure = "; Secure" if self.config.require_forwarded_https else ""
+        value = "" if clear else self._session_value()
+        maximum = "; Max-Age=0" if clear else ""
+        return (
+            f"{SESSION_COOKIE}={value}; Path=/; HttpOnly; SameSite=Strict"
+            f"{secure}{maximum}"
+        )
 
     def _csrf_value(self):
         return hmac.new(
@@ -197,16 +309,26 @@ class HostedDashboardApp:
         # this route must be handled before the ordinary session gate.
         if path == "/oauth/callback" and method == "GET":
             if self.control is None:
-                return self._redirect(start_response, "/?connect=failed")
+                return self._redirect(start_response, "/login?connect=failed")
             try:
                 self.control.complete_connect(environ.get("QUERY_STRING", ""))
             except Exception:  # noqa: BLE001 - OAuth detail must not reach HTML
-                return self._redirect(start_response, "/?connect=failed")
-            return self._redirect(start_response, "/?connected=1")
+                return self._redirect(start_response, "/login?connect=failed")
+            return self._redirect(
+                start_response, "/?connected=1",
+                [("Set-Cookie", self._session_cookie())],
+            )
 
         if path == "/login" and method in {"GET", "HEAD"}:
+            query = parse_qs(
+                str(environ.get("QUERY_STRING", "")), keep_blank_values=True
+            )
             return self._respond(
-                start_response, "200 OK", self._login_page(), head=head
+                start_response, "200 OK",
+                self._login_page(
+                    connect_failed=query.get("connect") == ["failed"]
+                ),
+                head=head,
             )
         if path == "/login" and method == "POST":
             form = self._form(environ)
@@ -218,18 +340,14 @@ class HostedDashboardApp:
                 return self._respond(
                     start_response, "401 Unauthorized", self._login_page(True)
                 )
-            secure = "; Secure" if self.config.require_forwarded_https else ""
-            cookie = (
-                f"{SESSION_COOKIE}={self._session_value()}; Path=/; "
-                f"HttpOnly; SameSite=Strict{secure}"
-            )
             return self._redirect(
-                start_response, "/", [("Set-Cookie", cookie)]
+                start_response, "/", [("Set-Cookie", self._session_cookie())]
             )
 
-        if not self._session_ok(environ):
-            return self._redirect(start_response, "/login")
-
+        # Google OAuth is the normal sign-in path, so it must be startable from
+        # the login page before a dashboard session exists. The hidden token is
+        # still required, and the OAuth callback's one-time state is the second
+        # request-binding layer.
         if path == "/connect" and method == "POST":
             form = self._form(environ)
             if form is None or not self._csrf_ok(form):
@@ -238,12 +356,15 @@ class HostedDashboardApp:
                     self._page("Request refused", "<h1>Request refused.</h1>"),
                 )
             if self.control is None:
-                return self._redirect(start_response, "/?connect=failed")
+                return self._redirect(start_response, "/login?connect=failed")
             try:
                 location = self.control.begin_connect()
             except Exception:  # noqa: BLE001 - config/secret detail stays private
-                return self._redirect(start_response, "/?connect=failed")
+                return self._redirect(start_response, "/login?connect=failed")
             return self._redirect(start_response, location)
+
+        if not self._session_ok(environ):
+            return self._redirect(start_response, "/login")
 
         if path == "/run-now" and method == "POST":
             form = self._form(environ)
@@ -253,7 +374,7 @@ class HostedDashboardApp:
                     self._page("Request refused", "<h1>Request refused.</h1>"),
                 )
             try:
-                self.run_requester(
+                requested_epoch = self.run_requester(
                     self.config.state_root, now=self.clock()
                 )
             except hosted_run_request.RunRequestError:
@@ -261,7 +382,12 @@ class HostedDashboardApp:
             except (connection.ConnectionError,
                     connection.ConnectionConfigError, OSError):
                 return self._redirect(start_response, "/?run=failed")
-            return self._redirect(start_response, "/?run=requested")
+            if not isinstance(requested_epoch, int):
+                requested_epoch = int(self.clock().timestamp())
+            return self._redirect(
+                start_response,
+                f"/?run=requested&after={requested_epoch}",
+            )
 
         if path == "/logout" and method == "POST":
             form = self._form(environ)
@@ -270,18 +396,40 @@ class HostedDashboardApp:
                     start_response, "403 Forbidden",
                     self._page("Request refused", "<h1>Request refused.</h1>"),
                 )
-            cookie = (
-                f"{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; "
-                "Max-Age=0"
-            )
             return self._redirect(
-                start_response, "/login", [("Set-Cookie", cookie)]
+                start_response, "/login",
+                [("Set-Cookie", self._session_cookie(clear=True))],
             )
 
         if path == "/" and method in {"GET", "HEAD"}:
             query = parse_qs(
                 str(environ.get("QUERY_STRING", "")), keep_blank_values=True
             )
+            run_state = (query.get("run") or [""])[-1]
+            route_now = self.clock()
+            try:
+                requested_epoch = int((query.get("after") or [""])[-1])
+            except (TypeError, ValueError):
+                requested_epoch = None
+            latest_reasonable_epoch = int(route_now.timestamp()) + 300
+            if (
+                requested_epoch is not None
+                and not 0 <= requested_epoch <= latest_reasonable_epoch
+            ):
+                requested_epoch = None
+            try:
+                feedback_occupant = connection.current(self.config.state_root)
+            except connection.ConnectionConfigError:
+                feedback_occupant = None
+            run_notice, refresh = _run_feedback(
+                feedback_occupant, route_now, run_state, requested_epoch
+            )
+            headers = []
+            if refresh and requested_epoch is not None:
+                headers.append((
+                    "Refresh",
+                    f"{RUN_REFRESH_SECONDS}; url=/?run=checking&after={requested_epoch}",
+                ))
             return self._respond(
                 start_response, "200 OK",
                 self._dashboard(
@@ -289,8 +437,9 @@ class HostedDashboardApp:
                     connected=query.get("connected") == ["1"],
                     disconnected=query.get("disconnected") == ["1"],
                     connect_failed=query.get("connect") == ["failed"],
-                    run_state=(query.get("run") or [""])[-1],
+                    run_notice=run_notice,
                 ),
+                headers=headers,
                 head=head,
             )
         if path == "/settings" and method in {"GET", "HEAD"}:
@@ -393,33 +542,47 @@ class HostedDashboardApp:
             head=head,
         )
 
-    def _login_page(self, failed=False):
-        error = (
+    def _login_page(self, failed=False, connect_failed=False):
+        key_error = (
             '<p class="notice bad">That access key was not accepted.</p>'
             if failed else ""
         )
+        connect_error = (
+            '<p class="notice bad">Google sign-in did not finish. Try again.'
+            '</p>' if connect_failed else ""
+        )
+        google_form = f"""
+              <form method="post" action="/connect">
+                <input type="hidden" name="csrf" value="{self._csrf_value()}">
+                <button class="google-button" type="submit"><span aria-hidden="true">G</span>
+                  Continue with Google</button>
+              </form>""" if self.control is not None else ""
         return self._page("Sign in", f"""
           <main class="login-shell">
             <section class="login-card">
               <div class="mark">ES</div>
               <p class="eyebrow">Email Scanner</p>
-              <h1>Open your inbox control room</h1>
-              <p class="lede">See what the daily assistant organized and
-              which reply drafts are waiting in Gmail.</p>
-              {error}
-              <form method="post" action="/login">
-                <label for="access_key">Private access key</label>
-                <input id="access_key" name="access_key" type="password"
-                       required autocomplete="current-password">
-                <button type="submit">Open dashboard</button>
-              </form>
+              <h1>Continue with Google</h1>
+              <p class="lede">Link or reconnect Gmail, then open your inbox
+              dashboard in one step.</p>
+              {connect_error}
+              {google_form}
+              <details class="key-fallback"><summary>Use private access key instead</summary>
+                {key_error}
+                <form method="post" action="/login">
+                  <label for="access_key">Private access key</label>
+                  <input id="access_key" name="access_key" type="password"
+                         required autocomplete="current-password">
+                  <button type="submit">Open dashboard</button>
+                </form>
+              </details>
               <p class="student-credit">Built independently by a college Junior.</p>
             </section>
           </main>
         """)
 
     def _dashboard(self, saved=False, connected=False, disconnected=False,
-                   connect_failed=False, run_state=""):
+                   connect_failed=False, run_notice=""):
         just_connected = connected
         now = self.clock()
         public = status_document(self.config.state_root, now)
@@ -481,22 +644,6 @@ class HostedDashboardApp:
             connection_notice = (
                 '<p class="notice bad">Google sign-in did not finish. Nothing '
                 'new was connected; you can try again.</p>'
-            )
-        run_notice = ""
-        if run_state == "requested":
-            run_notice = (
-                '<p class="notice good">Run requested. It will start within a '
-                'few seconds; refresh shortly to see the result.</p>'
-            )
-        elif run_state == "not-ready":
-            run_notice = (
-                '<p class="notice bad">The run could not start. Link Google and '
-                'save your labels and schedule first.</p>'
-            )
-        elif run_state == "failed":
-            run_notice = (
-                '<p class="notice bad">The run could not be requested. Nothing '
-                'was changed; try again shortly.</p>'
             )
         settings_link = (
             '<a class="secondary" href="/settings">Edit labels &amp; schedule</a>'
@@ -612,6 +759,10 @@ class HostedDashboardApp:
             "run_at": occupant.run_at,
             "display_name": str(ai.get("display_name", "")),
             "signature": str(ai.get("signature", "")),
+            "draft_guidance": str(
+                ai.get("default_guidance")
+                or hosted_settings.DEFAULT_DRAFT_GUIDANCE
+            ),
             "max_scan": str(occupant.max_scan),
             "limit": str(occupant.limit),
             "max_drafts": str(occupant.max_drafts),
@@ -622,7 +773,7 @@ class HostedDashboardApp:
         fields = {
             key: html.escape(str(values.get(key, ""))) for key in (
                 "labels", "timezone", "run_at", "display_name", "signature",
-                "max_scan", "limit", "max_drafts",
+                "draft_guidance", "max_scan", "limit", "max_drafts",
             )
         }
         error_notice = (
@@ -689,7 +840,12 @@ class HostedDashboardApp:
                   value="{fields['display_name']}" required>
                   <label for="signature">Draft signature</label><textarea
                   id="signature" name="signature" rows="3" maxlength="500"
-                  required>{fields['signature']}</textarea></div>
+                  required>{fields['signature']}</textarea>
+                  <label for="draft_guidance">How replies should sound</label>
+                  <textarea id="draft_guidance" name="draft_guidance" rows="5"
+                    maxlength="1200" required>{fields['draft_guidance']}</textarea>
+                  <p class="field-note">Add tone, phrasing, and follow-up preferences.
+                  The assistant will still use only facts from each email.</p></div>
               </section>
               <section class="panel confirmation">
                 <label class="check-row"><input type="checkbox"
@@ -772,8 +928,14 @@ border-radius:24px;box-shadow:var(--shadow)}}.login-card .mark{{margin-bottom:26
 .login-card h1{{font-size:2.35rem}}label{{display:block;font-weight:750;margin:24px 0 8px}}
 input:not([type=hidden]):not([type=checkbox]),textarea{{width:100%;padding:13px 14px;border:1px solid #b9cdca;border-radius:12px;
 outline:none;background:white;color:var(--ink)}}textarea{{resize:vertical}}input:focus,textarea:focus{{border-color:var(--mint);box-shadow:0 0 0 4px #dff7f0}}
-.login-card button{{width:100%;margin-top:14px}}.notice{{padding:11px 13px;border-radius:10px}}
-.notice.bad{{background:#fff0ed;color:#9b3024}}.notice.good{{background:#e2f7ee;color:#116645}}
+.login-card button{{width:100%;margin-top:14px}}.google-button{{display:flex;align-items:center;
+justify-content:center;gap:11px;background:#fff;color:#223;border:1px solid #aebfbd;
+box-shadow:0 4px 14px rgba(20,63,59,.08)}}.google-button span{{display:grid;place-items:center;
+width:24px;height:24px;border-radius:50%;background:#fff;color:#1769e0;font-weight:850}}
+.key-fallback{{margin-top:22px;border-top:1px solid var(--line);padding-top:18px}}
+.key-fallback summary{{cursor:pointer;color:var(--muted);font-weight:700;text-align:center}}
+.notice{{padding:11px 13px;border-radius:10px}}.notice.bad{{background:#fff0ed;color:#9b3024}}
+.notice.good{{background:#e2f7ee;color:#116645}}.notice.progress{{background:#eaf3f8;color:#24556f}}
 .student-credit{{margin:24px 0 0;color:var(--muted);font-size:.8rem;text-align:center}}.page-credit{{margin-top:34px}}
 .settings-shell{{max-width:980px}}.account-hero.compact h1{{font-size:clamp(2rem,4vw,3rem)}}
 .settings-form{{display:grid;gap:16px}}.form-section{{display:grid;grid-template-columns:.75fr 1.25fr;gap:38px}}

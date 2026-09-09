@@ -23,6 +23,13 @@ from taxonomy import sanitize_slug, validate_label_name
 
 MAX_CATEGORIES = 12
 PENDING_LABEL_SETUP = "label-setup-pending.json"
+MAX_DRAFT_GUIDANCE_CHARS = 1200
+DEFAULT_DRAFT_GUIDANCE = (
+    "Sound like a real person, not a customer-service template. Respond to the "
+    "sender's actual point, mention one useful detail from their message when "
+    "appropriate, and end with a clear next step if one is needed. Keep the "
+    "tone warm, direct, and natural."
+)
 DEFAULT_SYSTEM_LABELS = {
     "needs_review": "AI/Needs Review",
     "processed": "AI/Processed",
@@ -117,10 +124,19 @@ def build_settings_document(occupant, form):
         raise SettingsError("daily run time must use HH:MM")
     display_name = str(form.get("display_name", "")).strip()
     signature = str(form.get("signature", "")).strip()
+    raw_guidance = form.get("draft_guidance")
+    draft_guidance = (
+        DEFAULT_DRAFT_GUIDANCE
+        if raw_guidance is None else str(raw_guidance).strip()
+    )
     if not display_name or len(display_name) > 120:
         raise SettingsError("display name is required and must be under 120 characters")
     if not signature or len(signature) > 500:
         raise SettingsError("signature is required and must be under 500 characters")
+    if not draft_guidance or len(draft_guidance) > MAX_DRAFT_GUIDANCE_CHARS:
+        raise SettingsError(
+            "draft style is required and must be under 1200 characters"
+        )
     if form.get("confirm_unsent_drafts") != "yes":
         raise SettingsError(
             "confirm that AI responses are unsent drafts requiring review"
@@ -137,11 +153,7 @@ def build_settings_document(occupant, form):
         "ai_drafting": {
             "display_name": display_name,
             "signature": signature,
-            "default_guidance": (
-                "Create a concise, helpful draft. Never claim an action was "
-                "completed, promise a commitment, or include sensitive data. "
-                "The account owner will review and edit before sending."
-            ),
+            "default_guidance": draft_guidance,
             "max_words": 160,
         },
     }

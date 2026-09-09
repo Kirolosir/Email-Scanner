@@ -65,6 +65,7 @@ def request_run(root, *, now=None):
             "account_hash": _account_hash(occupant.account),
             "requested_at": requested_at.isoformat(timespec="seconds"),
         })
+        return int(requested_at.timestamp())
 
 
 def load_request(active, occupant, *, now=None):

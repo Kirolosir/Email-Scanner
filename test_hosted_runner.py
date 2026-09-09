@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 import pytest
+from google.auth.exceptions import RefreshError
 
 import connection
 import hosted_runner as runner
@@ -33,6 +34,7 @@ def _environment(tmp_path, monkeypatch):
     }}), encoding="utf-8")
     monkeypatch.setattr(runner, "verify_durable_state_root",
                         lambda *_a, **_k: True)
+    monkeypatch.setattr(runner, "_refresh_credentials", lambda _value: None)
     return root, client, {
         "HOSTED_STATE_ROOT": str(root),
         "HOSTED_REQUIRE_MOUNTPOINT": "false",
@@ -239,6 +241,31 @@ def test_invalid_run_request_is_removed_before_secrets_or_gmail(
     assert not path.exists()
     status = json.loads((seat.directory / runner.STATUS_FILE).read_text())
     assert status["last_run"]["safe_error_codes"] == ["run_request_invalid"]
+
+
+def test_expired_google_grant_is_reported_as_reauthorization_required(
+        tmp_path, monkeypatch):
+    root, _client, env = _environment(tmp_path, monkeypatch)
+    seat = connection.connect(root, A, timezone="UTC", run_at="18:00")
+    for name in (runner.CONFIG_FILE, runner.TAXONOMY_APPROVAL_FILE,
+                 runner.AI_APPROVAL_FILE):
+        (seat.directory / name).write_text("{}", encoding="utf-8")
+    _stub_connected_service(monkeypatch, _ProfileService())
+
+    def expired(_credentials):
+        raise RefreshError("invalid grant")
+
+    code = runner.run_if_due(
+        env, now=dt.datetime(2026, 9, 8, 18, 1, tzinfo=UTC),
+        service_builder=lambda *_a, **_k: pytest.fail("Gmail reached"),
+        credential_refresher=expired,
+    )
+
+    assert code == 2
+    status = json.loads((seat.directory / runner.STATUS_FILE).read_text())
+    assert status["last_run"]["safe_error_codes"] == [
+        "gmail_reauthorization_required"
+    ]
 
 
 def test_stale_pending_label_approval_blocks_before_token_or_gmail(

@@ -932,15 +932,18 @@ status). No response carries the connected address — the opaque connection id
 says whether a connection exists without saying whose — and the module imports
 nothing that can reach a token, so a compromise there yields status, not mail.
 
-The separate human dashboard on port 8081 requires an authenticated session
-and remains bound to loopback. It can start a PKCE-protected Google OAuth flow,
-save a complete label/schedule/draft approval bundle, and disconnect only after
-the owner types the connected address. Its OAuth callback consumes ten-minute,
-single-use state before token exchange. A returned refresh token exists only in
-memory until Cloud KMS encryption. Disconnect attempts Google revocation, then
-destroys the local encrypted credential even when revocation cannot be
-confirmed. Gunicorn access logging is disabled for this service so callback
-authorization codes never enter the system journal.
+The separate human dashboard on port 8081 remains bound to loopback. Its normal
+sign-in is a single **Continue with Google** button that starts a PKCE-protected
+OAuth flow; the private access key is kept only as a recovery fallback. A
+successful Google callback establishes the dashboard session, so an owner does
+not have to copy a separate key before linking or reconnecting Gmail. The
+dashboard can save a complete label/schedule/draft approval bundle and
+disconnect only after the owner types the connected address. Its OAuth callback
+consumes ten-minute, single-use state before token exchange. A returned refresh
+token exists only in memory until Cloud KMS encryption. Disconnect attempts
+Google revocation, then destroys the local encrypted credential even when
+revocation cannot be confirmed. Gunicorn access logging is disabled for this
+service so callback authorization codes never enter the system journal.
 
 The dashboard's **Run now** action does not import Gmail code, decrypt a token,
 or launch a privileged command. It writes one private, account-bound request
@@ -950,6 +953,14 @@ consumes the request before mailbox access, refuses altered or hour-old
 requests, and bypasses only the schedule/same-day gate. Reviewed settings,
 account identity checks, spam and automated-mail exclusions, per-message
 journaling, and all scan/write/draft limits still apply.
+
+While an immediate run is starting or working, the dashboard refreshes its own
+status briefly and reports completion or a safe failure reason. The runner
+validates the Google refresh token before mailbox work; if Google rejects it,
+the dashboard asks the owner to reconnect instead of leaving a run that merely
+appears slow. Draft guidance is editable, and the default prompt favors warm,
+specific, natural replies while preserving the no-invention and never-send
+rules.
 
 **The state volume must be a real filesystem, and must actually be mounted.**
 The lifecycle rests on `os.replace` for every state write and `fcntl.flock` for
@@ -1003,9 +1014,11 @@ Installation or recovery order:
    verify the disk with `--check-state-root --require-mountpoint` before
    enabling a service.
 4. Confirm `/healthz` answers through the tunnel, the status endpoint refuses
-   without a bearer, and the dashboard accepts the same private access key.
-5. Use **Link Google account** in the dashboard, save the reviewed labels and
-   schedule, then use **Run now** for an immediate bounded run when needed.
+   without a bearer, and **Continue with Google** opens the OAuth flow. Keep the
+   private access key available only for recovery.
+5. Complete Google consent, save the reviewed labels and schedule, then use
+   **Run now** for an immediate bounded run when needed. The dashboard follows
+   the run automatically and explains if Google must be reconnected.
    The command-line broker flow below
    remains a recovery option:
 
