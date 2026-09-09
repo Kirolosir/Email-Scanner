@@ -416,6 +416,26 @@ def test_oauth_callback_uses_state_without_dashboard_cookie(tmp_path):
     assert queries == ["state=safe-state&code=one-time-code"]
 
 
+def test_oauth_callback_explains_a_different_account_without_leaking_it(tmp_path):
+    class CallbackProblem(RuntimeError):
+        code = "account_mismatch"
+
+    class Control:
+        def complete_connect(self, _query):
+            raise CallbackProblem("private provider detail")
+
+    app = _app(tmp_path, control=Control())
+    failed = _call(
+        app, "/oauth/callback", query="state=safe-state&code=one-time-code"
+    )
+    assert failed["status"].startswith("303")
+    assert failed["headers"]["Location"] == "/login?connect=account_mismatch"
+
+    page = _call(app, "/login", query="connect=account_mismatch")
+    assert "A different Gmail account is already linked" in page["body"]
+    assert "private provider detail" not in page["body"]
+
+
 def test_disconnect_requires_csrf_and_passes_typed_address(tmp_path):
     address = "owner@example.test"
     connection.connect(tmp_path, address)

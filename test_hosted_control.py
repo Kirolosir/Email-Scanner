@@ -96,8 +96,11 @@ def test_oauth_state_is_single_use_and_expires(tmp_path, monkeypatch):
     )
     control.begin_connect()
     control.complete_connect("state=state-value&code=first")
-    with pytest.raises(control_module.HostedControlError, match="already used"):
+    with pytest.raises(
+        control_module.HostedControlError, match="already used"
+    ) as reused:
         control.complete_connect("state=state-value&code=replay")
+    assert reused.value.code == "state_expired"
 
     control.begin_connect()
     now[0] += control_module.OAUTH_TTL_SECONDS + 1
@@ -114,8 +117,11 @@ def test_different_account_cannot_replace_an_occupied_connection(
     before = (root / "connection.json").read_bytes()
     control.begin_connect()
 
-    with pytest.raises(control_module.HostedControlError, match="different"):
+    with pytest.raises(
+        control_module.HostedControlError, match="different"
+    ) as mismatch:
         control.complete_connect("state=state-value&code=one-time-code")
+    assert mismatch.value.code == "account_mismatch"
 
     assert (root / "connection.json").read_bytes() == before
 

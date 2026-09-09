@@ -35,6 +35,10 @@ GOOGLE_REVOCATION_ENDPOINT = "https://oauth2.googleapis.com/revoke"
 class HostedControlError(RuntimeError):
     """A user-safe control error that never contains token or OAuth code."""
 
+    def __init__(self, message, *, code="connect_failed"):
+        super().__init__(message)
+        self.code = code
+
 
 class HostedControlConfig:
     def __init__(self, state_root, credentials_path, kms_key, redirect_uri):
@@ -43,9 +47,15 @@ class HostedControlConfig:
         self.kms_key = str(kms_key or "").strip()
         self.redirect_uri = str(redirect_uri or "").strip()
         if not self.credentials_path.is_file():
-            raise HostedControlError("OAuth client configuration is unavailable")
+            raise HostedControlError(
+                "OAuth client configuration is unavailable",
+                code="configuration_failed",
+            )
         if not self.kms_key:
-            raise HostedControlError("Cloud KMS configuration is unavailable")
+            raise HostedControlError(
+                "Cloud KMS configuration is unavailable",
+                code="configuration_failed",
+            )
         parsed = urllib.parse.urlsplit(self.redirect_uri)
         loopback_http = (
             parsed.scheme == "http"
@@ -53,10 +63,14 @@ class HostedControlConfig:
         )
         if parsed.scheme != "https" and not loopback_http:
             raise HostedControlError(
-                "OAuth callback must use HTTPS or a loopback address"
+                "OAuth callback must use HTTPS or a loopback address",
+                code="configuration_failed",
             )
         if parsed.path != "/oauth/callback" or parsed.query or parsed.fragment:
-            raise HostedControlError("OAuth callback address is invalid")
+            raise HostedControlError(
+                "OAuth callback address is invalid",
+                code="configuration_failed",
+            )
 
     @classmethod
     def from_environment(cls, env, state_root):
@@ -118,7 +132,10 @@ class HostedControl:
             include_granted_scopes="false",
         )
         if not state or not flow.code_verifier:
-            raise HostedControlError("Google authorization could not start")
+            raise HostedControlError(
+                "Google authorization could not start",
+                code="start_failed",
+            )
         with self._state_lock:
             self._prune_states()
             self._states[state] = {
@@ -133,7 +150,8 @@ class HostedControl:
             entry = self._states.pop(str(state or ""), None)
         if entry is None:
             raise HostedControlError(
-                "Google sign-in expired or was already used; start again"
+                "Google sign-in expired or was already used; start again",
+                code="state_expired",
             )
         return entry
 
@@ -145,15 +163,22 @@ class HostedControl:
         state = (query.get("state") or [""])[-1]
         entry = self._take_state(state)
         if query.get("error"):
-            raise HostedControlError("Google sign-in was cancelled or refused")
+            raise HostedControlError(
+                "Google sign-in was cancelled or refused",
+                code="consent_cancelled",
+            )
         code = (query.get("code") or [""])[-1]
         if not code:
-            raise HostedControlError("Google sign-in returned no authorization code")
+            raise HostedControlError(
+                "Google sign-in returned no authorization code",
+                code="callback_invalid",
+            )
 
         flow = self._flow(state=state, code_verifier=entry["verifier"])
         credentials = None
         token_document = None
         service = None
+        stage = "token_exchange_failed"
         try:
             flow.fetch_token(
                 authorization_response=(
@@ -161,6 +186,7 @@ class HostedControl:
                 )
             )
             credentials = flow.credentials
+            stage = "gmail_profile_failed"
             service = self._service_builder(
                 "gmail", "v1", credentials=credentials
             )
@@ -170,8 +196,12 @@ class HostedControl:
                 )
             )
             if not actual:
-                raise HostedControlError("Gmail did not identify the account")
+                raise HostedControlError(
+                    "Gmail did not identify the account",
+                    code="gmail_profile_failed",
+                )
             token_document = json.loads(credentials.to_json())
+            stage = "credential_storage_failed"
             provider = self._provider_builder(self.config.kms_key)
             return connect_token_document(
                 self.config.state_root, actual, token_document, provider
@@ -180,11 +210,13 @@ class HostedControl:
             raise
         except connection.ConnectionOccupied as exc:
             raise HostedControlError(
-                "a different Gmail account is already connected"
+                "a different Gmail account is already connected",
+                code="account_mismatch",
             ) from exc
         except Exception as exc:
             raise HostedControlError(
-                f"Google sign-in could not be completed ({type(exc).__name__})"
+                f"Google sign-in could not be completed ({type(exc).__name__})",
+                code=stage,
             ) from exc
         finally:
             code = None

@@ -45,6 +45,43 @@ HTML_HEADERS = [
     )),
 ]
 
+CONNECT_ERROR_MESSAGES = {
+    "account_mismatch": (
+        "A different Gmail account is already linked. Choose the previously "
+        "connected account, or use the recovery option to disconnect it first."
+    ),
+    "consent_cancelled": (
+        "Google access was cancelled or declined. Try again and approve the "
+        "requested Gmail access."
+    ),
+    "state_expired": (
+        "That Google sign-in expired. Start again and finish within ten minutes."
+    ),
+    "token_exchange_failed": (
+        "Google could not finish issuing access. Start again in Chrome or Safari."
+    ),
+    "gmail_profile_failed": (
+        "Google connected, but Gmail could not confirm the account. Make sure "
+        "Gmail is available for the account you choose."
+    ),
+    "credential_storage_failed": (
+        "Google approved access, but the secure connection could not be saved. "
+        "Nothing was replaced; try again shortly."
+    ),
+    "configuration_failed": (
+        "Google linking is temporarily unavailable because the site setup is "
+        "incomplete."
+    ),
+    "start_failed": "Google sign-in could not start. Try again shortly.",
+    "callback_invalid": "Google returned an incomplete sign-in. Start again.",
+    "connect_failed": "Google sign-in did not finish. Try again.",
+}
+
+
+def _connect_error_code(error, fallback="connect_failed"):
+    code = str(getattr(error, "code", "") or "")
+    return code if code in CONNECT_ERROR_MESSAGES else fallback
+
 
 def _escape(value, fallback="—"):
     value = str(value or "").strip()
@@ -309,11 +346,16 @@ class HostedDashboardApp:
         # this route must be handled before the ordinary session gate.
         if path == "/oauth/callback" and method == "GET":
             if self.control is None:
-                return self._redirect(start_response, "/login?connect=failed")
+                return self._redirect(
+                    start_response, "/login?connect=configuration_failed"
+                )
             try:
                 self.control.complete_connect(environ.get("QUERY_STRING", ""))
-            except Exception:  # noqa: BLE001 - OAuth detail must not reach HTML
-                return self._redirect(start_response, "/login?connect=failed")
+            except Exception as exc:  # noqa: BLE001 - only safe code reaches HTML
+                code = _connect_error_code(exc)
+                return self._redirect(
+                    start_response, f"/login?connect={code}"
+                )
             return self._redirect(
                 start_response, "/?connected=1",
                 [("Set-Cookie", self._session_cookie())],
@@ -326,7 +368,7 @@ class HostedDashboardApp:
             return self._respond(
                 start_response, "200 OK",
                 self._login_page(
-                    connect_failed=query.get("connect") == ["failed"]
+                    connect_error=(query.get("connect") or [""])[-1]
                 ),
                 head=head,
             )
@@ -366,11 +408,16 @@ class HostedDashboardApp:
                     self._page("Request refused", "<h1>Request refused.</h1>"),
                 )
             if self.control is None:
-                return self._redirect(start_response, "/login?connect=failed")
+                return self._redirect(
+                    start_response, "/login?connect=configuration_failed"
+                )
             try:
                 location = self.control.begin_connect()
-            except Exception:  # noqa: BLE001 - config/secret detail stays private
-                return self._redirect(start_response, "/login?connect=failed")
+            except Exception as exc:  # noqa: BLE001 - only safe code reaches HTML
+                code = _connect_error_code(exc, "start_failed")
+                return self._redirect(
+                    start_response, f"/login?connect={code}"
+                )
             return self._redirect(start_response, location)
 
         if not self._session_ok(environ):
@@ -552,14 +599,18 @@ class HostedDashboardApp:
             head=head,
         )
 
-    def _login_page(self, failed=False, connect_failed=False):
+    def _login_page(self, failed=False, connect_error=""):
         key_error = (
             '<p class="notice bad">That access key was not accepted.</p>'
             if failed else ""
         )
-        connect_error = (
-            '<p class="notice bad">Google sign-in did not finish. Try again.'
-            '</p>' if connect_failed else ""
+        connect_notice = (
+            '<p class="notice bad">'
+            + html.escape(CONNECT_ERROR_MESSAGES.get(
+                connect_error, CONNECT_ERROR_MESSAGES["connect_failed"]
+            ))
+            + '</p>'
+            if connect_error else ""
         )
         google_link = f"""
               <a class="google-button" target="_top"
@@ -574,7 +625,7 @@ class HostedDashboardApp:
               <h1>Continue with Google</h1>
               <p class="lede">Link or reconnect Gmail, then open your inbox
               dashboard in one step.</p>
-              {connect_error}
+              {connect_notice}
               {google_link}
               <details class="key-fallback"><summary>Use private access key instead</summary>
                 {key_error}
