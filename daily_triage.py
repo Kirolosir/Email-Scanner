@@ -332,6 +332,15 @@ def already_processed_for_draft_policy(
     )
 
 
+def candidate_read_limit(write_limit, max_drafts, account_wide_drafting=False):
+    """Avoid generating more account-wide drafts than this run can save."""
+    if account_wide_drafting and max_drafts is not None and max_drafts > 0:
+        if write_limit is None:
+            return max_drafts
+        return min(write_limit, max_drafts)
+    return write_limit
+
+
 def plan_write_cost(plan):
     """Gmail write operations one plan performs: label adds plus a draft.
 
@@ -616,6 +625,13 @@ def parse_args(argv=None):
     )
     parser.add_argument("--lookback-months", type=int, default=2)
     parser.add_argument("--overlap-days", type=int, default=3)
+    parser.add_argument(
+        "--draft-catch-up", action="store_true",
+        help=(
+            "use the bounded initial lookback while retaining daily-mode "
+            "scheduling and idempotency"
+        ),
+    )
     parser.add_argument("--max-scan", type=int)
     parser.add_argument("--limit", type=int)
     parser.add_argument(
@@ -773,7 +789,7 @@ def _run_locked(args, classifier, config, templates, state, status,
 
     query = (
         build_initial_query(args.lookback_months)
-        if args.mode == "initial"
+        if args.mode == "initial" or args.draft_catch_up
         else build_daily_query(args.overlap_days)
     )
     # Hosted runs decrypt their credential in memory and inject an already
@@ -882,12 +898,16 @@ def _run_locked(args, classifier, config, templates, state, status,
         # so an unprocessed message is exactly one that spends budget.
         return not _already_processed(message)
 
-    # limit bounds the Gmail read itself. Passing it here is the whole point:
+    candidate_limit = candidate_read_limit(
+        args.limit, args.max_drafts, account_wide_drafting
+    )
+    # The candidate limit bounds the Gmail read itself. Passing it here is the
+    # whole point:
     # the post-fetch loop below would otherwise stop at the limit only after
     # every message in the window had already been downloaded in full.
     messages, failures = fetch_messages(
         service, message_ids, throttle,
-        limit=args.limit, is_candidate=_would_consume_budget,
+        limit=candidate_limit, is_candidate=_would_consume_budget,
     )
     for message_id, failure in failures:
         display_id = opaque_id(message_id) if args.scheduled else message_id
@@ -895,7 +915,7 @@ def _run_locked(args, classifier, config, templates, state, status,
     counts["failures"] += len(failures)
     attach_label_names(messages, account_labels)
     candidates, skipped = select_candidates(
-        messages, args.limit, _already_processed
+        messages, candidate_limit, _already_processed
     )
     counts["skipped"] += skipped
 

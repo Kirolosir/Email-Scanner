@@ -308,12 +308,12 @@ def run_if_due(env=None, *, now=None, service_builder=build,
                 return 0
 
         review_path = _review_path(active / REVIEW_DIR, now)
-        # A manual run doubles as a bounded historical catch-up. Scheduled
-        # runs stay on the short overlap, while Run now can revisit recently
-        # processed messages that an older draft policy finished without a
-        # draft.
+        # Hosted runs include a bounded historical catch-up while retaining
+        # daily mode's same-day completion journal. Run now adds --force, so
+        # another owner-requested batch can begin without weakening any other
+        # limit.
         argv = [
-            "initial" if force_requested else "daily",
+            "daily",
             "--account-config", str(active / CONFIG_FILE),
             "--taxonomy-confirmation", str(active / TAXONOMY_APPROVAL_FILE),
             "--ai-drafting-approval", str(active / AI_APPROVAL_FILE),
@@ -325,7 +325,7 @@ def run_if_due(env=None, *, now=None, service_builder=build,
             "--max-scan", str(occupant.max_scan),
             "--limit", str(occupant.limit),
             "--max-drafts", str(occupant.max_drafts),
-            "--scheduled", "--apply", "--yes",
+            "--scheduled", "--apply", "--yes", "--draft-catch-up",
         ]
         if force_requested:
             argv.append("--force")

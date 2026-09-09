@@ -15,6 +15,7 @@ from daily_triage import (
     already_processed_for_draft_policy,
     build_daily_query,
     build_initial_query,
+    candidate_read_limit,
     execute_daily_plan,
     list_existing_draft_threads,
     reconcile_existing_drafts,
@@ -864,6 +865,14 @@ def test_recorded_draft_is_complete_across_draft_policy_upgrade(tmp_path):
         {"id": "drafted", "_label_names": ["Processed"]},
         "Processed", state, account_wide_drafting=True,
     ) is True
+
+
+def test_account_wide_candidate_read_stops_at_draft_cap():
+    assert candidate_read_limit(25, 5, account_wide_drafting=True) == 5
+    assert candidate_read_limit(3, 5, account_wide_drafting=True) == 3
+    assert candidate_read_limit(None, 5, account_wide_drafting=True) == 5
+    assert candidate_read_limit(25, 0, account_wide_drafting=True) == 25
+    assert candidate_read_limit(25, 5, account_wide_drafting=False) == 25
 
 
 def test_the_run_applies_the_budget_before_previewing():
