@@ -131,6 +131,35 @@ def test_http_requests_are_rejected():
     assert "HTTPS" in response["body"].decode()
 
 
+@pytest.mark.parametrize("path,title", [
+    ("/", "Serpone Emails"),
+    ("/privacy", "Privacy policy"),
+    ("/terms", "Terms of service"),
+])
+def test_public_information_pages_are_available_over_https(path, title):
+    broker, _private, _calls = _broker()
+    response = _request(broker, path)
+
+    assert response["status"] == "200 OK"
+    assert response["headers"]["Content-Type"] == "text/html; charset=utf-8"
+    assert response["headers"]["X-Frame-Options"] == "DENY"
+    assert "default-src 'none'" in response["headers"]["Content-Security-Policy"]
+    assert title in response["body"].decode("utf-8")
+    assert CLIENT_SECRET.encode() not in response["body"]
+    assert BEARER.encode() not in response["body"]
+
+
+def test_public_pages_explain_mailbox_controls():
+    broker, _private, _calls = _broker()
+    home = _request(broker, "/")["body"].decode("utf-8")
+    privacy = _request(broker, "/privacy")["body"].decode("utf-8")
+
+    assert "never sends email automatically" in home
+    assert "Only one Google account" in privacy
+    assert "disconnect" in privacy
+    assert "Google Gemini" in privacy
+
+
 # --------------------------------------------------------------------
 # CSRF state
 # --------------------------------------------------------------------

@@ -59,6 +59,7 @@ Known limits
   the deployment's job.
 """
 import hmac
+import html
 import json
 import logging
 import os
@@ -347,6 +348,77 @@ class OAuthBroker:
             return self._respond(start_response, "400 Bad Request",
                                  "This endpoint requires HTTPS.")
 
+        if path == "/":
+            return self._public_page(
+                start_response,
+                "Serpone Emails",
+                """
+                <p class="lede">A student-built inbox assistant for one
+                connected Google account.</p>
+                <p>Serpone Emails organizes Gmail with labels and creates
+                reply drafts for review. It never sends email automatically.</p>
+                <p><a href="/privacy">Privacy policy</a>
+                <span aria-hidden="true">&middot;</span>
+                <a href="/terms">Terms of service</a></p>
+                """,
+            )
+        if path == "/privacy":
+            return self._public_page(
+                start_response,
+                "Privacy policy",
+                """
+                <p class="updated">Last updated September 9, 2026</p>
+                <h2>What the app accesses</h2>
+                <p>After you give permission, Serpone Emails accesses the
+                Gmail messages needed to apply labels and create reply
+                drafts. It also uses the Google account email address to
+                identify the one connected account.</p>
+                <h2>How information is used</h2>
+                <p>Message content is processed only to classify email and
+                generate a proposed reply. Content needed for those tasks is
+                sent to the configured Google Gemini service, and the
+                resulting labels and drafts are written back to Gmail. The
+                app does not send email automatically, sell personal data, or
+                use Gmail data for advertising.</p>
+                <h2>Storage and security</h2>
+                <p>The Gmail refresh credential is encrypted at rest on the
+                operator-managed server. Message bodies are processed
+                transiently rather than intentionally stored by the website.
+                The app may retain settings, opaque message identifiers, run
+                counts, and limited error metadata needed to prevent duplicate
+                work and operate the service.</p>
+                <h2>Control and deletion</h2>
+                <p>Only one Google account can be connected at a time. The
+                account owner can disconnect it from the dashboard, which
+                revokes and removes the app's stored Gmail credential and
+                stops future runs. Labels and drafts already created in Gmail
+                remain under the account owner's control.</p>
+                <h2>Google API data</h2>
+                <p>The app's use and transfer of information received from
+                Google APIs follows the Google API Services User Data Policy,
+                including its Limited Use requirements.</p>
+                <h2>Contact</h2>
+                <p>For privacy questions, use the developer support address
+                shown on the Google consent screen.</p>
+                """,
+            )
+        if path == "/terms":
+            return self._public_page(
+                start_response,
+                "Terms of service",
+                """
+                <p class="updated">Last updated September 9, 2026</p>
+                <p>Serpone Emails is a student-built inbox assistant. Use it
+                only with a Google account you own or are authorized to
+                manage.</p>
+                <p>The app applies labels and creates draft replies; it does
+                not send messages automatically. You are responsible for
+                reviewing every draft and for changes made in your mailbox.</p>
+                <p>The service is provided as-is and may be changed, paused,
+                or discontinued. Disconnect the Google account from the
+                dashboard to stop future access.</p>
+                """,
+            )
         if path.startswith("/start/"):
             return self._start(environ, start_response,
                                path[len("/start/"):])
@@ -514,6 +586,46 @@ class OAuthBroker:
             ("Content-Type", "text/plain; charset=utf-8"),
             ("Cache-Control", "no-store"),
             ("X-Content-Type-Options", "nosniff"),
+            ("Content-Length", str(len(body))),
+        ])
+        return [body]
+
+    @staticmethod
+    def _public_page(start_response, title, content):
+        safe_title = html.escape(title)
+        body = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{safe_title} | Serpone Emails</title>
+  <style>
+    :root {{ color-scheme: light; font-family: ui-sans-serif, system-ui,
+      -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
+    body {{ background: #f6f7f9; color: #18202b; margin: 0; }}
+    main {{ background: white; border: 1px solid #e1e5ea; border-radius: 16px;
+      box-shadow: 0 12px 34px rgba(24,32,43,.08); margin: 8vh auto;
+      max-width: 680px; padding: clamp(24px, 5vw, 52px); width: 78%; }}
+    h1 {{ font-size: clamp(2rem, 6vw, 3.25rem); letter-spacing: -.04em;
+      line-height: 1; margin: 0 0 1.25rem; }}
+    h2 {{ font-size: 1.05rem; margin: 2rem 0 .45rem; }}
+    p {{ line-height: 1.65; }}
+    .lede {{ color: #405065; font-size: 1.2rem; }}
+    .updated {{ color: #68778a; font-size: .9rem; }}
+    a {{ color: #1769aa; }}
+  </style>
+</head>
+<body><main><h1>{safe_title}</h1>{content}</main></body>
+</html>""".encode("utf-8")
+        start_response("200 OK", [
+            ("Content-Type", "text/html; charset=utf-8"),
+            ("Cache-Control", "no-store"),
+            ("Content-Security-Policy",
+             "default-src 'none'; style-src 'unsafe-inline'; "
+             "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"),
+            ("Referrer-Policy", "no-referrer"),
+            ("X-Content-Type-Options", "nosniff"),
+            ("X-Frame-Options", "DENY"),
             ("Content-Length", str(len(body))),
         ])
         return [body]
