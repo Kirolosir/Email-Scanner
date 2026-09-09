@@ -41,12 +41,18 @@ AI_BANNER = (
 )
 
 AI_DRAFTING_APPROVAL_VERSION = 1
-GLOBAL_DRAFTING_APPROVAL_VERSION = 2
+LEGACY_GLOBAL_DRAFTING_APPROVAL_VERSION = 2
+GLOBAL_DRAFTING_APPROVAL_VERSION = 3
 AI_DRAFTING_ACKNOWLEDGEMENT = (
     "I approve AI-generated unsent drafts for the listed categories and "
     "understand that every draft must be reviewed before sending."
 )
 GLOBAL_DRAFTING_ACKNOWLEDGEMENT = (
+    "I approve AI-generated unsent drafts for every message with a safe "
+    "reply address outside Spam, Trash, Sent, and Drafts, and understand "
+    "that every draft must be reviewed before sending."
+)
+LEGACY_GLOBAL_DRAFTING_ACKNOWLEDGEMENT = (
     "I approve AI-generated unsent drafts for every message with a safe "
     "reply address, understand that automated and bulk mail is never "
     "drafted, and understand that every draft must be reviewed before "
@@ -98,12 +104,14 @@ class AiDraftingApprovals:
     """
 
     def __init__(self, account="", categories=(), allow_protected_labels=False,
-                 draft_all_replyable_messages=False, policy_digest=""):
+                 draft_all_replyable_messages=False, policy_digest="",
+                 include_bulk_messages=False):
         self.account = (account or "").strip().lower()
         self.categories = frozenset(categories or ())
         self.allow_protected_labels = bool(allow_protected_labels)
         self.draft_all_replyable_messages = bool(draft_all_replyable_messages)
         self.policy_digest = str(policy_digest or "")
+        self.include_bulk_messages = bool(include_bulk_messages)
 
     def check(self, category, carries_protected_label=False):
         if not self.draft_all_replyable_messages and category not in self.categories:
@@ -218,13 +226,16 @@ def _parse_ai_drafting_approval(path):
     }
     if version == AI_DRAFTING_APPROVAL_VERSION:
         allowed = common | {"approved_categories"}
-    elif version == GLOBAL_DRAFTING_APPROVAL_VERSION:
+    elif version in {
+        LEGACY_GLOBAL_DRAFTING_APPROVAL_VERSION,
+        GLOBAL_DRAFTING_APPROVAL_VERSION,
+    }:
         allowed = common | {
             "draft_all_replyable_messages", "policy_digest",
         }
     else:
         raise DraftingConfigError(
-            "AI drafting approval must be a supported version 1 or 2 object"
+            "AI drafting approval must be a supported version 1, 2, or 3 object"
         )
     unexpected = sorted(set(document) - allowed)
     if unexpected:
@@ -271,11 +282,19 @@ def _parse_ai_drafting_approval(path):
     digest = document.get("policy_digest")
     if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise DraftingConfigError("global drafting policy digest is invalid")
-    if document.get("acknowledgement") != GLOBAL_DRAFTING_ACKNOWLEDGEMENT:
+    expected_acknowledgement = (
+        LEGACY_GLOBAL_DRAFTING_ACKNOWLEDGEMENT
+        if version == LEGACY_GLOBAL_DRAFTING_APPROVAL_VERSION
+        else GLOBAL_DRAFTING_ACKNOWLEDGEMENT
+    )
+    if document.get("acknowledgement") != expected_acknowledgement:
         raise DraftingConfigError(
             "global drafting acknowledgement does not match the required text"
         )
-    return account, frozenset(), protected, True, digest
+    return (
+        account, frozenset(), protected, True, digest,
+        version == GLOBAL_DRAFTING_APPROVAL_VERSION,
+    )
 
 
 def precheck_ai_drafting_approval(path):
@@ -289,9 +308,13 @@ def load_ai_drafting_approval(path, actual_account, valid_categories,
     """Load and bind AI-drafting permission to the authenticated mailbox."""
     if not path:
         return AiDraftingApprovals(account=actual_account)
-    account, categories, protected, global_policy, digest = (
-        _parse_ai_drafting_approval(path)
-    )
+    parsed = _parse_ai_drafting_approval(path)
+    if len(parsed) == 5:
+        account, categories, protected, global_policy, digest = parsed
+        include_bulk_messages = False
+    else:
+        account, categories, protected, global_policy, digest, \
+            include_bulk_messages = parsed
     if account != (actual_account or "").strip().lower():
         raise DraftingConfigError(
             "AI drafting approval account does not match the authenticated "
@@ -321,6 +344,7 @@ def load_ai_drafting_approval(path, actual_account, valid_categories,
         account, categories, protected,
         draft_all_replyable_messages=global_policy,
         policy_digest=digest,
+        include_bulk_messages=include_bulk_messages,
     )
 
 

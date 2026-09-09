@@ -179,14 +179,13 @@ proposals under `review/` are private and gitignored.
 **What reaches Gemini.** Classification sends the safe reply metadata, the
 subject, and at most 8,000 characters of the cleaned current top-posted
 message. Quoted history, common signatures, and attachment contents are left
-out. Automated and bulk mail is stopped before Gemini and is never drafted,
-in every drafting mode: a `List-Unsubscribe` header, a `bulk`, `list`, or
-`junk` `Precedence`, an `Auto-Submitted` header, `X-Auto-Response-Suppress`,
-or a `no-reply`/`bounce`/`mailer-daemon`/`postmaster` sender each mark a
-message automated on its own, and an automated message is given no reply
-address at all. Account-wide drafting does not loosen this. Self-replies,
-malformed addresses, ambiguous Reply-To values, and messages with no safe
-reply path likewise never get a draft.
+out. The current account-wide approval may classify and draft mailing-list,
+bulk-precedence, auto-submitted, and auto-response-suppressed messages when a
+safe reply address still exists. Those headers remain recorded as delivery
+advisories. Spam, trash, sent mail, and existing drafts are excluded by the
+Gmail query. Bounce endpoints, final no-reply targets, self-replies, malformed
+addresses, ambiguous Reply-To values, and messages with no safe reply path
+never get a new draft.
 
 Gemini returns category, graduation year, sender type, confidence, evidence,
 and a short reason, in a strict format. Anything unsupported or malformed
@@ -207,7 +206,7 @@ For the seamless workflow, put these reviewed settings in the account profile:
 ```
 
 The boolean expresses intent but grants nothing by itself. `approve_account.py`
-creates a separate version 2 approval bound to the exact Gmail account and a
+creates a separate version 3 approval bound to the exact Gmail account and a
 SHA-256 digest of the taxonomy, labels, category guidance, signature, account
 guidance, fallback category, evidence rules, and protected-label permission.
 Changing any of those settings invalidates the activation.
@@ -225,11 +224,10 @@ Preview the exact taxonomy and grant without writing anything:
 Remove `--dry-run` when the owner is ready. The owner personally types the full
 sentence printed by the command. It explicitly names the account and states the
 grant the code actually implements: unsent drafts for every message with a safe
-reply address, excluding automated and bulk mail. The sentence deliberately
-does not promise more than that - a confirmation broader than the behavior
-would pre-authorize a later loosening of the delivery-header policy without
-ever asking the owner again. There is no `--yes` option for this activation. It
-is needed once during onboarding, not for every message or scheduled run.
+reply address outside Spam, Trash, Sent, and Drafts. Version 2 approvals retain
+their narrower automated/bulk exclusion until the owner saves the current
+settings. There is no `--yes` option for this activation. It is needed once
+during onboarding, not for every message or scheduled run.
 
 Every generated draft carries the hardcoded
 `AI-DRAFTED - UNREVIEWED WORDING - NOT SENT` banner. Unknown, low-confidence,
@@ -540,7 +538,7 @@ would exceed the cap, that whole message is deferred: it receives no labels and
 is not marked Processed. Non-drafting messages can continue within the regular
 write budget. `--max-drafts 0` guarantees zero new drafts. Whole replyable
 messages whose drafts do not fit are deferred without labels or a Processed
-marker; automated messages, which never draft, may still be labeled within the
+marker; messages with no safe reply address may still be labeled within the
 normal write budget.
 
 Daily mode searches a three-day overlap so late-arriving mail isn't missed:
@@ -934,9 +932,9 @@ nothing that can reach a token, so a compromise there yields status, not mail.
 
 The separate human dashboard on port 8081 remains bound to loopback. Its normal
 sign-in is a single **Continue with Google** button that starts a PKCE-protected
-OAuth flow; the private access key is kept only as a recovery fallback. A
-successful Google callback establishes the dashboard session, so an owner does
-not have to copy a separate key before linking or reconnecting Gmail. The
+OAuth flow. The login page does not show the operator recovery credential. A
+successful Google callback establishes the dashboard session immediately, so
+an owner does not copy a separate credential before linking or reconnecting Gmail. The
 dashboard can save a complete label/schedule/draft approval bundle and
 disconnect only after the owner types the connected address. Its OAuth callback
 consumes ten-minute, single-use state before token exchange. A returned refresh
@@ -950,9 +948,10 @@ or launch a privileged command. It writes one private, account-bound request
 under `/mnt/state/active`. `hosted-triage.path` notices that exact file and
 starts the same sandboxed oneshot service used by the daily timer. The runner
 consumes the request before mailbox access, refuses altered or hour-old
-requests, and bypasses only the schedule/same-day gate. Reviewed settings,
-account identity checks, spam and automated-mail exclusions, per-message
-journaling, and all scan/write/draft limits still apply.
+requests, and bypasses the schedule/same-day gate while using the bounded
+two-month catch-up query. Reviewed settings, account identity checks, spam and
+unsafe-reply exclusions, per-message journaling, and all scan/write/draft
+limits still apply.
 
 While an immediate run is starting or working, the dashboard refreshes its own
 status briefly and reports completion or a safe failure reason. The runner
@@ -1014,8 +1013,7 @@ Installation or recovery order:
    verify the disk with `--check-state-root --require-mountpoint` before
    enabling a service.
 4. Confirm `/healthz` answers through the tunnel, the status endpoint refuses
-   without a bearer, and **Continue with Google** opens the OAuth flow. Keep the
-   private access key available only for recovery.
+   without a bearer, and **Continue with Google** opens the OAuth flow.
 5. Complete Google consent, save the reviewed labels and schedule, then use
    **Run now** for an immediate bounded run when needed. The dashboard follows
    the run automatically and explains if Google must be reconnected.

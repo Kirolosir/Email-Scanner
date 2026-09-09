@@ -118,7 +118,7 @@ def sample_inbox(service, query, throttle, max_messages=DEFAULT_SAMPLE,
             # Discovery keeps the coarse historic tag for taxonomy quality.
             # It is metadata only: triage no longer treats this tag as a
             # universal drafting suppression rule.
-            "automated": delivery["status"] == "automated",
+            "automated": delivery["status"] in {"automated", "bulk"},
         })
     return samples
 

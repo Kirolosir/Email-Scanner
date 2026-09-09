@@ -563,6 +563,11 @@ def plan_message(email, templates, year_labels, category_labels, no_label,
     global_drafting = bool(
         getattr(effective_profile, "draft_all_replyable_messages", False)
     )
+    current_account_wide_drafting_approved = bool(
+        global_drafting
+        and getattr(ai_drafting_approvals, "draft_all_replyable_messages", False)
+        and getattr(ai_drafting_approvals, "include_bulk_messages", False)
+    )
     classification_error = None
     delivery = email.get("delivery_safety") or assess_delivery_headers(
         {"from": email.get("from", ""), "reply-to": email.get("reply_to", "")},
@@ -586,7 +591,10 @@ def plan_message(email, templates, year_labels, category_labels, no_label,
 
     suppression_code = ""
     classification_called = False
-    if delivery["status"] == "automated":
+    if delivery["status"] == "automated" or (
+        delivery["status"] == "bulk"
+        and not current_account_wide_drafting_approved
+    ):
         suppression_code = "automated_message"
         classification = {
             "category": _PROFILE_MOD.SYSTEM_CATEGORY_ADMINISTRATIVE,
@@ -597,7 +605,7 @@ def plan_message(email, templates, year_labels, category_labels, no_label,
             "reason": "automated message suppressed before classification",
             "valid": True,
         }
-    elif delivery["status"] != "normal":
+    elif delivery["status"] not in {"normal", "bulk"}:
         suppression_code = "unsafe_reply_metadata"
         classification = {
             "category": "unknown", "grad_year": "unknown",
@@ -948,6 +956,9 @@ def plan_message(email, templates, year_labels, category_labels, no_label,
         "classification_error": classification_error,
         "classification_called": classification_called,
         "suppression_code": suppression_code,
+        "current_account_wide_drafting_approved": (
+            current_account_wide_drafting_approved
+        ),
         "year_evidence_conflict": year_evidence_conflict,
     }
 

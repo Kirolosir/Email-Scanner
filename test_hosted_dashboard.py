@@ -81,12 +81,22 @@ def test_wrong_access_key_is_refused(tmp_path):
     assert "Set-Cookie" not in response["headers"]
 
 
-def test_google_is_the_primary_login_and_key_is_only_a_fallback(tmp_path):
-    page = _call(_app(tmp_path, control=object()), "/login")
+def test_google_is_a_direct_login_without_an_access_key_prompt(tmp_path):
+    class Control:
+        def begin_connect(self):
+            return "https://accounts.example.test/authorize?a=1&b=2"
+
+    page = _call(_app(tmp_path, control=Control()), "/login")
     assert page["status"].startswith("200")
     assert "Continue with Google" in page["body"]
-    assert 'method="post" action="/connect"' in page["body"]
-    assert "Use private access key instead" in page["body"]
+    assert 'href="https://accounts.example.test/authorize?a=1&amp;b=2"' in page["body"]
+    assert "private access key" not in page["body"].casefold()
+
+
+def test_oauth_session_cookie_survives_the_cross_site_return(tmp_path):
+    cookie = _app(tmp_path)._session_cookie()
+    assert "SameSite=Lax" in cookie
+    assert "SameSite=Strict" not in cookie
 
 
 def test_login_cookie_opens_the_dashboard(tmp_path):
@@ -411,7 +421,7 @@ def test_oauth_callback_uses_state_without_dashboard_cookie(tmp_path):
     assert captured["status"].startswith("303")
     assert captured["headers"]["Location"] == "/?connected=1"
     assert "HttpOnly" in captured["headers"]["Set-Cookie"]
-    assert "SameSite=Strict" in captured["headers"]["Set-Cookie"]
+    assert "SameSite=Lax" in captured["headers"]["Set-Cookie"]
     assert queries == ["state=safe-state&code=one-time-code"]
 
 

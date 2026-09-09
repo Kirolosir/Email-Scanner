@@ -123,6 +123,16 @@ def test_attachment_text_is_never_extracted():
     ({"from": "bounces@example.test"}, "automated_sender"),
     ({"from": "bounce-123-abc@example.test"}, "automated_sender"),
     ({"from": "bounces+token@example.test"}, "automated_sender"),
+    ({"from": "person@example.test", "reply-to": "noreply@example.test"},
+     "automated_reply_target"),
+])
+def test_automated_headers_are_detected(headers, code):
+    result = assess_delivery_headers(headers)
+    assert result["status"] == "automated"
+    assert code in result["reason_codes"]
+
+
+@pytest.mark.parametrize("headers,code", [
     ({"from": "person@example.test", "auto-submitted": "auto-replied"},
      "auto_submitted"),
     ({"from": "person@example.test", "precedence": "bulk"},
@@ -131,13 +141,21 @@ def test_attachment_text_is_never_extracted():
      "mailing_list"),
     ({"from": "person@example.test", "x-auto-response-suppress": "All"},
      "auto_response_suppressed"),
-    ({"from": "person@example.test", "reply-to": "noreply@example.test"},
-     "automated_reply_target"),
 ])
-def test_automated_headers_are_detected(headers, code):
+def test_bulk_headers_preserve_a_safe_reply_target(headers, code):
     result = assess_delivery_headers(headers)
-    assert result["status"] == "automated"
+    assert result["status"] == "bulk"
+    assert result["reply_address"] == "person@example.test"
     assert code in result["reason_codes"]
+
+
+def test_no_reply_sender_with_safe_explicit_reply_to_is_replyable():
+    result = assess_delivery_headers({
+        "from": "no-reply@example.test",
+        "reply-to": "support@example.test",
+    })
+    assert result["status"] == "bulk"
+    assert result["reply_address"] == "support@example.test"
 
 
 def test_safe_reply_to_and_unsafe_multiple_reply_to():

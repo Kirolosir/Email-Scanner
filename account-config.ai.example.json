@@ -86,7 +86,7 @@
       "expected_sender": "administrative",
       "drafting": {
         "mode": "off",
-        "guidance": "Draft a neutral acknowledgement for a human-sent administrative message. Automated and bulk mail never reaches drafting: mailing-list, bulk-precedence, auto-submitted, no-reply, and bounce messages are suppressed before classification, in every drafting mode."
+        "guidance": "Draft a neutral acknowledgement. The current account-wide approval may include mailing-list, bulk-precedence, and auto-submitted messages when they have a safe reply address. Never draft to a bounce or no-reply target."
       }
     },
     {

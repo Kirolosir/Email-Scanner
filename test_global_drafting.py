@@ -11,6 +11,7 @@ from drafting import (
     AI_BANNER,
     AiDraftingApprovals,
     DraftingConfigError,
+    LEGACY_GLOBAL_DRAFTING_ACKNOWLEDGEMENT,
     load_ai_drafting_approval,
 )
 from message_safety import assess_delivery_headers
@@ -86,6 +87,7 @@ def _approval(profile, protected=False):
         account=profile.account,
         allow_protected_labels=protected,
         draft_all_replyable_messages=True,
+        include_bulk_messages=True,
     )
 
 
@@ -252,13 +254,10 @@ def test_unsafe_recipient_never_drafts_or_invents_address(tmp_path, delivery):
 
 
 @pytest.mark.parametrize("headers", [
-    {"from": "ASOS <news@e.asos.test>", "list-unsubscribe": "<mailto:u@e.test>"},
-    {"from": "rewards@dominos.test", "precedence": "bulk"},
-    {"from": "notifications@example.test", "auto-submitted": "auto-generated"},
     {"from": "no-reply@example.test"},
     {"from": "mailer-daemon@example.test"},
 ])
-def test_automated_mail_never_drafts_even_with_a_usable_reply_address(
+def test_nonreplyable_automated_mail_never_drafts_even_with_a_supplied_address(
         tmp_path, headers):
     """The automated-message suppression must stand on its own.
 
@@ -293,6 +292,46 @@ def test_automated_mail_never_drafts_even_with_a_usable_reply_address(
     # to a category outside the taxonomy), so a looser assertion would still
     # pass with the automated-message branch deleted.
     assert "automated return path" in plan["draft_skip"]
+
+
+@pytest.mark.parametrize("headers", [
+    {"from": "ASOS <news@e.asos.test>", "list-unsubscribe": "<mailto:u@e.test>"},
+    {"from": "rewards@dominos.test", "precedence": "bulk"},
+    {"from": "notifications@example.test", "auto-submitted": "auto-generated"},
+])
+def test_current_global_policy_drafts_bulk_mail_with_a_safe_reply_address(
+        tmp_path, headers):
+    profile, _ = _profile(tmp_path)
+    delivery = assess_delivery_headers(headers)
+    assert delivery["status"] == "bulk"
+    calls = []
+    plan = _plan(
+        profile,
+        email=_email(delivery_safety=delivery),
+        approvals=_approval(profile),
+        generator=lambda *_args: calls.append(1) or "Thank you.",
+    )
+    assert calls == [1]
+    assert plan["template"] is not None
+    assert plan["suppression_code"] == ""
+
+
+def test_legacy_global_policy_still_suppresses_bulk_mail(tmp_path):
+    profile, _ = _profile(tmp_path)
+    delivery = assess_delivery_headers({
+        "from": "news@example.test", "list-unsubscribe": "<mailto:u@example.test>"
+    })
+    legacy = AiDraftingApprovals(
+        account=profile.account,
+        draft_all_replyable_messages=True,
+        include_bulk_messages=False,
+    )
+    plan = _plan(
+        profile, email=_email(delivery_safety=delivery), approvals=legacy,
+        generator=lambda *_args: pytest.fail("legacy bulk mail reached generation"),
+    )
+    assert plan["template"] is None
+    assert plan["suppression_code"] == "automated_message"
 
 
 def test_generation_retries_once_then_uses_fact_free_fallback(tmp_path):
@@ -335,6 +374,7 @@ def test_activation_is_account_and_configuration_digest_bound(tmp_path):
         path, ACCOUNT, profile.valid_categories, profile=profile
     )
     assert loaded.draft_all_replyable_messages is True
+    assert loaded.include_bulk_messages is True
     with pytest.raises(DraftingConfigError, match="account"):
         load_ai_drafting_approval(
             path, "different@example.test", profile.valid_categories,
@@ -350,6 +390,21 @@ def test_activation_is_account_and_configuration_digest_bound(tmp_path):
         load_ai_drafting_approval(
             path, ACCOUNT, changed.valid_categories, profile=changed
         )
+
+
+def test_legacy_global_approval_loads_with_its_narrower_scope(tmp_path):
+    profile, _ = _profile(tmp_path)
+    _taxonomy, document = approve_account.build_documents(profile)
+    document["version"] = 2
+    document["acknowledgement"] = LEGACY_GLOBAL_DRAFTING_ACKNOWLEDGEMENT
+    path = tmp_path / "legacy-approval.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    loaded = load_ai_drafting_approval(
+        path, ACCOUNT, profile.valid_categories, profile=profile
+    )
+    assert loaded.draft_all_replyable_messages is True
+    assert loaded.include_bulk_messages is False
 
 
 def test_protected_label_keeps_evidence_and_permission_gates(tmp_path):
@@ -398,13 +453,10 @@ def test_global_confirmation_states_real_scope_and_cannot_be_yes(tmp_path):
         profile, [], global_policy=True
     )
     assert "every message with a safe reply address" in phrase
-    assert "excluding automated and bulk mail" in phrase
+    assert "outside Spam, Trash, Sent, and Drafts" in phrase
     assert profile.account in phrase
     assert phrase != "yes"
-    for overpromise in ("newsletters", "advertisements", "mailing-list"):
-        assert overpromise not in phrase, (
-            f"the confirmation promises {overpromise!r}, which is never drafted"
-        )
+    assert "safe reply address" in phrase
 
 
 def test_global_activation_requires_exact_typed_phrase_and_has_no_yes(tmp_path):
@@ -424,7 +476,7 @@ def test_global_activation_requires_exact_typed_phrase_and_has_no_yes(tmp_path):
     )
     assert approve_account.main(argv, reader=lambda _prompt: phrase) == 0
     document = json.loads(approval_path.read_text(encoding="utf-8"))
-    assert document["version"] == 2
+    assert document["version"] == 3
     assert document["draft_all_replyable_messages"] is True
 
     with pytest.raises(SystemExit) as caught:

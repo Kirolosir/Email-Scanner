@@ -264,7 +264,7 @@ class HostedDashboardApp:
         value = "" if clear else self._session_value()
         maximum = "; Max-Age=0" if clear else ""
         return (
-            f"{SESSION_COOKIE}={value}; Path=/; HttpOnly; SameSite=Strict"
+            f"{SESSION_COOKIE}={value}; Path=/; HttpOnly; SameSite=Lax"
             f"{secure}{maximum}"
         )
 
@@ -341,9 +341,9 @@ class HostedDashboardApp:
                 head=head,
             )
 
-        # OAuth state is the callback's authentication. SameSite=Strict may
-        # withhold the dashboard cookie on Google's cross-site redirect, so
-        # this route must be handled before the ordinary session gate.
+        # OAuth state is the callback's authentication, so this route must be
+        # handled before the ordinary dashboard-session gate. The resulting
+        # Lax cookie is available on the top-level redirect back to this site.
         if path == "/oauth/callback" and method == "GET":
             if self.control is None:
                 return self._redirect(
@@ -600,10 +600,8 @@ class HostedDashboardApp:
         )
 
     def _login_page(self, failed=False, connect_error=""):
-        key_error = (
-            '<p class="notice bad">That access key was not accepted.</p>'
-            if failed else ""
-        )
+        if failed and not connect_error:
+            connect_error = "connect_failed"
         connect_notice = (
             '<p class="notice bad">'
             + html.escape(CONNECT_ERROR_MESSAGES.get(
@@ -612,13 +610,22 @@ class HostedDashboardApp:
             + '</p>'
             if connect_error else ""
         )
-        google_form = f"""
-              <form method="post" action="/connect">
-                <input type="hidden" name="csrf" value="{self._csrf_value()}">
-                <button class="google-button" type="submit">
-                  <span aria-hidden="true">G</span>Continue with Google</button>
-              </form>""" \
-            if self.control is not None else ""
+        google_link = ""
+        if self.control is not None:
+            try:
+                location = self.control.begin_connect()
+                google_link = (
+                    f'<a class="google-button" href="{html.escape(location)}">'
+                    '<span aria-hidden="true">G</span>Continue with Google</a>'
+                )
+            except Exception as exc:  # noqa: BLE001 - render only safe text
+                if not connect_error:
+                    code = _connect_error_code(exc, "start_failed")
+                    connect_notice = (
+                        '<p class="notice bad">'
+                        + html.escape(CONNECT_ERROR_MESSAGES[code])
+                        + '</p>'
+                    )
         return self._page("Sign in", f"""
           <main class="login-shell">
             <section class="login-card">
@@ -628,16 +635,10 @@ class HostedDashboardApp:
               <p class="lede">Connect any Gmail account. This installation
               supports one account at a time.</p>
               {connect_notice}
-              {google_form}
-              <details class="key-fallback"><summary>Use private access key instead</summary>
-                {key_error}
-                <form method="post" action="/login">
-                  <label for="access_key">Private access key</label>
-                  <input id="access_key" name="access_key" type="password"
-                         required autocomplete="current-password">
-                  <button type="submit">Open dashboard</button>
-                </form>
-              </details>
+              {google_link}
+              <p class="browser-note">Google returns you to the dashboard in
+              this same browser. If this page is inside another app, open it
+              in Chrome or Safari first.</p>
             </section>
           </main>
         """)
@@ -784,8 +785,9 @@ class HostedDashboardApp:
             <section class="panel safety">
               <div><p class="eyebrow">Review queue</p>
                 <h2>Every response stays in Gmail Drafts</h2>
-                <p>The assistant excludes spam, trash, sent mail, drafts,
-                automated messages, and bulk mail from reply drafting.</p></div>
+                <p>The assistant drafts every message with a safe reply
+                address. Spam, trash, sent mail, drafts, and non-replyable
+                bounce or no-reply addresses stay excluded.</p></div>
               <a class="secondary" href="https://mail.google.com/mail/u/0/#drafts">Open Gmail drafts</a>
             </section>
           </main>
@@ -987,13 +989,12 @@ border-radius:24px;box-shadow:var(--shadow)}}.login-card .mark{{margin-bottom:26
 .login-card h1{{font-size:2.35rem}}label{{display:block;font-weight:750;margin:24px 0 8px}}
 input:not([type=hidden]):not([type=checkbox]),textarea{{width:100%;padding:13px 14px;border:1px solid #b9cdca;border-radius:12px;
 outline:none;background:white;color:var(--ink)}}textarea{{resize:vertical}}input:focus,textarea:focus{{border-color:var(--mint);box-shadow:0 0 0 4px #dff7f0}}
-.login-card button{{width:100%;margin-top:14px}}.google-button{{display:flex;align-items:center;
+.login-card button{{width:100%;margin-top:14px}}.google-button{{display:flex;align-items:center;width:100%;
 justify-content:center;gap:11px;background:#fff;color:#223;border:1px solid #aebfbd;
 border-radius:12px;padding:12px 16px;margin-top:14px;text-decoration:none;font-weight:750;
 box-shadow:0 4px 14px rgba(20,63,59,.08)}}.google-button span{{display:grid;place-items:center;
 width:24px;height:24px;border-radius:50%;background:#fff;color:#1769e0;font-weight:850}}
-.key-fallback{{margin-top:22px;border-top:1px solid var(--line);padding-top:18px}}
-.key-fallback summary{{cursor:pointer;color:var(--muted);font-weight:700;text-align:center}}
+.browser-note{{margin:16px 0 0;color:var(--muted);font-size:.88rem;text-align:center}}
 .notice{{padding:11px 13px;border-radius:10px}}.notice.bad{{background:#fff0ed;color:#9b3024}}
 .notice.good{{background:#e2f7ee;color:#116645}}.notice.progress{{background:#eaf3f8;color:#24556f}}
 .settings-shell{{max-width:980px}}.account-hero.compact h1{{font-size:clamp(2rem,4vw,3rem)}}

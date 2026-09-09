@@ -25,6 +25,11 @@ AUTOMATED_LOCAL_PART = re.compile(
     r"(?:$|[._+-])",
     re.IGNORECASE,
 )
+BOUNCE_LOCAL_PART = re.compile(
+    r"(?:^|[._+-])(?:mailer-daemon|postmaster|bounces?)"
+    r"(?:$|[._+-])",
+    re.IGNORECASE,
+)
 EMAIL_ADDRESS = re.compile(
     r"^[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@"
     r"(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+"
@@ -93,6 +98,12 @@ def is_automated_address(address):
     return bool(AUTOMATED_LOCAL_PART.search(local))
 
 
+def is_bounce_address(address):
+    """Return whether an address is a delivery-system/bounce endpoint."""
+    local = (address or "").partition("@")[0]
+    return bool(BOUNCE_LOCAL_PART.search(local))
+
+
 def assess_delivery_headers(headers, own_address=""):
     """Classify delivery metadata before any body or model processing.
 
@@ -126,7 +137,16 @@ def assess_delivery_headers(headers, own_address=""):
     if reply_address and is_automated_address(reply_address):
         automated_codes.append("automated_reply_target")
 
-    if automated_codes:
+    # Bulk/list headers describe how a message was distributed; they do not
+    # make a valid reply address unsafe. Keep those messages distinguishable
+    # so an explicitly approved account-wide policy can draft them. A real
+    # bounce endpoint or an automated final reply target remains terminal.
+    target = reply_address or sender
+    hard_automated = bool(
+        is_bounce_address(sender)
+        or is_automated_address(target)
+    )
+    if hard_automated:
         return {
             "status": "automated",
             "sender": sender,
@@ -139,7 +159,6 @@ def assess_delivery_headers(headers, own_address=""):
         ambiguity.append(f"from_{sender_error}")
     if reply_raw and reply_error:
         ambiguity.append(f"reply_to_{reply_error}")
-    target = reply_address or sender
     if target and is_automated_address(target):
         ambiguity.append("unsafe_reply_target")
     owner = parseaddr(own_address or "")[1].strip().casefold()
@@ -154,10 +173,10 @@ def assess_delivery_headers(headers, own_address=""):
             "reason_codes": sorted(set(ambiguity or ["missing_reply_target"])),
         }
     return {
-        "status": "normal",
+        "status": "bulk" if automated_codes else "normal",
         "sender": sender,
         "reply_address": target,
-        "reason_codes": [],
+        "reason_codes": sorted(set(automated_codes)),
     }
 
 

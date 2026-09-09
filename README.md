@@ -29,12 +29,12 @@ and draft caps and can produce a private, content-free review report.
 Triage assigns messages to categories configured for that account, then adds
 the matching Gmail labels. Existing labels are left alone. A one-time,
 account-bound activation can enable an unsent AI draft for every message with a
-safe, unambiguous reply address. Automated and bulk mail is never drafted, in
-any mode: mailing-list, bulk-precedence, auto-submitted, no-reply, and bounce
-messages are suppressed before classification, and account-wide drafting does
-not change that. Self-replies, missing or ambiguous addresses, and malformed
-reply metadata never get a draft either. Uncertain messages receive the
-configured Other and Needs Review labels plus a neutral acknowledgement draft.
+safe, unambiguous reply address. The current account-wide policy includes
+mailing-list, bulk-precedence, and auto-submitted messages when they still have
+a safe reply address. Spam, trash, sent mail, existing drafts, bounce/no-reply
+targets, self-replies, missing or ambiguous addresses, and malformed reply
+metadata never get a new draft. Uncertain messages receive the configured Other
+and Needs Review labels plus a neutral acknowledgement draft.
 
 The activation is off by default and tied to a digest of the account settings.
 The account owner must type the full confirmation; `--yes` cannot create it.

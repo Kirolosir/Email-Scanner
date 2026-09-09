@@ -308,8 +308,12 @@ def run_if_due(env=None, *, now=None, service_builder=build,
                 return 0
 
         review_path = _review_path(active / REVIEW_DIR, now)
+        # A manual run doubles as a bounded historical catch-up. Scheduled
+        # runs stay on the short overlap, while Run now can revisit recently
+        # processed messages that an older draft policy finished without a
+        # draft.
         argv = [
-            "daily",
+            "initial" if force_requested else "daily",
             "--account-config", str(active / CONFIG_FILE),
             "--taxonomy-confirmation", str(active / TAXONOMY_APPROVAL_FILE),
             "--ai-drafting-approval", str(active / AI_APPROVAL_FILE),

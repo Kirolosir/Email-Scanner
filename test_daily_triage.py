@@ -12,6 +12,7 @@ import pytest
 from daily_triage import (
     DailyState,
     add_daily_review_policy,
+    already_processed_for_draft_policy,
     build_daily_query,
     build_initial_query,
     execute_daily_plan,
@@ -832,6 +833,37 @@ def test_selection_still_skips_already_processed_messages():
     )
     assert skipped == 4
     assert [m["id"] for m in candidates] == ["new0", "new1", "new2"]
+
+
+def test_account_wide_policy_revisits_old_label_only_completion_once(tmp_path):
+    state = DailyState(tmp_path / "state.json")
+    state.data["messages"]["old"] = {
+        "status": "complete", "thread_id": "t1", "draft_id": "",
+    }
+    message = {"id": "old", "_label_names": ["Processed"]}
+
+    assert already_processed_for_draft_policy(
+        message, "Processed", state, account_wide_drafting=False
+    ) is True
+    assert already_processed_for_draft_policy(
+        message, "Processed", state, account_wide_drafting=True
+    ) is False
+
+    state.record_complete("old", "t1")
+    assert already_processed_for_draft_policy(
+        message, "Processed", state, account_wide_drafting=True
+    ) is True
+
+
+def test_recorded_draft_is_complete_across_draft_policy_upgrade(tmp_path):
+    state = DailyState(tmp_path / "state.json")
+    state.data["messages"]["drafted"] = {
+        "status": "complete", "thread_id": "t1", "draft_id": "d1",
+    }
+    assert already_processed_for_draft_policy(
+        {"id": "drafted", "_label_names": ["Processed"]},
+        "Processed", state, account_wide_drafting=True,
+    ) is True
 
 
 def test_the_run_applies_the_budget_before_previewing():

@@ -212,6 +212,7 @@ def test_run_now_bypasses_schedule_but_keeps_the_runner_limits(
     ) == 0
     assert len(calls) == 1 and calls[0][1] is marker_service
     argv = calls[0][0]
+    assert argv[0] == "initial"
     assert "--force" in argv
     assert argv[argv.index("--max-scan") + 1] == str(seat.max_scan)
     assert argv[argv.index("--limit") + 1] == str(seat.limit)

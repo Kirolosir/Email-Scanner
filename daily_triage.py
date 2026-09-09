@@ -92,6 +92,7 @@ DEFAULT_STATUS_PATH = _PROFILE.status_path
 DEFAULT_LOCK_DIR = _PROFILE.lock_dir
 LOCAL_TIMEZONE = ZoneInfo(_PROFILE.timezone)
 logger = logging.getLogger(__name__)
+CURRENT_DRAFT_POLICY_VERSION = 2
 
 
 def build_initial_query(lookback_months=2):
@@ -160,6 +161,16 @@ class DailyState:
             for key in ("thread_id", "draft_id"):
                 if key in record and not isinstance(record[key], str):
                     raise ValueError(f"message state {key} must be a string")
+            policy_version = record.get("draft_policy_version")
+            if (
+                policy_version is not None
+                and (
+                    isinstance(policy_version, bool)
+                    or not isinstance(policy_version, int)
+                    or policy_version < 1
+                )
+            ):
+                raise ValueError("message state draft policy version is invalid")
 
     def _restrict_existing_permissions(self):
         try:
@@ -202,15 +213,20 @@ class DailyState:
             "status": "draft_created",
             "thread_id": thread_id,
             "draft_id": draft_id,
+            "draft_policy_version": CURRENT_DRAFT_POLICY_VERSION,
         }
         self.save()
 
-    def record_complete(self, message_id, thread_id, draft_id=""):
-        self.data["messages"][message_id] = {
+    def record_complete(self, message_id, thread_id, draft_id="",
+                        draft_policy_version=CURRENT_DRAFT_POLICY_VERSION):
+        record = {
             "status": "complete",
             "thread_id": thread_id,
             "draft_id": draft_id,
         }
+        if draft_policy_version:
+            record["draft_policy_version"] = int(draft_policy_version)
+        self.data["messages"][message_id] = record
         self.save()
 
     def mark_daily_complete(self, local_date):
@@ -290,6 +306,30 @@ def select_candidates(messages, limit, already_processed):
         if limit is not None and len(candidates) >= limit:
             break
     return candidates, skipped
+
+
+def already_processed_for_draft_policy(
+        message, processed_name, state, account_wide_drafting=False):
+    """Whether a message is complete under the drafting policy now in force.
+
+    The Gmail label remains sufficient for legacy/category-only operation.
+    Account-wide operation also requires either a recorded draft or a terminal
+    decision made by the current policy. This gives older label-only records a
+    single bounded chance to receive the drafts they previously missed.
+    """
+    record = state.record_for(message["id"])
+    completed = (
+        processed_name in message.get("_label_names", [])
+        or record.get("status") == "complete"
+    )
+    if not completed or not account_wide_drafting:
+        return completed
+    if record.get("draft_id"):
+        return True
+    return (
+        record.get("draft_policy_version", 0)
+        >= CURRENT_DRAFT_POLICY_VERSION
+    )
 
 
 def plan_write_cost(plan):
@@ -514,7 +554,13 @@ def execute_daily_plan(service, plan, account_labels, throttle, draft_log,
     except Exception as exc:
         return added, draft_id, [f"processed label failed ({type(exc).__name__})"]
 
-    state.record_complete(message_id, thread_id, draft_id)
+    state.record_complete(
+        message_id, thread_id, draft_id,
+        draft_policy_version=(
+            CURRENT_DRAFT_POLICY_VERSION
+            if plan.get("current_account_wide_drafting_approved") else 0
+        ),
+    )
     return added, draft_id, []
 
 
@@ -817,11 +863,19 @@ def _run_locked(args, classifier, config, templates, state, status,
                     ["metadata_fetch_failed"] if failures else [])
 
     processed_name = config.system["processed"]
+    account_wide_drafting = bool(
+        getattr(args.profile, "draft_all_replyable_messages", False)
+        and getattr(
+            args.ai_drafting_approvals, "draft_all_replyable_messages", False
+        )
+        and getattr(args.ai_drafting_approvals, "include_bulk_messages", False)
+    )
 
     def _already_processed(message):
         attach_label_names([message], account_labels)
-        return (processed_name in message.get("_label_names", [])
-                or state.record_for(message["id"]).get("status") == "complete")
+        return already_processed_for_draft_policy(
+            message, processed_name, state, account_wide_drafting
+        )
 
     def _would_consume_budget(message):
         # Every message this run touches costs at least the processed label,

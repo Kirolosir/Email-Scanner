@@ -42,7 +42,7 @@ def confirmation_phrase(profile, generic_categories,
         phrase = (
             f"I reviewed {len(profile.taxonomy)} categories for {profile.account} "
             "and activate unsent AI drafts for every message with a safe "
-            "reply address, excluding automated and bulk mail"
+            "reply address outside Spam, Trash, Sent, and Drafts"
         )
     else:
         phrase = (
