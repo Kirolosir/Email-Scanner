@@ -612,10 +612,12 @@ class HostedDashboardApp:
             + '</p>'
             if connect_error else ""
         )
-        google_link = f"""
-              <a class="google-button" target="_top"
-                 href="/connect?csrf={self._csrf_value()}">
-                <span aria-hidden="true">G</span>Continue with Google</a>""" \
+        google_form = f"""
+              <form method="post" action="/connect">
+                <input type="hidden" name="csrf" value="{self._csrf_value()}">
+                <button class="google-button" type="submit">
+                  <span aria-hidden="true">G</span>Continue with Google</button>
+              </form>""" \
             if self.control is not None else ""
         return self._page("Sign in", f"""
           <main class="login-shell">
@@ -626,7 +628,7 @@ class HostedDashboardApp:
               <p class="lede">Connect any Gmail account. This installation
               supports one account at a time.</p>
               {connect_notice}
-              {google_link}
+              {google_form}
               <details class="key-fallback"><summary>Use private access key instead</summary>
                 {key_error}
                 <form method="post" action="/login">
@@ -708,11 +710,11 @@ class HostedDashboardApp:
             '<a class="secondary" href="/settings">Edit labels &amp; schedule</a>'
             if occupant is not None else ""
         )
-        connect_link = (
-            f'<a class="ghost secondary" target="_top" '
-            f'href="/connect?csrf={self._csrf_value()}">Link Google account</a>'
-            if self.control is not None else ""
-        )
+        connect_form = f"""
+          <form method="post" action="/connect">
+            <input type="hidden" name="csrf" value="{self._csrf_value()}">
+            <button class="ghost" type="submit">Link Google account</button>
+          </form>""" if self.control is not None else ""
         run_form = f"""
           <form method="post" action="/run-now">
             <input type="hidden" name="csrf" value="{self._csrf_value()}">
@@ -741,7 +743,7 @@ class HostedDashboardApp:
                 unsent Gmail drafts for review. Nothing is auto-sent.</p>
               </div>
               <div class="hero-actions"><span class="status {status_tone}"><i></i>{_escape(status_text)}</span>
-                {connect_link}{run_form}</div>
+                {connect_form}{run_form}</div>
             </section>
 
             <section class="overview-grid">

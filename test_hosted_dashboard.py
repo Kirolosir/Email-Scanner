@@ -85,8 +85,7 @@ def test_google_is_the_primary_login_and_key_is_only_a_fallback(tmp_path):
     page = _call(_app(tmp_path, control=object()), "/login")
     assert page["status"].startswith("200")
     assert "Continue with Google" in page["body"]
-    assert 'href="/connect?csrf=' in page["body"]
-    assert 'target="_top"' in page["body"]
+    assert 'method="post" action="/connect"' in page["body"]
     assert "Use private access key instead" in page["body"]
 
 
@@ -270,7 +269,7 @@ def test_dashboard_has_google_link_and_immediate_run_controls(tmp_path):
 
     connection.connect(tmp_path, "owner@example.test")
     connected = _call(app, cookie=_login(app))
-    assert 'href="/connect?csrf=' in connected["body"]
+    assert 'method="post" action="/connect"' in connected["body"]
     assert 'action="/run-now"' in connected["body"]
 
 
