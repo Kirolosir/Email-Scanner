@@ -132,7 +132,7 @@ def test_http_requests_are_rejected():
 
 
 @pytest.mark.parametrize("path,title", [
-    ("/", "Serpone Emails"),
+    ("/", "Email Scanner"),
     ("/privacy", "Privacy policy"),
     ("/terms", "Terms of service"),
 ])

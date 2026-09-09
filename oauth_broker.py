@@ -351,11 +351,12 @@ class OAuthBroker:
         if path == "/":
             return self._public_page(
                 start_response,
-                "Serpone Emails",
+                "Email Scanner",
                 """
-                <p class="lede">A student-built inbox assistant for one
+                <p class="lede">An inbox assistant built by a college junior
+                for one
                 connected Google account.</p>
-                <p>Serpone Emails organizes Gmail with labels and creates
+                <p>Email Scanner organizes Gmail with labels and creates
                 reply drafts for review. It never sends email automatically.</p>
                 <p><a href="/privacy">Privacy policy</a>
                 <span aria-hidden="true">&middot;</span>
@@ -369,7 +370,7 @@ class OAuthBroker:
                 """
                 <p class="updated">Last updated September 9, 2026</p>
                 <h2>What the app accesses</h2>
-                <p>After you give permission, Serpone Emails accesses the
+                <p>After you give permission, Email Scanner accesses the
                 Gmail messages needed to apply labels and create reply
                 drafts. It also uses the Google account email address to
                 identify the one connected account.</p>
@@ -408,9 +409,9 @@ class OAuthBroker:
                 "Terms of service",
                 """
                 <p class="updated">Last updated September 9, 2026</p>
-                <p>Serpone Emails is a student-built inbox assistant. Use it
-                only with a Google account you own or are authorized to
-                manage.</p>
+                <p>Email Scanner is an inbox assistant built by a college
+                junior. Use it only with a Google account you own or are
+                authorized to manage.</p>
                 <p>The app applies labels and creates draft replies; it does
                 not send messages automatically. You are responsible for
                 reviewing every draft and for changes made in your mailbox.</p>
@@ -598,7 +599,7 @@ class OAuthBroker:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{safe_title} | Serpone Emails</title>
+  <title>{safe_title} | Email Scanner</title>
   <style>
     :root {{ color-scheme: light; font-family: ui-sans-serif, system-ui,
       -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
