@@ -134,6 +134,20 @@ def test_credentials_merge_refresh_token_with_separate_client(tmp_path):
     assert credentials.client_secret == "client-secret"
 
 
+def test_hosted_credentials_accept_a_public_web_oauth_client(tmp_path):
+    client = tmp_path / "credentials.json"
+    client.write_text(json.dumps({"web": {
+        "client_id": "web-client-id",
+        "client_secret": "web-client-secret",
+        "token_uri": "https://oauth2.example.test/token",
+    }}), encoding="utf-8")
+    credentials = runner.hosted_credentials(
+        {"refresh_token": "refresh-value"}, client
+    )
+    assert credentials.client_id == "web-client-id"
+    assert credentials.client_secret == "web-client-secret"
+
+
 def test_due_runner_injects_gmail_service_and_all_safety_limits(
         tmp_path, monkeypatch):
     root, _client, env = _environment(tmp_path, monkeypatch)
@@ -202,6 +216,9 @@ def test_run_now_bypasses_schedule_and_completes_the_selected_batch(
 
     marker_service = _ProfileService()
     service_builder = _stub_connected_service(monkeypatch, marker_service)
+    monkeypatch.setattr(
+        runner, "gmail_execute", lambda _request: {"emailAddress": A}
+    )
     calls = []
     monkeypatch.setattr(
         runner.daily_triage, "main",
@@ -239,21 +256,70 @@ def test_history_request_overrides_batch_and_uses_all_history_query(
 
     marker_service = _ProfileService()
     service_builder = _stub_connected_service(monkeypatch, marker_service)
-    calls = []
     monkeypatch.setattr(
-        runner.daily_triage, "main",
-        lambda argv, *, gmail_service=None: calls.append(argv) or 0,
+        runner, "gmail_execute", lambda _request: {"emailAddress": A}
+    )
+    calls = []
+    message_ids = [f"m{index}" for index in range(75)]
+    monkeypatch.setattr(
+        runner, "list_message_ids_by_query",
+        lambda service, query, throttle, *, max_scan, progress: (
+            message_ids
+            if service is marker_service and max_scan == 75 and not progress
+            else pytest.fail("wrong history listing")
+        ),
+    )
+
+    def daily_main(argv, *, gmail_service=None, message_ids_override=None):
+        calls.append((argv, gmail_service, list(message_ids_override or [])))
+        return 0
+
+    monkeypatch.setattr(
+        runner.daily_triage, "main", daily_main,
     )
 
     assert runner.run_if_due(env, now=now, service_builder=service_builder) == 0
-    argv = calls[0]
+    assert [len(call[2]) for call in calls] == [50, 25]
+    assert [call[2] for call in calls] == [message_ids[:50], message_ids[50:]]
+    argv = calls[0][0]
     assert "--history-scan" in argv
     assert "--force" in argv
-    assert argv[argv.index("--max-scan") + 1] == "75"
-    assert argv[argv.index("--max-drafts") + 1] == "75"
+    assert argv[argv.index("--max-scan") + 1] == "50"
+    assert argv[argv.index("--max-drafts") + 1] == "50"
     assert argv[argv.index("--limit") + 1] == str(
-        75 * runner.MAX_WRITES_PER_MESSAGE
+        50 * runner.MAX_WRITES_PER_MESSAGE
     )
+    final_argv = calls[1][0]
+    assert final_argv[final_argv.index("--max-scan") + 1] == "25"
+
+
+def test_history_preflight_checks_gmail_identity_before_listing(
+        tmp_path, monkeypatch):
+    root, _client, env = _environment(tmp_path, monkeypatch)
+    seat = connection.connect(root, A, timezone="UTC", run_at="18:00")
+    for name in (runner.CONFIG_FILE, runner.TAXONOMY_APPROVAL_FILE,
+                 runner.AI_APPROVAL_FILE):
+        (seat.directory / name).write_text("{}", encoding="utf-8")
+    now = dt.datetime(2026, 9, 8, 17, 0, tzinfo=UTC)
+    hosted_run_request.request_run(root, now=now, history_count=50)
+    service = _ProfileService()
+    service_builder = _stub_connected_service(monkeypatch, service)
+    monkeypatch.setattr(
+        runner, "gmail_execute",
+        lambda _request: {"emailAddress": "different@example.test"},
+    )
+    monkeypatch.setattr(
+        runner, "list_message_ids_by_query",
+        lambda *_a, **_k: pytest.fail("wrong Gmail account was listed"),
+    )
+
+    assert runner.run_if_due(
+        env, now=now, service_builder=service_builder
+    ) == 1
+    status = json.loads((seat.directory / runner.STATUS_FILE).read_text())
+    assert status["last_run"]["safe_error_codes"] == [
+        "history_preflight_failed"
+    ]
 
 
 def test_invalid_run_request_is_removed_before_secrets_or_gmail(

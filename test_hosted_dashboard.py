@@ -7,6 +7,7 @@ from urllib.parse import urlencode
 
 import connection
 import connection_archive
+import hosted_run_request
 from hosted_dashboard import HostedDashboardApp
 from hosted_status import HostedConfig
 
@@ -404,6 +405,37 @@ def test_history_scan_validates_count_and_queues_the_selected_batch(tmp_path):
         "/?run=requested&after=1788969600"
     )
     assert calls[0][2] == 75
+
+
+def test_repeat_run_click_reports_existing_work_without_queueing(tmp_path):
+    seat = connection.connect(tmp_path, "owner@example.test")
+    now = dt.datetime(2026, 9, 9, 16, 0, tzinfo=dt.timezone.utc)
+    (seat.directory / "daily-status.json").write_text(json.dumps({
+        "version": 1,
+        "last_run": {
+            "outcome": "running", "started_at": now.isoformat(),
+            "finished_at": None, "safe_error_codes": [], "counts": {},
+        },
+    }), encoding="utf-8")
+
+    def already_running(*_args, **_kwargs):
+        raise hosted_run_request.RunAlreadyActive("running")
+
+    app = _app(tmp_path, run_requester=already_running, clock=lambda: now)
+    response = _call(
+        app, "/run-history", "POST",
+        urlencode({"csrf": app._csrf_value(), "message_count": "50"}),
+        _login(app),
+    )
+    assert response["headers"]["Location"] == (
+        f"/?run=already-running&after={int(now.timestamp())}"
+    )
+    notice = _call(
+        app, cookie=_login(app),
+        query=f"run=already-running&after={int(now.timestamp())}",
+    )
+    assert "already running" in notice["body"]
+    assert "No duplicate scan was queued" in notice["body"]
 
 
 def test_run_page_auto_refreshes_while_working_then_reports_completion(tmp_path):

@@ -20,6 +20,7 @@ from daily_triage import (
     execute_daily_plan,
     list_existing_draft_threads,
     reconcile_existing_drafts,
+    validate_message_id_override,
 )
 import daily_triage
 from gmail_common import QuotaThrottle, list_message_ids_by_query
@@ -91,6 +92,14 @@ def test_history_query_has_no_age_cutoff_but_keeps_mailbox_exclusions():
     assert "in:inbox" not in query
     for clause in ("-in:spam", "-in:trash", "-in:sent", "-in:drafts"):
         assert clause in query
+
+
+def test_private_message_id_override_is_strict_and_bounded():
+    assert validate_message_id_override(["m1", "m2"], 2) == ["m1", "m2"]
+    for values, limit in ((["m1", "m2"], 1), (["m1", "m1"], 2),
+                          (["bad id"], 1), ("m1", 1)):
+        with pytest.raises(ValueError):
+            validate_message_id_override(values, limit)
 
 
 def test_only_actual_recruit_gets_the_year_label():
@@ -295,6 +304,30 @@ def test_existing_thread_draft_is_not_adopted_or_created(tmp_path):
     assert service.create_calls == []
     assert log.ids == [], "a pre-existing/manual draft must never enter rollback log"
     assert state.record_for("m1") == {}, "manual draft must not become program-owned"
+
+
+def test_messages_in_one_conversation_share_the_new_run_owned_draft(tmp_path):
+    service = _ExecutionGmail()
+    state = DailyState(tmp_path / "state.json")
+    log = _Log()
+    draft_threads = {}
+    created_threads = set()
+    first = _execution_plan()
+    second = _execution_plan()
+    second["email"] = _email(message_id="m2", thread_id="t1")
+
+    for plan in (first, second):
+        _added, draft_id, errors = execute_daily_plan(
+            service, plan, ACCOUNT_LABELS, QuotaThrottle(100_000), log,
+            state, draft_threads, created_threads,
+        )
+        assert errors == []
+        assert draft_id == "draft-1"
+
+    assert len(service.create_calls) == 1
+    assert log.ids == ["draft-1"]
+    assert state.record_for("m1")["status"] == "complete"
+    assert state.record_for("m2")["status"] == "complete"
 
 
 def test_manual_draft_reconciliation_marks_needs_review_without_rollback_owner(tmp_path):

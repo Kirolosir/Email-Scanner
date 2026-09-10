@@ -1,0 +1,7 @@
+# Public HTTPS terminates here; the Gmail dashboard itself stays on loopback.
+# The current VM address is embedded in the hostname by nip.io DNS. Update it
+# here and in Google's OAuth client if the VM is ever assigned a new address.
+email-scanner.136-116-196-15.nip.io {
+    header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    reverse_proxy 127.0.0.1:8081
+}

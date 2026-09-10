@@ -111,6 +111,17 @@ def test_oauth_state_is_single_use_and_expires(tmp_path, monkeypatch):
         control.complete_connect("state=state-value&code=late")
 
 
+def test_pending_oauth_states_are_bounded_for_a_public_login_page(
+        tmp_path, monkeypatch):
+    control, _root, _calls = _control(tmp_path, monkeypatch)
+    control._states = {
+        f"state-{index}": {"verifier": "v", "expires": 200.0}
+        for index in range(control_module.MAX_PENDING_OAUTH_STATES)
+    }
+    with pytest.raises(control_module.HostedControlError, match="too many"):
+        control.begin_connect()
+
+
 def test_different_account_cannot_replace_an_occupied_connection(
         tmp_path, monkeypatch):
     control, root, _calls = _control(

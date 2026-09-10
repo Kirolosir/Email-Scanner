@@ -950,9 +950,11 @@ one private, account-bound request under `/mnt/state/active`.
 oneshot service used by the daily timer. The runner consumes the request before
 mailbox access, refuses altered or hour-old requests, and bypasses the
 schedule/same-day gate. New-mail scans use the recent overlap window; an
-explicit history scan accepts 1–250 and searches the newest eligible messages
-without an age cutoff. The selected batch size automatically reserves enough
-label writes and drafts to finish every eligible message in that batch.
+explicit history scan accepts 1–5,000 and searches the newest eligible
+messages without an age cutoff. Large selections are applied in groups of 50,
+persisting the idempotency journal between groups. The selected group size
+automatically reserves enough label writes and drafts to finish every eligible
+message in that group.
 Reviewed settings, account identity checks, spam and unsafe-reply exclusions,
 and per-message duplicate prevention still apply.
 
@@ -991,8 +993,8 @@ matters here instead: `RequiresMountsFor`, and a sandbox in which
 only writable path — so a compromise of the service cannot rewrite the
 service.
 
-**There is no public listener.** The unit binds gunicorn to `127.0.0.1`;
-reach it over an SSH tunnel:
+**Gunicorn has no public listener.** It remains bound to `127.0.0.1`. For a
+private operator-only deployment, reach it over an SSH tunnel:
 
 ```
 gcloud compute ssh <VM> -- -N \
@@ -1003,6 +1005,14 @@ gcloud compute ssh <VM> -- -N \
 The bearer and forwarded-https checks remain in the code regardless. The
 binding is a deployment choice the module cannot verify, and defence that only
 holds while a config file says so is not defence.
+
+For a shareable deployment, `Caddyfile.example` terminates public HTTPS and
+proxies only the human dashboard on loopback port 8081. The read-only status
+service on port 8080 stays private. Set `HOSTED_REQUIRE_FORWARDED_HTTPS=true`,
+register the exact HTTPS callback on a Google **Web application** OAuth client,
+and store that client outside the checkout. Google identity, OAuth state/PKCE,
+the single-account occupancy rule, CSRF protection, and the never-send boundary
+still apply to every public request.
 
 Installation or recovery order:
 

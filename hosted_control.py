@@ -30,6 +30,7 @@ from gmail_retry import gmail_execute
 
 
 OAUTH_TTL_SECONDS = 600
+MAX_PENDING_OAUTH_STATES = 256
 GOOGLE_REVOCATION_ENDPOINT = "https://oauth2.googleapis.com/revoke"
 logger = logging.getLogger(__name__)
 
@@ -140,6 +141,11 @@ class HostedControl:
             )
         with self._state_lock:
             self._prune_states()
+            if len(self._states) >= MAX_PENDING_OAUTH_STATES:
+                raise HostedControlError(
+                    "too many Google sign-ins are already pending",
+                    code="start_failed",
+                )
             self._states[state] = {
                 "verifier": flow.code_verifier,
                 "expires": self._clock() + OAUTH_TTL_SECONDS,

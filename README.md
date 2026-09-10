@@ -29,8 +29,9 @@ and draft caps and can produce a private, content-free review report.
 The hosted dashboard turns those internal caps into one message batch size and
 reserves enough writes and drafts to finish every eligible message in the
 batch. **Scan new mail** checks the recent overlap window. **Scan previous
-emails** accepts a number from 1 to 250 and checks that many of the newest
-eligible messages without an age cutoff. Existing completed work is never
+emails** accepts a number from 1 to 5,000 and checks that many of the newest
+eligible messages without an age cutoff. Large history jobs are applied in
+restart-safe groups of 50, so completed work is saved continuously and never
 duplicated.
 
 Triage assigns messages to categories configured for that account, then adds

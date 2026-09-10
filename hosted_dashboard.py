@@ -26,7 +26,7 @@ from hosted_status import HostedConfig, status_document
 SESSION_COOKIE = "email_scanner_session"
 MAX_FORM_BYTES = 8192
 RUN_REFRESH_SECONDS = 4
-MAX_RUN_FEEDBACK_AGE = dt.timedelta(hours=2)
+MAX_RUN_FEEDBACK_AGE = dt.timedelta(days=2)
 COUNT_KEYS = (
     "scanned", "classified", "labeled", "drafted", "needs_review",
     "skipped", "failures", "deferred_draft_limit",
@@ -144,6 +144,12 @@ def _run_feedback(occupant, now, run_state="", requested_epoch=None):
             '<p class="notice bad">Choose a whole number from 1 to '
             f'{hosted_run_request.MAX_HISTORY_MESSAGES} for the history scan.'
             '</p>', False,
+        )
+    if run_state == "already-running":
+        return (
+            '<p class="notice progress"><strong>A mailbox scan is already '
+            'running.</strong> No duplicate scan was queued. This page will '
+            'keep updating.</p>', True,
         )
     if run_state == "not-ready":
         return (
@@ -452,6 +458,23 @@ class HostedDashboardApp:
                     requested_epoch = self.run_requester(
                         self.config.state_root, now=self.clock()
                     )
+            except hosted_run_request.RunAlreadyActive:
+                try:
+                    active_occupant = connection.current(self.config.state_root)
+                    active_details = (
+                        _safe_run_details(active_occupant.directory)
+                        if active_occupant is not None else {}
+                    )
+                    active_started = _timestamp(active_details.get("started_at"))
+                except connection.ConnectionConfigError:
+                    active_started = None
+                active_epoch = int(
+                    (active_started or self.clock()).timestamp()
+                )
+                return self._redirect(
+                    start_response,
+                    f"/?run=already-running&after={active_epoch}",
+                )
             except (ValueError, hosted_run_request.RunRequestError):
                 if path == "/run-history":
                     return self._redirect(start_response, "/?run=invalid-count")
@@ -794,7 +817,7 @@ class HostedDashboardApp:
               Each one gets a label, and every safe reply address gets one
               unsent draft. Already-completed messages are not duplicated.
               Larger batches take longer because every reply is written
-              individually.</p></div>
+              individually; 5,000 messages can run for many hours.</p></div>
             <form method="post" action="/run-history">
               <input type="hidden" name="csrf" value="{self._csrf_value()}">
               <label for="message_count">Previous messages</label>
@@ -964,7 +987,7 @@ class HostedDashboardApp:
                     city-based timezone name or UTC.</p></div>
                   <div><label for="max_scan">Messages scanned</label><input
                     id="max_scan" name="max_scan" type="number" min="1"
-                    max="{hosted_run_request.MAX_HISTORY_MESSAGES}"
+                    max="{hosted_settings.MAX_MESSAGES_PER_RUN}"
                     value="{fields['max_scan']}" required>
                     <p class="field-note">Every eligible message in this
                     batch receives a label and an unsent draft.</p></div>

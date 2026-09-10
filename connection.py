@@ -75,8 +75,12 @@ class ConnectionConfigError(ValueError):
     pass
 
 
+class ConnectionBusy(ConnectionError):
+    """Another lifecycle operation currently owns the connection."""
+
+
 @contextmanager
-def lifecycle_lock(root):
+def lifecycle_lock(root, *, blocking=True):
     """Serialize connection, settings, disconnect, and scheduled-run changes.
 
     A directory descriptor can be flocked without creating a lock artifact,
@@ -90,7 +94,11 @@ def lifecycle_lock(root):
             f"connection state cannot be locked ({type(exc).__name__})"
         ) from exc
     try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        operation = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+        try:
+            fcntl.flock(descriptor, operation)
+        except BlockingIOError as exc:
+            raise ConnectionBusy("the connected account is currently busy") from exc
         yield
     finally:
         os.close(descriptor)

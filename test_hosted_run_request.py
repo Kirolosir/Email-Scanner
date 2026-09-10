@@ -63,16 +63,24 @@ def test_history_request_is_bounded_and_carries_only_the_count(tmp_path):
             requests.request_run(tmp_path, now=NOW, history_count=invalid)
 
 
-def test_repeat_clicks_coalesce_into_one_fresh_request(tmp_path):
+def test_repeat_click_is_refused_instead_of_queueing_a_duplicate(tmp_path):
     occupant = _ready_connection(tmp_path)
     requests.request_run(tmp_path, now=NOW)
     later = NOW + dt.timedelta(minutes=2)
-    requests.request_run(tmp_path, now=later)
+    with pytest.raises(requests.RunAlreadyActive, match="already queued"):
+        requests.request_run(tmp_path, now=later)
 
     document = json.loads(
         requests.request_path(occupant.directory).read_text(encoding="utf-8")
     )
-    assert document["requested_at"] == later.isoformat(timespec="seconds")
+    assert document["requested_at"] == NOW.isoformat(timespec="seconds")
+
+
+def test_running_lifecycle_operation_is_reported_without_waiting(tmp_path):
+    _ready_connection(tmp_path)
+    with connection.lifecycle_lock(tmp_path):
+        with pytest.raises(requests.RunAlreadyActive, match="in progress"):
+            requests.request_run(tmp_path, now=NOW)
 
 
 def test_altered_or_expired_requests_fail_closed(tmp_path):
@@ -86,6 +94,7 @@ def test_altered_or_expired_requests_fail_closed(tmp_path):
     with pytest.raises(requests.RunRequestError, match="another account"):
         requests.load_request(occupant.directory, occupant, now=NOW)
 
+    requests.discard_request(occupant.directory)
     requests.request_run(tmp_path, now=NOW)
     with pytest.raises(requests.RunRequestError, match="expired"):
         requests.load_request(

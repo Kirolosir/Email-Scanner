@@ -123,6 +123,25 @@ def build_history_query():
     return "-in:spam -in:trash -in:sent -in:drafts"
 
 
+def validate_message_id_override(values, max_scan):
+    """Validate the hosted runner's private, bounded chunk of Gmail ids."""
+    if not isinstance(values, (list, tuple)):
+        raise ValueError("message id override must be a list")
+    if max_scan is None or len(values) > max_scan:
+        raise ValueError("message id override exceeds --max-scan")
+    result = []
+    seen = set()
+    for value in values:
+        if (not isinstance(value, str) or not value or len(value) > 256
+                or any(character.isspace() for character in value)):
+            raise ValueError("message id override contains an invalid id")
+        if value in seen:
+            raise ValueError("message id override contains a duplicate id")
+        seen.add(value)
+        result.append(value)
+    return result
+
+
 class DailyState:
     """Small private journal written atomically after every draft transition."""
 
@@ -520,7 +539,7 @@ def _create_reply_draft(service, plan, throttle):
 
 
 def execute_daily_plan(service, plan, account_labels, throttle, draft_log,
-                       state, draft_threads):
+                       state, draft_threads, created_draft_threads=None):
     """Execute one plan with restart-safe draft and processed transitions."""
     email = plan["email"]
     message_id = email["message_id"]
@@ -544,6 +563,13 @@ def execute_daily_plan(service, plan, account_labels, throttle, draft_log,
         record = state.record_for(message_id)
         if record.get("status") in {"draft_created", "complete"}:
             draft_id = record.get("draft_id", "")
+        elif (thread_id in draft_threads and created_draft_threads is not None
+              and thread_id in created_draft_threads):
+            # Multiple selected messages can belong to one Gmail conversation.
+            # The newest message creates the one useful reply draft; the rest
+            # share it and are still labeled/marked complete instead of being
+            # mistaken for a manual-draft race.
+            draft_id = draft_threads[thread_id]
         elif thread_id in draft_threads:
             # A thread draft not present in our journal belongs to a person or
             # another tool. It is never adopted or placed in our rollback log.
@@ -557,6 +583,8 @@ def execute_daily_plan(service, plan, account_labels, throttle, draft_log,
                 # and cannot create a second draft for the source message.
                 state.record_draft(message_id, thread_id, draft_id)
                 draft_threads[thread_id] = draft_id
+                if created_draft_threads is not None:
+                    created_draft_threads.add(thread_id)
                 plan["new_draft_created"] = True
             except Exception as exc:
                 errors.append(f"draft failed ({type(exc).__name__})")
@@ -783,7 +811,7 @@ def _estimate_metadata(messages, account_labels, config, state, own_address,
 
 
 def _run_locked(args, classifier, config, templates, state, status,
-                gmail_service=None):
+                gmail_service=None, message_ids_override=None):
     counts = {
         "scanned": 0, "classified": 0, "labeled": 0, "drafted": 0,
         "needs_review": 0, "skipped": 0, "failures": 0,
@@ -852,11 +880,17 @@ def _run_locked(args, classifier, config, templates, state, status,
     year_labels, category_labels = build_label_index(
         account_labels, config.years, config.categories
     )
-    print(f"Gmail query: {query}")
-    message_ids = list_message_ids_by_query(
-        service, query, throttle, max_scan=args.max_scan,
-        progress=not args.scheduled,
-    )
+    if message_ids_override is None:
+        print(f"Gmail query: {query}")
+        message_ids = list_message_ids_by_query(
+            service, query, throttle, max_scan=args.max_scan,
+            progress=not args.scheduled,
+        )
+    else:
+        message_ids = validate_message_id_override(
+            message_ids_override, args.max_scan
+        )
+        print(f"Gmail selection: {len(message_ids)} privately queued messages")
     counts["scanned"] = len(message_ids)
 
     if args.estimate_only:
@@ -1052,12 +1086,13 @@ def _run_locked(args, classifier, config, templates, state, status,
         "contains program-created draft ids only; no messages were sent",
     ]
     error_codes = []
+    created_draft_threads = set()
     with DraftLog(log_path, header) as draft_log:
         for plan in plans:
             try:
                 labels, _draft_id, plan_errors = execute_daily_plan(
                     service, plan, account_labels, throttle, draft_log,
-                    state, draft_threads,
+                    state, draft_threads, created_draft_threads,
                 )
                 plan["_applied_labels"] = list(labels)
                 counts["labeled"] += len(labels)
@@ -1083,7 +1118,8 @@ def _run_locked(args, classifier, config, templates, state, status,
     return done(1 if counts["failures"] else 0, error_codes)
 
 
-def _main_with_args(args, classifier=None, gmail_service=None):
+def _main_with_args(args, classifier=None, gmail_service=None,
+                    message_ids_override=None):
     logging.basicConfig(
         level=logging.WARNING if args.scheduled else logging.INFO,
         format="%(levelname)s %(message)s",
@@ -1129,6 +1165,7 @@ def _main_with_args(args, classifier=None, gmail_service=None):
                 return _run_locked(
                     args, classifier, config, templates, state, status,
                     gmail_service=gmail_service,
+                    message_ids_override=message_ids_override,
                 )
             except Exception as exc:
                 print(f"Daily triage stopped safely ({type(exc).__name__}).")
@@ -1183,7 +1220,8 @@ def _finalize_review_report(args, reporter, code):
     return code
 
 
-def main(argv=None, classifier=None, gmail_service=None):
+def main(argv=None, classifier=None, gmail_service=None,
+         message_ids_override=None):
     args = parse_args(argv)
     reporter = None
     if args.review_report:
@@ -1204,7 +1242,8 @@ def main(argv=None, classifier=None, gmail_service=None):
             code = _main_with_args(args, classifier=classifier)
         else:
             code = _main_with_args(
-                args, classifier=classifier, gmail_service=gmail_service
+                args, classifier=classifier, gmail_service=gmail_service,
+                message_ids_override=message_ids_override,
             )
     except Exception as exc:
         print(f"Daily triage stopped safely ({type(exc).__name__}).")

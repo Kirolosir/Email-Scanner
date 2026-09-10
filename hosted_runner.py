@@ -31,7 +31,7 @@ import campaign
 import daily_triage
 from connect_account import build_provider
 from gmail_auth import SCOPES
-from gmail_common import normalize_address
+from gmail_common import QuotaThrottle, list_message_ids_by_query, normalize_address
 from gmail_labeler import fetch_account_labels
 from gmail_retry import gmail_execute
 from hosted_status import verify_durable_state_root
@@ -51,6 +51,7 @@ LOCK_DIR = "locks"
 REVIEW_DIR = "review"
 DRAFT_LOG_DIR = "draft-logs"
 PENDING_LABEL_SETUP = hosted_settings.PENDING_LABEL_SETUP
+HISTORY_CHUNK_SIZE = 50
 
 
 class HostedRunnerError(RuntimeError):
@@ -73,9 +74,15 @@ def _client_details(path):
         raise HostedRunnerError(
             f"OAuth client configuration is unavailable ({type(exc).__name__})"
         ) from exc
-    container = document.get("installed") if isinstance(document, dict) else None
-    if not isinstance(container, dict):
-        raise HostedRunnerError("OAuth client must be an installed-app client")
+    containers = [
+        document.get(key) for key in ("installed", "web")
+        if isinstance(document, dict) and isinstance(document.get(key), dict)
+    ]
+    if len(containers) != 1:
+        raise HostedRunnerError(
+            "OAuth client must contain exactly one installed or web client"
+        )
+    container = containers[0]
     required = ("client_id", "client_secret", "token_uri")
     if any(not isinstance(container.get(key), str) or not container[key]
            for key in required):
@@ -235,6 +242,32 @@ def _complete_batch_limits(message_count):
     return message_count * MAX_WRITES_PER_MESSAGE, message_count
 
 
+def _history_review_path(directory, now, offset):
+    ensure_private_directory(directory)
+    stamp = int(now.astimezone(dt.timezone.utc).timestamp())
+    return directory / f"history-{stamp}-{offset:05d}.json"
+
+
+def _latest_counts(status_path):
+    try:
+        with Path(status_path).open(encoding="utf-8") as handle:
+            document = json.load(handle)
+        counts = (document.get("last_run") or {}).get("counts") or {}
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return {}
+    return {
+        key: value for key, value in counts.items()
+        if key in RunStatus.COUNT_KEYS
+        and isinstance(value, int) and not isinstance(value, bool) and value >= 0
+    }
+
+
+def _add_counts(total, addition):
+    for key in RunStatus.COUNT_KEYS:
+        total[key] = int(total.get(key, 0)) + int(addition.get(key, 0))
+    return total
+
+
 def run_if_due(env=None, *, now=None, service_builder=build,
                credential_refresher=None):
     env = env if env is not None else os.environ
@@ -321,36 +354,34 @@ def run_if_due(env=None, *, now=None, service_builder=build,
                 print("Reviewed Gmail labels are ready; no daily run was due.")
                 return 0
 
-        review_path = _review_path(active / REVIEW_DIR, now)
         history_count = (
             run_request.get("message_count")
             if run_request and run_request.get("scope") == "history"
             else None
         )
-        scan_limit = history_count or occupant.max_scan
-        write_limit, draft_limit = _complete_batch_limits(scan_limit)
-        # A batch size is the single owner-facing limit. The runner reserves
-        # enough operations for every scanned candidate to receive its labels
-        # and, when the return path is safe, one unsent draft.
-        argv = [
-            "daily",
-            "--account-config", str(active / CONFIG_FILE),
-            "--taxonomy-confirmation", str(active / TAXONOMY_APPROVAL_FILE),
-            "--ai-drafting-approval", str(active / AI_APPROVAL_FILE),
-            "--templates", str(active / "templates"),
-            "--state-path", str(active / STATE_FILE),
-            "--status-path", str(status_path),
-            "--lock-dir", str(active / LOCK_DIR),
-            "--review-report", str(review_path),
-            "--max-scan", str(scan_limit),
-            "--limit", str(write_limit),
-            "--max-drafts", str(draft_limit),
-            "--scheduled", "--apply", "--yes",
-        ]
-        if history_count is not None:
-            argv.append("--history-scan")
-        if force_requested:
-            argv.append("--force")
+
+        def _argv(scan_limit, review_path, *, history=False):
+            write_limit, draft_limit = _complete_batch_limits(scan_limit)
+            values = [
+                "daily",
+                "--account-config", str(active / CONFIG_FILE),
+                "--taxonomy-confirmation", str(active / TAXONOMY_APPROVAL_FILE),
+                "--ai-drafting-approval", str(active / AI_APPROVAL_FILE),
+                "--templates", str(active / "templates"),
+                "--state-path", str(active / STATE_FILE),
+                "--status-path", str(status_path),
+                "--lock-dir", str(active / LOCK_DIR),
+                "--review-report", str(review_path),
+                "--max-scan", str(scan_limit),
+                "--limit", str(write_limit),
+                "--max-drafts", str(draft_limit),
+                "--scheduled", "--apply", "--yes",
+            ]
+            if history:
+                values.append("--history-scan")
+            if force_requested:
+                values.append("--force")
+            return values
 
         # DraftLog uses the profile's configured path. Keep hosted artifacts on
         # the durable active volume even if a restored profile names an old local
@@ -358,7 +389,71 @@ def run_if_due(env=None, *, now=None, service_builder=build,
         old_log_dir = campaign.DRAFT_LOG_DIR
         campaign.DRAFT_LOG_DIR = str(active / DRAFT_LOG_DIR)
         try:
-            return daily_triage.main(argv, gmail_service=gmail_service)
+            if history_count is None:
+                argv = _argv(
+                    occupant.max_scan,
+                    _review_path(active / REVIEW_DIR, now),
+                )
+                return daily_triage.main(argv, gmail_service=gmail_service)
+
+            overall_status = RunStatus(status_path)
+            overall_status.start("daily:history-batch")
+            try:
+                actual_account = normalize_address(
+                    gmail_execute(
+                        gmail_service.users().getProfile(userId="me")
+                    ).get("emailAddress", "")
+                )
+                if not connection.same_account(actual_account, occupant.account):
+                    raise HostedRunnerError(
+                        "authenticated Gmail account does not match the connection"
+                    )
+                message_ids = list_message_ids_by_query(
+                    gmail_service, daily_triage.build_history_query(),
+                    QuotaThrottle(), max_scan=history_count, progress=False,
+                )
+            except Exception as exc:  # noqa: BLE001 - status stays PII-free
+                overall_status.finish(
+                    False, {"failures": 1}, ["history_preflight_failed"]
+                )
+                print(f"History scan stopped safely ({type(exc).__name__}).")
+                return 1
+
+            aggregate = {key: 0 for key in RunStatus.COUNT_KEYS}
+            if not message_ids:
+                overall_status.finish(True, aggregate)
+                print("No eligible historical messages were found.")
+                return 0
+
+            for offset in range(0, len(message_ids), HISTORY_CHUNK_SIZE):
+                chunk = message_ids[offset:offset + HISTORY_CHUNK_SIZE]
+                argv = _argv(
+                    len(chunk),
+                    _history_review_path(active / REVIEW_DIR, now, offset),
+                    history=True,
+                )
+                code = daily_triage.main(
+                    argv, gmail_service=gmail_service,
+                    message_ids_override=chunk,
+                )
+                _add_counts(aggregate, _latest_counts(status_path))
+                if code != 0:
+                    status = RunStatus(status_path)
+                    status.finish(
+                        False, aggregate, ["history_chunk_failed"]
+                    )
+                    print(
+                        f"History scan paused after {offset + len(chunk)} "
+                        "selected messages; completed work was saved."
+                    )
+                    return code
+                status = RunStatus(status_path)
+                status.finish(True, aggregate)
+                print(
+                    f"History progress: {offset + len(chunk)} of "
+                    f"{len(message_ids)} selected messages checked."
+                )
+            return 0
         finally:
             campaign.DRAFT_LOG_DIR = old_log_dir
             credentials = None

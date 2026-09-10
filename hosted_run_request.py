@@ -21,7 +21,7 @@ REQUEST_FILE = "run-now-request.json"
 REQUEST_VERSION = 2
 MAX_REQUEST_AGE = dt.timedelta(hours=1)
 MAX_CLOCK_SKEW = dt.timedelta(minutes=5)
-MAX_HISTORY_MESSAGES = 250
+MAX_HISTORY_MESSAGES = 5000
 REQUIRED_SETUP_FILES = (
     "account.json",
     "taxonomy-confirmation.json",
@@ -31,6 +31,10 @@ REQUIRED_SETUP_FILES = (
 
 class RunRequestError(RuntimeError):
     """A safe, message-free reason an immediate run could not be requested."""
+
+
+class RunAlreadyActive(RunRequestError):
+    """A queued or running mailbox job already owns the single connection."""
 
 
 def _utc_now(value=None):
@@ -65,23 +69,28 @@ def request_run(root, *, now=None, history_count=None):
     root = Path(root)
     requested_at = _utc_now(now)
     history_count = _history_count(history_count)
-    with connection.lifecycle_lock(root):
-        occupant = connection.current(root)
-        if occupant is None:
-            raise RunRequestError("link a Google account before running")
-        if not occupant.enabled:
-            raise RunRequestError("the connected account is not enabled")
-        active = Path(occupant.directory)
-        if any(not (active / name).is_file() for name in REQUIRED_SETUP_FILES):
-            raise RunRequestError("save labels and schedule before running")
-        atomic_write_json(request_path(active), {
-            "version": REQUEST_VERSION,
-            "account_hash": _account_hash(occupant.account),
-            "requested_at": requested_at.isoformat(timespec="seconds"),
-            "scope": "history" if history_count is not None else "recent",
-            "message_count": history_count,
-        })
-        return int(requested_at.timestamp())
+    try:
+        with connection.lifecycle_lock(root, blocking=False):
+            occupant = connection.current(root)
+            if occupant is None:
+                raise RunRequestError("link a Google account before running")
+            if not occupant.enabled:
+                raise RunRequestError("the connected account is not enabled")
+            active = Path(occupant.directory)
+            if request_path(active).is_file():
+                raise RunAlreadyActive("a mailbox run is already queued")
+            if any(not (active / name).is_file() for name in REQUIRED_SETUP_FILES):
+                raise RunRequestError("save labels and schedule before running")
+            atomic_write_json(request_path(active), {
+                "version": REQUEST_VERSION,
+                "account_hash": _account_hash(occupant.account),
+                "requested_at": requested_at.isoformat(timespec="seconds"),
+                "scope": "history" if history_count is not None else "recent",
+                "message_count": history_count,
+            })
+            return int(requested_at.timestamp())
+    except connection.ConnectionBusy as exc:
+        raise RunAlreadyActive("a mailbox run is already in progress") from exc
 
 
 def load_request(active, occupant, *, now=None):
