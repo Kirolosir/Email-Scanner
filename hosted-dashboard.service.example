@@ -15,6 +15,7 @@ ExecStart=/opt/email-scanner/.venv/bin/gunicorn hosted_dashboard_wsgi:applicatio
     --workers 1 --threads 8 \
     --bind 127.0.0.1:8081 \
     --timeout 60 \
+    --no-control-socket \
     --access-logfile /dev/null --error-logfile -
 
 ProtectSystem=strict

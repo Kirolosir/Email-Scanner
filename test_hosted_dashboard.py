@@ -2,6 +2,7 @@ import ast
 import datetime as dt
 import io
 import json
+from pathlib import Path
 from urllib.parse import urlencode
 
 import connection
@@ -344,6 +345,11 @@ def test_dashboard_has_google_link_and_immediate_run_controls(tmp_path):
     assert 'action="/run-now"' in connected["body"]
     assert 'action="/run-history"' in connected["body"]
     assert "Scan previous emails" in connected["body"]
+
+
+def test_hardened_dashboard_disables_the_optional_gunicorn_control_socket():
+    unit = Path("hosted-dashboard.service.example").read_text(encoding="utf-8")
+    assert "--no-control-socket" in unit
 
 
 def test_run_now_is_csrf_protected_and_queues_one_request(tmp_path):
