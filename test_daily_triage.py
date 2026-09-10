@@ -14,6 +14,7 @@ from daily_triage import (
     add_daily_review_policy,
     already_processed_for_draft_policy,
     build_daily_query,
+    build_history_query,
     build_initial_query,
     candidate_read_limit,
     execute_daily_plan,
@@ -79,6 +80,14 @@ def test_queries_include_archived_received_mail_and_exclude_unsafe_mailboxes(
 ):
     query = builder(value)
     assert fragment in query
+    assert "in:inbox" not in query
+    for clause in ("-in:spam", "-in:trash", "-in:sent", "-in:drafts"):
+        assert clause in query
+
+
+def test_history_query_has_no_age_cutoff_but_keeps_mailbox_exclusions():
+    query = build_history_query()
+    assert "newer_than:" not in query
     assert "in:inbox" not in query
     for clause in ("-in:spam", "-in:trash", "-in:sent", "-in:drafts"):
         assert clause in query

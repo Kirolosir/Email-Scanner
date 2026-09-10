@@ -943,15 +943,18 @@ Google revocation, then destroys the local encrypted credential even when
 revocation cannot be confirmed. Gunicorn access logging is disabled for this
 service so callback authorization codes never enter the system journal.
 
-The dashboard's **Run now** action does not import Gmail code, decrypt a token,
-or launch a privileged command. It writes one private, account-bound request
-under `/mnt/state/active`. `hosted-triage.path` notices that exact file and
-starts the same sandboxed oneshot service used by the daily timer. The runner
-consumes the request before mailbox access, refuses altered or hour-old
-requests, and bypasses the schedule/same-day gate while using the bounded
-two-month catch-up query. Reviewed settings, account identity checks, spam and
-unsafe-reply exclusions, per-message journaling, and all scan/write/draft
-limits still apply.
+The dashboard's **Scan new mail** and **Scan previous emails** actions do not
+import Gmail code, decrypt a token, or launch a privileged command. They write
+one private, account-bound request under `/mnt/state/active`.
+`hosted-triage.path` notices that exact file and starts the same sandboxed
+oneshot service used by the daily timer. The runner consumes the request before
+mailbox access, refuses altered or hour-old requests, and bypasses the
+schedule/same-day gate. New-mail scans use the recent overlap window; an
+explicit history scan accepts 1–250 and searches the newest eligible messages
+without an age cutoff. The selected batch size automatically reserves enough
+label writes and drafts to finish every eligible message in that batch.
+Reviewed settings, account identity checks, spam and unsafe-reply exclusions,
+and per-message duplicate prevention still apply.
 
 While an immediate run is starting or working, the dashboard refreshes its own
 status briefly and reports completion or a safe failure reason. The runner
@@ -1015,8 +1018,9 @@ Installation or recovery order:
 4. Confirm `/healthz` answers through the tunnel, the status endpoint refuses
    without a bearer, and **Continue with Google** opens the OAuth flow.
 5. Complete Google consent, save the reviewed labels and schedule, then use
-   **Run now** for an immediate bounded run when needed. The dashboard follows
-   the run automatically and explains if Google must be reconnected.
+   **Scan new mail** for recent messages or **Scan previous emails** for a
+   bounded catch-up. The dashboard follows the run automatically and explains
+   if Google must be reconnected.
    The command-line broker flow below
    remains a recovery option:
 

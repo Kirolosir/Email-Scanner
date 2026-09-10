@@ -113,6 +113,16 @@ def build_daily_query(overlap_days=3):
     )
 
 
+def build_history_query():
+    """Return the newest eligible mailbox messages with no age cutoff.
+
+    The caller must still provide a bounded ``--max-scan``. This is reserved
+    for the dashboard's explicit "previous X" action; unattended runs keep
+    their short overlap window.
+    """
+    return "-in:spam -in:trash -in:sent -in:drafts"
+
+
 class DailyState:
     """Small private journal written atomically after every draft transition."""
 
@@ -632,6 +642,13 @@ def parse_args(argv=None):
             "scheduling and idempotency"
         ),
     )
+    parser.add_argument(
+        "--history-scan", action="store_true",
+        help=(
+            "scan the newest eligible messages without an age cutoff; must "
+            "be paired with an explicit --max-scan"
+        ),
+    )
     parser.add_argument("--max-scan", type=int)
     parser.add_argument("--limit", type=int)
     parser.add_argument(
@@ -692,6 +709,10 @@ def parse_args(argv=None):
         parser.error(str(exc))
     if args.notify_on_failure and not args.scheduled:
         parser.error("--notify-on-failure requires --scheduled")
+    if args.history_scan and args.draft_catch_up:
+        parser.error("--history-scan and --draft-catch-up cannot be combined")
+    if args.history_scan and args.max_scan is None:
+        parser.error("--history-scan requires --max-scan")
     if args.yes and not args.apply:
         parser.error("--yes is meaningful only with --apply")
     if args.scheduled and args.apply and not args.yes:
@@ -787,11 +808,12 @@ def _run_locked(args, classifier, config, templates, state, status,
         print(f"Daily triage already completed for {today}; nothing contacted or changed.")
         return done(0)
 
-    query = (
-        build_initial_query(args.lookback_months)
-        if args.mode == "initial" or args.draft_catch_up
-        else build_daily_query(args.overlap_days)
-    )
+    if args.history_scan:
+        query = build_history_query()
+    elif args.mode == "initial" or args.draft_catch_up:
+        query = build_initial_query(args.lookback_months)
+    else:
+        query = build_daily_query(args.overlap_days)
     # Hosted runs decrypt their credential in memory and inject an already
     # authorized service. Local/CLI runs keep the existing token-file path.
     service = (

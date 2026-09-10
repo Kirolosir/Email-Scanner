@@ -335,13 +335,15 @@ def test_dashboard_has_google_link_and_immediate_run_controls(tmp_path):
     app = _app(tmp_path, control=object())
     vacant = _call(app, cookie=_login(app))
     assert "Link Google account" in vacant["body"]
-    assert "Run now" in vacant["body"]
+    assert "Scan new mail" in vacant["body"]
     assert 'title="Link Google first"' in vacant["body"]
 
     connection.connect(tmp_path, "owner@example.test")
     connected = _call(app, cookie=_login(app))
     assert 'method="post" action="/connect"' in connected["body"]
     assert 'action="/run-now"' in connected["body"]
+    assert 'action="/run-history"' in connected["body"]
+    assert "Scan previous emails" in connected["body"]
 
 
 def test_run_now_is_csrf_protected_and_queues_one_request(tmp_path):
@@ -367,6 +369,35 @@ def test_run_now_is_csrf_protected_and_queues_one_request(tmp_path):
         "/?run=requested&after=1788969600"
     )
     assert len(calls) == 1 and calls[0][0] == tmp_path
+
+
+def test_history_scan_validates_count_and_queues_the_selected_batch(tmp_path):
+    connection.connect(tmp_path, "owner@example.test")
+    calls = []
+
+    def request_run(root, *, now, history_count=None):
+        calls.append((root, now, history_count))
+        return 1788969600
+
+    app = _app(tmp_path, run_requester=request_run)
+    cookie = _login(app)
+    invalid = _call(
+        app, "/run-history", "POST",
+        urlencode({"csrf": app._csrf_value(), "message_count": "many"}),
+        cookie,
+    )
+    assert invalid["headers"]["Location"] == "/?run=invalid-count"
+    assert calls == []
+
+    response = _call(
+        app, "/run-history", "POST",
+        urlencode({"csrf": app._csrf_value(), "message_count": "75"}),
+        cookie,
+    )
+    assert response["headers"]["Location"] == (
+        "/?run=requested&after=1788969600"
+    )
+    assert calls[0][2] == 75
 
 
 def test_run_page_auto_refreshes_while_working_then_reports_completion(tmp_path):

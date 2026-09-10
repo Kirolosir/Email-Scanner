@@ -182,12 +182,15 @@ def test_due_runner_injects_gmail_service_and_all_safety_limits(
         "--max-scan", "--limit", "--max-drafts",
     ))
     assert argv[argv.index("--max-scan") + 1] == str(seat.max_scan)
-    assert argv[argv.index("--limit") + 1] == str(seat.limit)
-    assert argv[argv.index("--max-drafts") + 1] == str(seat.max_drafts)
+    assert argv[argv.index("--limit") + 1] == str(
+        seat.max_scan * runner.MAX_WRITES_PER_MESSAGE
+    )
+    assert argv[argv.index("--max-drafts") + 1] == str(seat.max_scan)
+    assert "--history-scan" not in argv
     assert "--force" not in argv
 
 
-def test_run_now_bypasses_schedule_but_keeps_the_runner_limits(
+def test_run_now_bypasses_schedule_and_completes_the_selected_batch(
         tmp_path, monkeypatch):
     root, _client, env = _environment(tmp_path, monkeypatch)
     seat = connection.connect(root, A, timezone="UTC", run_at="18:00")
@@ -213,12 +216,44 @@ def test_run_now_bypasses_schedule_but_keeps_the_runner_limits(
     assert len(calls) == 1 and calls[0][1] is marker_service
     argv = calls[0][0]
     assert argv[0] == "daily"
-    assert "--draft-catch-up" in argv
+    assert "--draft-catch-up" not in argv
+    assert "--history-scan" not in argv
     assert "--force" in argv
     assert argv[argv.index("--max-scan") + 1] == str(seat.max_scan)
-    assert argv[argv.index("--limit") + 1] == str(seat.limit)
-    assert argv[argv.index("--max-drafts") + 1] == str(seat.max_drafts)
+    assert argv[argv.index("--limit") + 1] == str(
+        seat.max_scan * runner.MAX_WRITES_PER_MESSAGE
+    )
+    assert argv[argv.index("--max-drafts") + 1] == str(seat.max_scan)
     assert not hosted_run_request.request_path(seat.directory).exists()
+
+
+def test_history_request_overrides_batch_and_uses_all_history_query(
+        tmp_path, monkeypatch):
+    root, _client, env = _environment(tmp_path, monkeypatch)
+    seat = connection.connect(root, A, timezone="UTC", run_at="18:00")
+    for name in (runner.CONFIG_FILE, runner.TAXONOMY_APPROVAL_FILE,
+                 runner.AI_APPROVAL_FILE):
+        (seat.directory / name).write_text("{}", encoding="utf-8")
+    now = dt.datetime(2026, 9, 8, 17, 0, tzinfo=UTC)
+    hosted_run_request.request_run(root, now=now, history_count=75)
+
+    marker_service = _ProfileService()
+    service_builder = _stub_connected_service(monkeypatch, marker_service)
+    calls = []
+    monkeypatch.setattr(
+        runner.daily_triage, "main",
+        lambda argv, *, gmail_service=None: calls.append(argv) or 0,
+    )
+
+    assert runner.run_if_due(env, now=now, service_builder=service_builder) == 0
+    argv = calls[0]
+    assert "--history-scan" in argv
+    assert "--force" in argv
+    assert argv[argv.index("--max-scan") + 1] == "75"
+    assert argv[argv.index("--max-drafts") + 1] == "75"
+    assert argv[argv.index("--limit") + 1] == str(
+        75 * runner.MAX_WRITES_PER_MESSAGE
+    )
 
 
 def test_invalid_run_request_is_removed_before_secrets_or_gmail(

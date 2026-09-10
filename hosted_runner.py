@@ -222,6 +222,19 @@ def _review_path(directory, now):
     return directory / f"daily-{stamp}.json"
 
 
+# A plan can add one category, one evidence label, Needs Review, Processed,
+# and one draft. Reserving this upper bound lets a hosted batch finish every
+# candidate it reads instead of deferring most of it behind separate caps.
+MAX_WRITES_PER_MESSAGE = hosted_settings.MAX_WRITES_PER_MESSAGE
+
+
+def _complete_batch_limits(message_count):
+    message_count = int(message_count)
+    if message_count <= 0:
+        raise HostedRunnerError("the hosted batch size must be positive")
+    return message_count * MAX_WRITES_PER_MESSAGE, message_count
+
+
 def run_if_due(env=None, *, now=None, service_builder=build,
                credential_refresher=None):
     env = env if env is not None else os.environ
@@ -242,7 +255,7 @@ def run_if_due(env=None, *, now=None, service_builder=build,
         active = Path(occupant.directory)
         status_path = active / STATUS_FILE
         try:
-            force_requested = hosted_run_request.consume_request(
+            run_request = hosted_run_request.consume_request(
                 active, occupant, now=now
             )
         except hosted_run_request.RunRequestError as exc:
@@ -254,6 +267,7 @@ def run_if_due(env=None, *, now=None, service_builder=build,
             print(f"Immediate run stopped safely ({type(exc).__name__}).")
             return 2
 
+        force_requested = run_request is not None
         if force_requested and not occupant.enabled:
             _record_blocked(status_path, "account_disabled")
             print("The connected account is disabled; no Gmail contact occurred.")
@@ -308,10 +322,16 @@ def run_if_due(env=None, *, now=None, service_builder=build,
                 return 0
 
         review_path = _review_path(active / REVIEW_DIR, now)
-        # Hosted runs include a bounded historical catch-up while retaining
-        # daily mode's same-day completion journal. Run now adds --force, so
-        # another owner-requested batch can begin without weakening any other
-        # limit.
+        history_count = (
+            run_request.get("message_count")
+            if run_request and run_request.get("scope") == "history"
+            else None
+        )
+        scan_limit = history_count or occupant.max_scan
+        write_limit, draft_limit = _complete_batch_limits(scan_limit)
+        # A batch size is the single owner-facing limit. The runner reserves
+        # enough operations for every scanned candidate to receive its labels
+        # and, when the return path is safe, one unsent draft.
         argv = [
             "daily",
             "--account-config", str(active / CONFIG_FILE),
@@ -322,11 +342,13 @@ def run_if_due(env=None, *, now=None, service_builder=build,
             "--status-path", str(status_path),
             "--lock-dir", str(active / LOCK_DIR),
             "--review-report", str(review_path),
-            "--max-scan", str(occupant.max_scan),
-            "--limit", str(occupant.limit),
-            "--max-drafts", str(occupant.max_drafts),
-            "--scheduled", "--apply", "--yes", "--draft-catch-up",
+            "--max-scan", str(scan_limit),
+            "--limit", str(write_limit),
+            "--max-drafts", str(draft_limit),
+            "--scheduled", "--apply", "--yes",
         ]
+        if history_count is not None:
+            argv.append("--history-scan")
         if force_requested:
             argv.append("--force")
 

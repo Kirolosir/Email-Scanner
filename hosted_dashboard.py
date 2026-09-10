@@ -26,7 +26,7 @@ from hosted_status import HostedConfig, status_document
 SESSION_COOKIE = "email_scanner_session"
 MAX_FORM_BYTES = 8192
 RUN_REFRESH_SECONDS = 4
-MAX_RUN_FEEDBACK_AGE = dt.timedelta(minutes=10)
+MAX_RUN_FEEDBACK_AGE = dt.timedelta(hours=2)
 COUNT_KEYS = (
     "scanned", "classified", "labeled", "drafted", "needs_review",
     "skipped", "failures", "deferred_draft_limit",
@@ -139,6 +139,12 @@ def _timestamp(value):
 
 def _run_feedback(occupant, now, run_state="", requested_epoch=None):
     """Return human feedback and whether the page should refresh again."""
+    if run_state == "invalid-count":
+        return (
+            '<p class="notice bad">Choose a whole number from 1 to '
+            f'{hosted_run_request.MAX_HISTORY_MESSAGES} for the history scan.'
+            '</p>', False,
+        )
     if run_state == "not-ready":
         return (
             '<p class="notice bad">The run could not start. Continue with '
@@ -424,7 +430,7 @@ class HostedDashboardApp:
         if not self._session_ok(environ):
             return self._redirect(start_response, "/login")
 
-        if path == "/run-now" and method == "POST":
+        if path in {"/run-now", "/run-history"} and method == "POST":
             form = self._form(environ)
             if form is None or not self._csrf_ok(form):
                 return self._respond(
@@ -432,10 +438,23 @@ class HostedDashboardApp:
                     self._page("Request refused", "<h1>Request refused.</h1>"),
                 )
             try:
-                requested_epoch = self.run_requester(
-                    self.config.state_root, now=self.clock()
-                )
-            except hosted_run_request.RunRequestError:
+                if path == "/run-history":
+                    raw_count = str(form.get("message_count", "")).strip()
+                    history_count = int(raw_count)
+                    if not 1 <= history_count <= \
+                            hosted_run_request.MAX_HISTORY_MESSAGES:
+                        raise ValueError("history count is outside the safe range")
+                    requested_epoch = self.run_requester(
+                        self.config.state_root, now=self.clock(),
+                        history_count=history_count,
+                    )
+                else:
+                    requested_epoch = self.run_requester(
+                        self.config.state_root, now=self.clock()
+                    )
+            except (ValueError, hosted_run_request.RunRequestError):
+                if path == "/run-history":
+                    return self._redirect(start_response, "/?run=invalid-count")
                 return self._redirect(start_response, "/?run=not-ready")
             except (connection.ConnectionError,
                     connection.ConnectionConfigError, OSError):
@@ -764,9 +783,28 @@ class HostedDashboardApp:
         run_form = f"""
           <form method="post" action="/run-now">
             <input type="hidden" name="csrf" value="{self._csrf_value()}">
-            <button type="submit">Run now</button>
+            <button type="submit">Scan new mail</button>
           </form>""" if occupant is not None else """
-          <button type="button" disabled title="Link Google first">Run now</button>"""
+          <button type="button" disabled title="Link Google first">Scan new mail</button>"""
+        history_form = f"""
+          <section class="panel history-run">
+            <div><p class="eyebrow">Inbox catch-up</p>
+              <h2>Scan previous emails</h2>
+              <p>Choose how many of the newest eligible messages to check.
+              Each one gets a label, and every safe reply address gets one
+              unsent draft. Already-completed messages are not duplicated.
+              Larger batches take longer because every reply is written
+              individually.</p></div>
+            <form method="post" action="/run-history">
+              <input type="hidden" name="csrf" value="{self._csrf_value()}">
+              <label for="message_count">Previous messages</label>
+              <div class="history-controls"><input id="message_count"
+                name="message_count" type="number" min="1"
+                max="{hosted_run_request.MAX_HISTORY_MESSAGES}"
+                value="{min(50, hosted_run_request.MAX_HISTORY_MESSAGES)}"
+                required><button type="submit">Scan previous emails</button></div>
+            </form>
+          </section>""" if occupant is not None else ""
 
         return self._page("Dashboard", f"""
           <header class="topbar">
@@ -794,8 +832,8 @@ class HostedDashboardApp:
                 <p class="eyebrow">Next daily run</p>
                 <h2>{_escape(next_run)}</h2>
                 <p>Up to {_escape(state.get("limits", {}).get("max_scan"))}
-                messages scanned and {_escape(state.get("limits", {}).get("max_drafts"))}
-                new drafts per run.</p>
+                recent messages per run. Every eligible message in the batch
+                is labeled and drafted.</p>
               </article>
               <article class="panel health">
                 <p class="eyebrow">Gmail connection</p>
@@ -808,6 +846,8 @@ class HostedDashboardApp:
                 <p>{_escape(last.get("finished_at"), "No completed run yet")}</p>
               </article>
             </section>
+
+            {history_form}
 
             <section class="content-grid">
               <article class="panel results">
@@ -895,7 +935,7 @@ class HostedDashboardApp:
             <section class="account-hero compact">
               <div><p class="eyebrow">Inbox settings</p>
                 <h1>Shape your daily assistant</h1>
-                <p class="lede">Choose the labels, schedule, and safety limits
+                <p class="lede">Choose the labels, schedule, and batch size
                 for {_escape(occupant.account)}.</p></div>
             </section>
             {error_notice}
@@ -923,14 +963,11 @@ class HostedDashboardApp:
                     autocomplete="off"><p class="field-note">Use an IANA
                     city-based timezone name or UTC.</p></div>
                   <div><label for="max_scan">Messages scanned</label><input
-                    id="max_scan" name="max_scan" type="number" min="1" max="500"
-                    value="{fields['max_scan']}" required></div>
-                  <div><label for="limit">Changes per run</label><input id="limit"
-                    name="limit" type="number" min="1" max="250"
-                    value="{fields['limit']}" required></div>
-                  <div><label for="max_drafts">Drafts per run</label><input
-                    id="max_drafts" name="max_drafts" type="number" min="0" max="50"
-                    value="{fields['max_drafts']}" required></div>
+                    id="max_scan" name="max_scan" type="number" min="1"
+                    max="{hosted_run_request.MAX_HISTORY_MESSAGES}"
+                    value="{fields['max_scan']}" required>
+                    <p class="field-note">Every eligible message in this
+                    batch receives a label and an unsent draft.</p></div>
                 </div>
               </section>
               <section class="panel form-section">
@@ -1047,6 +1084,10 @@ align-items:center;gap:9px;border:1px solid var(--line);background:white;border-
 padding:9px 14px;font-weight:750;white-space:nowrap}}.status i{{width:9px;height:9px;
 border-radius:50%;background:#d48a18}}.status.good i{{background:#18a66d;box-shadow:0 0 0 5px #e2f7ee}}
 .hero-actions{{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end}}
+.history-run{{display:grid;grid-template-columns:1.2fr .8fr;gap:32px;
+align-items:center;margin-bottom:16px}}.history-run form label{{margin:0 0 8px}}
+.history-controls{{display:flex;gap:10px;align-items:center}}.history-controls input{{max-width:130px}}
+.history-controls button{{white-space:nowrap}}
 .overview-grid{{display:grid;grid-template-columns:1.15fr 1fr 1fr;gap:16px;margin-bottom:16px}}
 .content-grid{{display:grid;grid-template-columns:1.15fr .85fr;gap:16px;margin-bottom:16px}}
 .panel{{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:24px;
@@ -1091,7 +1132,7 @@ width:24px;height:24px;border-radius:50%;background:#fff;color:#1769e0;font-weig
 .danger-zone p{{color:var(--muted)}}.danger-zone label{{margin:0 0 8px}}.disconnect-row{{display:flex;gap:10px;align-items:center}}
 .danger{{background:#a33b2e;white-space:nowrap}}
 @media(max-width:850px){{.overview-grid,.content-grid{{grid-template-columns:1fr}}.account-hero,
-.safety{{flex-direction:column;align-items:flex-start}}.metrics{{grid-template-columns:repeat(2,1fr)}}.form-section,.danger-zone{{grid-template-columns:1fr;gap:18px}}}}
+.safety{{flex-direction:column;align-items:flex-start}}.metrics{{grid-template-columns:repeat(2,1fr)}}.form-section,.danger-zone,.history-run{{grid-template-columns:1fr;gap:18px}}}}
 @media(max-width:480px){{.workspace{{padding:30px 16px 56px}}.topbar{{padding:0 16px}}
 .panel{{padding:20px}}.metrics,.field-grid{{grid-template-columns:1fr}}h1{{font-size:2rem}}.brand>span:last-child,.ghost-link{{display:none}}.section-actions{{align-items:flex-end;flex-direction:column}}.disconnect-row{{align-items:stretch;flex-direction:column}}}}
 </style></head><body>{content}</body></html>"""

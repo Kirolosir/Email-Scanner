@@ -696,7 +696,7 @@ def _connection_doc(issued_days_ago=0, account="coach@example.test", now=None):
         "run_at": "18:00",
         "connected_at": (now - dt.timedelta(days=30)).isoformat(timespec="seconds"),
         "last_authorized_at": issued.isoformat(timespec="seconds"),
-        "enabled": True, "max_scan": 25, "limit": 25, "max_drafts": 5,
+        "enabled": True, "max_scan": 25, "limit": 125, "max_drafts": 25,
     }
 
 

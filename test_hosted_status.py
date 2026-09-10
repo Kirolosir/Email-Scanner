@@ -187,7 +187,7 @@ def test_configuration_is_reported_because_it_discloses_nobody(tmp_path):
     connection = status_document(tmp_path, T0)["connection"]
     assert connection["run_at"] == "18:00"
     assert connection["timezone"] == "America/New_York"
-    assert connection["limits"]["max_drafts"] == 5
+    assert connection["limits"]["max_drafts"] == 25
 
 
 def test_a_vacant_deployment_says_so(tmp_path):

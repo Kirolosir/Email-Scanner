@@ -135,6 +135,18 @@ def test_both_triage_clis_accept_zero_as_an_explicit_draft_cap():
     assert triage.parse_args(["Some Label", "--max-drafts", "0"]).max_drafts == 0
 
 
+def test_history_scan_requires_an_explicit_bound_and_excludes_catch_up():
+    with pytest.raises(SystemExit):
+        daily_triage.parse_args(["daily", "--history-scan"])
+    with pytest.raises(SystemExit):
+        daily_triage.parse_args([
+            "daily", "--history-scan", "--draft-catch-up", "--max-scan", "10",
+        ])
+    assert daily_triage.parse_args([
+        "daily", "--history-scan", "--max-scan", "10",
+    ]).history_scan is True
+
+
 @pytest.mark.parametrize("filename", ["daily_triage.py", "triage.py"])
 def test_runtime_passes_the_real_draft_limit_to_the_planner(filename):
     tree = ast.parse(Path(filename).read_text(encoding="utf-8"))

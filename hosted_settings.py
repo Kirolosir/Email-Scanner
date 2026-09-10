@@ -22,6 +22,8 @@ from taxonomy import sanitize_slug, validate_label_name
 
 
 MAX_CATEGORIES = 12
+MAX_MESSAGES_PER_RUN = 250
+MAX_WRITES_PER_MESSAGE = 5
 PENDING_LABEL_SETUP = "label-setup-pending.json"
 MAX_DRAFT_GUIDANCE_CHARS = 1200
 DEFAULT_DRAFT_GUIDANCE = (
@@ -163,12 +165,16 @@ def build_settings_document(occupant, form):
         profile = account_profile.load_profile_document(document)
     except ValueError as exc:
         raise SettingsError("settings could not be validated") from exc
+    max_scan = _bounded_int(
+        form.get("max_scan"), "scan limit", 1, MAX_MESSAGES_PER_RUN
+    )
+    # The owner chooses one comprehensible batch size. These internal limits
+    # are derived so every candidate can receive its category, evidence and
+    # review labels, the Processed label, and one unsent draft.
     limits = {
-        "max_scan": _bounded_int(form.get("max_scan"), "scan limit", 1, 500),
-        "limit": _bounded_int(form.get("limit"), "write limit", 1, 250),
-        "max_drafts": _bounded_int(
-            form.get("max_drafts"), "draft limit", 0, 50
-        ),
+        "max_scan": max_scan,
+        "limit": max_scan * MAX_WRITES_PER_MESSAGE,
+        "max_drafts": max_scan,
     }
     return document, profile, run_at, limits
 

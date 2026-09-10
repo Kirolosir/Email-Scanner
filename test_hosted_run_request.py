@@ -39,12 +39,28 @@ def test_request_is_private_account_bound_and_consumed_once(tmp_path):
 
     assert requested_epoch == int(NOW.timestamp())
     document = json.loads(path.read_text(encoding="utf-8"))
-    assert set(document) == {"version", "account_hash", "requested_at"}
+    assert set(document) == {
+        "version", "account_hash", "requested_at", "scope", "message_count",
+    }
+    assert document["scope"] == "recent"
+    assert document["message_count"] is None
     assert "@" not in path.read_text(encoding="utf-8")
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert requests.consume_request(occupant.directory, occupant, now=NOW)
     assert not path.exists()
     assert not requests.consume_request(occupant.directory, occupant, now=NOW)
+
+
+def test_history_request_is_bounded_and_carries_only_the_count(tmp_path):
+    occupant = _ready_connection(tmp_path)
+    requests.request_run(tmp_path, now=NOW, history_count=75)
+
+    document = requests.load_request(occupant.directory, occupant, now=NOW)
+    assert document["scope"] == "history"
+    assert document["message_count"] == 75
+    for invalid in (0, requests.MAX_HISTORY_MESSAGES + 1, True, "50"):
+        with pytest.raises(requests.RunRequestError, match="history count"):
+            requests.request_run(tmp_path, now=NOW, history_count=invalid)
 
 
 def test_repeat_clicks_coalesce_into_one_fresh_request(tmp_path):

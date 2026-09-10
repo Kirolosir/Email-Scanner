@@ -26,6 +26,13 @@ journal so delayed mail is still found without creating another draft for a
 message that was already handled. Scheduled runs require explicit scan, write,
 and draft caps and can produce a private, content-free review report.
 
+The hosted dashboard turns those internal caps into one message batch size and
+reserves enough writes and drafts to finish every eligible message in the
+batch. **Scan new mail** checks the recent overlap window. **Scan previous
+emails** accepts a number from 1 to 250 and checks that many of the newest
+eligible messages without an age cutoff. Existing completed work is never
+duplicated.
+
 Triage assigns messages to categories configured for that account, then adds
 the matching Gmail labels. Existing labels are left alone. A one-time,
 account-bound activation can enable an unsent AI draft for every message with a

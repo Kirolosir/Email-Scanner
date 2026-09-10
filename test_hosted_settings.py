@@ -51,7 +51,9 @@ def test_saving_settings_writes_a_complete_approved_bundle(tmp_path):
         assert (active / name).is_file()
     assert updated.enabled is True
     assert updated.timezone_name == "America/New_York"
-    assert (updated.max_scan, updated.limit, updated.max_drafts) == (50, 40, 8)
+    assert (updated.max_scan, updated.limit, updated.max_drafts) == (
+        50, 50 * settings.MAX_WRITES_PER_MESSAGE, 50,
+    )
 
     config = json.loads((active / "account.json").read_text())
     approval = json.loads((active / "ai-drafting-approval.json").read_text())
@@ -81,6 +83,22 @@ def test_draft_voice_is_editable_and_bounded(tmp_path):
         settings.build_settings_document(
             connection.current(tmp_path),
             _form(draft_guidance="x" * 1201),
+        )
+
+
+def test_one_batch_size_derives_complete_bounded_run_limits(tmp_path):
+    occupant = connection.connect(tmp_path, A)
+    _document, _profile, _run_at, limits = settings.build_settings_document(
+        occupant, _form(max_scan="75", limit="1", max_drafts="0")
+    )
+    assert limits == {
+        "max_scan": 75,
+        "limit": 75 * settings.MAX_WRITES_PER_MESSAGE,
+        "max_drafts": 75,
+    }
+    with pytest.raises(settings.SettingsError, match="scan limit"):
+        settings.build_settings_document(
+            occupant, _form(max_scan=str(settings.MAX_MESSAGES_PER_RUN + 1))
         )
 
 

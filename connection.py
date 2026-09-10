@@ -49,7 +49,7 @@ ALLOWED_KEYS = frozenset({
     "last_authorized_at", "enabled", "max_scan", "limit", "max_drafts",
 })
 
-DEFAULT_LIMITS = {"max_scan": 25, "limit": 25, "max_drafts": 5}
+DEFAULT_LIMITS = {"max_scan": 25, "limit": 125, "max_drafts": 25}
 
 
 class ConnectionError(RuntimeError):

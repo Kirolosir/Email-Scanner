@@ -18,9 +18,10 @@ from private_runtime import atomic_write_json
 
 
 REQUEST_FILE = "run-now-request.json"
-REQUEST_VERSION = 1
+REQUEST_VERSION = 2
 MAX_REQUEST_AGE = dt.timedelta(hours=1)
 MAX_CLOCK_SKEW = dt.timedelta(minutes=5)
+MAX_HISTORY_MESSAGES = 250
 REQUIRED_SETUP_FILES = (
     "account.json",
     "taxonomy-confirmation.json",
@@ -47,10 +48,23 @@ def request_path(active):
     return Path(active) / REQUEST_FILE
 
 
-def request_run(root, *, now=None):
-    """Queue one immediate run after verifying the owner setup is complete."""
+def _history_count(value):
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise RunRequestError("the history count must be a whole number")
+    if not 1 <= value <= MAX_HISTORY_MESSAGES:
+        raise RunRequestError(
+            f"the history count must be between 1 and {MAX_HISTORY_MESSAGES}"
+        )
+    return value
+
+
+def request_run(root, *, now=None, history_count=None):
+    """Queue one bounded recent or historical run after setup is complete."""
     root = Path(root)
     requested_at = _utc_now(now)
+    history_count = _history_count(history_count)
     with connection.lifecycle_lock(root):
         occupant = connection.current(root)
         if occupant is None:
@@ -64,6 +78,8 @@ def request_run(root, *, now=None):
             "version": REQUEST_VERSION,
             "account_hash": _account_hash(occupant.account),
             "requested_at": requested_at.isoformat(timespec="seconds"),
+            "scope": "history" if history_count is not None else "recent",
+            "message_count": history_count,
         })
         return int(requested_at.timestamp())
 
@@ -81,10 +97,18 @@ def load_request(active, occupant, *, now=None):
 
     if not isinstance(document, dict):
         raise RunRequestError("the immediate-run request must be an object")
-    if set(document) != {"version", "account_hash", "requested_at"}:
+    if set(document) != {
+        "version", "account_hash", "requested_at", "scope", "message_count",
+    }:
         raise RunRequestError("the immediate-run request has unsupported fields")
     if document.get("version") != REQUEST_VERSION:
         raise RunRequestError("the immediate-run request version is unsupported")
+    scope = document.get("scope")
+    if scope not in {"recent", "history"}:
+        raise RunRequestError("the immediate-run request scope is unsupported")
+    message_count = _history_count(document.get("message_count"))
+    if (scope == "history") != (message_count is not None):
+        raise RunRequestError("the immediate-run request scope is inconsistent")
     account_hash = document.get("account_hash")
     if not isinstance(account_hash, str) or not hmac.compare_digest(
             account_hash, _account_hash(occupant.account)):
@@ -112,12 +136,12 @@ def consume_request(active, occupant, *, now=None):
     """Validate and remove one request before any mailbox access begins."""
     document = load_request(active, occupant, now=now)
     if document is None:
-        return False
+        return None
     try:
         os.unlink(request_path(active))
     except OSError as exc:
         raise RunRequestError("the immediate-run request could not be consumed") from exc
-    return True
+    return document
 
 
 def discard_request(active):
