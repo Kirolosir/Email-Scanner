@@ -11,14 +11,12 @@ import drafting
 from account_profile import AccountProfile, load_profile
 from drafting import (
     AI_DRAFTING_ACKNOWLEDGEMENT,
-    AI_BANNER,
     AiDraftingApprovals,
     MODE_GENERIC,
     MODE_OFF,
     MODE_TEMPLATE,
     DraftingConfigError,
     build_generic_body,
-    carries_banner,
     confirm_bulk_at_runtime,
     expected_bulk_phrase,
     is_unreviewed_bulk,
@@ -178,7 +176,7 @@ def test_generic_mode_generates_without_a_template_or_template_digest():
         draft_generator=generate,
     )
 
-    assert plan["template"].startswith(AI_BANNER)
+    assert not plan["template"].startswith("---")
     assert "Thanks for reaching out" in plan["template"]
     assert plan["template_key"] == "ai:recruiting"
     assert plan["draft_source"] == "ai"
@@ -296,15 +294,15 @@ def test_model_output_cannot_select_the_drafting_mode():
 # D4 / D5: the AI banner
 # --------------------------------------------------------------------
 
-def test_generic_draft_always_carries_the_banner():
-    """D4."""
-    body = build_generic_body("Thanks for reaching out, we'll be in touch.")
+def test_generic_draft_carries_no_machine_preamble():
+    """D4. The owner asked for drafts that read as finished replies, so the
+    body is the model's wording alone."""
+    text = "Thanks for reaching out, we'll be in touch."
+    body = build_generic_body(text)
 
-    assert body.startswith(AI_BANNER)
-    assert carries_banner(body)
-    assert "AI-DRAFTED" in body
-    assert "No human has read this text" in body
-    assert "Thanks for reaching out" in body
+    assert body == text + "\n"
+    assert "AI-DRAFTED" not in body
+    assert "No human has read this text" not in body
 
 
 @pytest.mark.parametrize("model_text", ["", "   ", None])
@@ -313,10 +311,9 @@ def test_empty_model_output_is_refused(model_text):
         build_generic_body(model_text)
 
 
-def test_banner_is_not_config_supplied():
-    """D5. A config-supplied banner could be set to the empty string, which
-    is exactly what the banner exists to prevent - so it is a code constant
-    and no profile field can override it."""
+def test_no_preamble_text_is_injected_into_draft_bodies():
+    """D5. No profile field may prepend text to a generated draft, and the
+    builder itself adds none - the body is the model's wording alone."""
     profile_fields = set(AccountProfile.__dataclass_fields__)
     banner_like = {
         name for name in profile_fields
@@ -325,7 +322,7 @@ def test_banner_is_not_config_supplied():
     assert banner_like == set(), (
         f"profile exposes banner text as configuration: {banner_like}"
     )
-    assert AI_BANNER.strip(), "the banner constant must not be empty"
+    assert build_generic_body("Body text.") == "Body text.\n"
 
 
 # --------------------------------------------------------------------

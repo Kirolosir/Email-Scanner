@@ -102,6 +102,21 @@ def test_one_batch_size_derives_complete_bounded_run_limits(tmp_path):
         )
 
 
+def test_maximum_daily_batch_can_draft_every_scanned_message(tmp_path):
+    occupant = connection.connect(tmp_path, A)
+    _document, profile, _run_at, limits = settings.build_settings_document(
+        occupant, _form(max_scan=str(settings.MAX_MESSAGES_PER_RUN))
+    )
+
+    assert settings.MAX_MESSAGES_PER_RUN == 2000
+    assert profile.draft_all_replyable_messages is True
+    assert limits == {
+        "max_scan": 2000,
+        "limit": 2000 * settings.MAX_WRITES_PER_MESSAGE,
+        "max_drafts": 2000,
+    }
+
+
 def test_unconfirmed_drafts_change_nothing(tmp_path):
     connection.connect(tmp_path, A)
     before = (tmp_path / "connection.json").read_bytes()

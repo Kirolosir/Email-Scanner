@@ -9,7 +9,6 @@ import pytest
 import gemini_client
 from account_profile import AccountProfile, LEGACY_PROFILE
 from drafting import (
-    AI_BANNER,
     AiDraftingApprovals,
     DraftingConfigError,
     build_generic_body,
@@ -217,9 +216,14 @@ def test_reply_prompt_forbids_repeating_codes_and_financial_identifiers():
     assert "financial account/card/routing/invoice numbers" in prompt
 
 
-def test_safe_generated_reply_keeps_the_nonconfigurable_banner():
-    body = build_generic_body("Thanks for your message. I will review it.")
-    assert body.startswith(AI_BANNER)
+def test_safe_generated_reply_carries_no_machine_preamble():
+    """The draft body is the model's wording and nothing else, so it reads as
+    a finished reply. Safety rests on the draft never being sent
+    automatically, not on a banner in the text."""
+    text = "Thanks for your message. I will review it."
+    body = build_generic_body(text)
+    assert body == text + "\n"
+    assert "AI-DRAFTED" not in body
 
 
 def test_generated_output_word_limit_is_locally_enforced():

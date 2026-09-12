@@ -8,7 +8,6 @@ import pytest
 import approve_account
 from account_profile import load_profile
 from drafting import (
-    AI_BANNER,
     AiDraftingApprovals,
     DraftingConfigError,
     LEGACY_GLOBAL_DRAFTING_ACKNOWLEDGEMENT,
@@ -187,7 +186,7 @@ def test_valid_activation_drafts_even_when_category_mode_is_off(tmp_path):
         profile, approvals=_approval(profile),
         generator=lambda *_args: "Thank you for the update.\n\nOwner",
     )
-    assert plan["template"].startswith(AI_BANNER)
+    assert not plan["template"].startswith("---")
     assert plan["draft_source"] == "ai"
     assert plan["decision"].add == ["Triage/Project"]
 
@@ -203,7 +202,7 @@ def test_unknown_low_confidence_gets_other_review_and_neutral_draft(tmp_path):
     assert set(plan["decision"].add) == {
         "Triage/Other", "Triage/Needs Review",
     }
-    assert plan["template"].startswith(AI_BANNER)
+    assert not plan["template"].startswith("---")
 
 
 def test_empty_current_body_skips_classification_but_still_gets_safe_draft(tmp_path):
@@ -347,7 +346,7 @@ def test_generation_retries_once_then_uses_fact_free_fallback(tmp_path):
     assert plan["draft_generation_attempts"] == 2
     assert plan["draft_fallback_used"] is True
     assert plan["draft_source"] == "fallback"
-    assert plan["template"] == AI_BANNER + "Thank you for your message.\n\nOwner\n"
+    assert plan["template"] == "Thank you for your message.\n\nOwner\n"
     assert "Triage/Needs Review" in plan["decision"].add
 
 

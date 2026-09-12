@@ -22,7 +22,11 @@ from taxonomy import sanitize_slug, validate_label_name
 
 
 MAX_CATEGORIES = 12
-MAX_MESSAGES_PER_RUN = 250
+# The ceiling the dashboard will accept for one run's scan size. It exists so
+# a typo cannot request an unbounded run, not to ration mail: a day's inbox
+# should fit inside one run rather than leaving a remainder for tomorrow.
+# Backlog larger than this is cleared by the resumable history scan.
+MAX_MESSAGES_PER_RUN = 2000
 MAX_WRITES_PER_MESSAGE = 5
 PENDING_LABEL_SETUP = "label-setup-pending.json"
 MAX_DRAFT_GUIDANCE_CHARS = 1200

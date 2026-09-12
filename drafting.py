@@ -7,8 +7,7 @@ Legacy profiles can still choose per category:
   * ``template`` - the owner supplies wording, which passes the existing
     wording-bound, account-bound template approval gate unchanged.
   * ``generic``  - free-form model-written replies for that category only.
-    Every such draft carries a fixed banner declaring it AI-drafted and
-    unreviewed. Generic mode never depends on a wording-bound template.
+    Generic mode never depends on a wording-bound template.
 
 Generic drafting has its own account-bound approval artifact. It approves
 categories, not exact wording, so an owner can edit AI guidance or edit each
@@ -17,9 +16,10 @@ need an additional boolean acknowledgement in that artifact. This keeps the
 year-label evidence gate separate from the decision to prepare an unsent AI
 reply.
 
-The banner is a code constant, never config. A config-supplied banner could
-be set to the empty string, which is precisely the failure the banner exists
-to prevent.
+Drafts carry no machine-added preamble. They are written to be read and sent
+by the owner, so the safety property they rest on is that nothing is ever
+sent automatically: every generated reply lands as an unsent Gmail draft and
+waits for a human to send or discard it.
 """
 import hashlib
 import json
@@ -30,15 +30,6 @@ MODE_OFF = "off"
 MODE_TEMPLATE = "template"
 MODE_GENERIC = "generic"
 VALID_DRAFTING_MODES = frozenset({MODE_OFF, MODE_TEMPLATE, MODE_GENERIC})
-
-# Not configurable. See module docstring.
-AI_BANNER = (
-    "-------------------------------------------------\n"
-    "AI-DRAFTED - UNREVIEWED WORDING - NOT SENT\n"
-    "No human has read this text. Delete this banner and\n"
-    "edit before sending, or discard.\n"
-    "-------------------------------------------------\n\n"
-)
 
 AI_DRAFTING_APPROVAL_VERSION = 1
 LEGACY_GLOBAL_DRAFTING_APPROVAL_VERSION = 2
@@ -459,9 +450,15 @@ def confirm_bulk_at_runtime(account, category_count, reader=input,
 
 
 def build_generic_body(model_text, max_words=None):
-    """Prefix model-written wording with the non-negotiable banner."""
+    """Return validated model-written wording as a ready-to-review body.
+
+    The draft carries no machine-added preamble: the owner asked for drafts
+    that read as finished replies. Every other guard in
+    ``validate_generated_reply`` still applies, and the draft is still only
+    ever created as an unsent Gmail draft.
+    """
     clean = validate_generated_reply(model_text, max_words=max_words)
-    return AI_BANNER + clean + "\n"
+    return clean + "\n"
 
 
 def build_safe_fallback_body(profile):
@@ -511,12 +508,4 @@ def validate_generated_reply(model_text, max_words=None):
         raise DraftingConfigError(
             "AI draft generation attempted to repeat sensitive data"
         )
-    if carries_banner(text):
-        raise DraftingConfigError(
-            "AI draft generation attempted to reproduce the safety banner"
-        )
     return text
-
-
-def carries_banner(body):
-    return AI_BANNER.strip().splitlines()[1] in (body or "")
