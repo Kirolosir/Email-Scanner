@@ -102,6 +102,28 @@ def _drafting_mode(plan):
     return "off"
 
 
+def _recruit_profile(plan):
+    """Keep only bounded coach-review fields from the classifier result.
+
+    These values are stored only in the private review artifact and rendered
+    only inside the authenticated owner dashboard. They are never included in
+    the public machine-status endpoint or service logs.
+    """
+    classification = plan.get("classification") or {}
+    result = {}
+    for source, target in (
+        ("recruit_name", "name"),
+        ("school", "school"),
+        ("position", "position"),
+        ("location", "location"),
+        ("grad_year", "grad_year"),
+        ("sender_type", "sender_type"),
+    ):
+        value = " ".join(str(classification.get(source) or "unknown").split())
+        result[target] = value[:120] or "unknown"
+    return result
+
+
 def build_review_report(plans, counts, *, mode, applied, outcome,
                         deferred_reasons=None):
     """Build the versioned report from safe, locally derived fields only."""
@@ -122,6 +144,7 @@ def build_review_report(plans, counts, *, mode, applied, outcome,
             ),
             "draft_created": bool(plan.get("new_draft_created", False)),
             "drafting_mode": _drafting_mode(plan),
+            "recruit_profile": _recruit_profile(plan),
             "reason_codes": _reason_codes(plan, deferred_reason),
             "classification_called": bool(plan.get("classification_called", False)),
         })
@@ -169,7 +192,9 @@ def validate_review_report(document):
     if not isinstance(document.get("messages"), list):
         raise ValueError("review report messages must be a list")
     for item in document["messages"]:
-        if not isinstance(item, dict) or set(item) != expected_item:
+        if (not isinstance(item, dict)
+                or not expected_item.issubset(item)
+                or set(item) - (expected_item | {"recruit_profile"})):
             raise ValueError("review report message has unsupported fields")
         if not _OPAQUE_ID.fullmatch(item["opaque_message_id"]):
             raise ValueError("review report message identifier is not opaque")
@@ -181,6 +206,19 @@ def validate_review_report(document):
             raise ValueError("review report labels are invalid")
         if set(item.get("reason_codes", ())) - REASON_CODES:
             raise ValueError("review report contains an unsafe reason code")
+        recruit = item.get("recruit_profile")
+        if recruit is not None:
+            expected_recruit = {
+                "name", "school", "position", "location", "grad_year",
+                "sender_type",
+            }
+            if (not isinstance(recruit, dict)
+                    or set(recruit) != expected_recruit
+                    or not all(
+                        isinstance(value, str) and 0 < len(value) <= 120
+                        for value in recruit.values()
+                    )):
+                raise ValueError("review report has invalid recruit details")
     return document
 
 

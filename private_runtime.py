@@ -265,7 +265,38 @@ class RunStatus:
             "lock_held": False,
             "started_at": now,
             "finished_at": None,
+            "stage": "Starting",
+            "current": 0,
+            "total": 0,
+            "updated_at": now,
         }
+        atomic_write_json(self.path, self.data)
+
+    def progress(self, stage, counts=None, *, current=0, total=0):
+        """Publish bounded, PII-free progress for a running job.
+
+        This deliberately accepts only a short stage label, allowlisted counts,
+        and non-negative integers. Message ids, subjects, senders, model output,
+        and exception text therefore cannot reach the dashboard status file.
+        """
+        run = self.data.get("last_run") or {}
+        if run.get("outcome") != "running":
+            return
+        normalized_counts = {key: 0 for key in sorted(self.COUNT_KEYS)}
+        for key, value in (counts or {}).items():
+            if key in self.COUNT_KEYS:
+                normalized_counts[key] = max(0, int(value))
+        safe_stage = str(stage or "Working").strip()[:80] or "Working"
+        safe_total = max(0, int(total))
+        safe_current = min(max(0, int(current)), safe_total or max(0, int(current)))
+        run.update({
+            "counts": normalized_counts,
+            "stage": safe_stage,
+            "current": safe_current,
+            "total": safe_total,
+            "updated_at": self._timestamp(),
+        })
+        self.data["last_run"] = run
         atomic_write_json(self.path, self.data)
 
     def finish(self, success, counts=None, error_codes=(), lock_held=False):
@@ -281,6 +312,8 @@ class RunStatus:
             "safe_error_codes": sorted({str(code) for code in error_codes if code}),
             "lock_held": bool(lock_held),
             "finished_at": now,
+            "stage": "Complete" if success else "Stopped safely",
+            "updated_at": now,
         })
         self.data["last_run"] = run
         if success:

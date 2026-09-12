@@ -398,6 +398,9 @@ def run_if_due(env=None, *, now=None, service_builder=build,
 
             overall_status = RunStatus(status_path)
             overall_status.start("daily:history-batch")
+            overall_status.progress(
+                "Finding previous emails", current=0, total=history_count
+            )
             try:
                 actual_account = normalize_address(
                     gmail_execute(
@@ -425,6 +428,12 @@ def run_if_due(env=None, *, now=None, service_builder=build,
                 print("No eligible historical messages were found.")
                 return 0
 
+            overall_status = RunStatus(status_path)
+            overall_status.progress(
+                "Processing previous emails", aggregate,
+                current=0, total=len(message_ids),
+            )
+
             for offset in range(0, len(message_ids), HISTORY_CHUNK_SIZE):
                 chunk = message_ids[offset:offset + HISTORY_CHUNK_SIZE]
                 argv = _argv(
@@ -448,9 +457,17 @@ def run_if_due(env=None, *, now=None, service_builder=build,
                     )
                     return code
                 status = RunStatus(status_path)
-                status.finish(True, aggregate)
+                completed = offset + len(chunk)
+                if completed < len(message_ids):
+                    status.start("daily:history-batch")
+                    status.progress(
+                        "Processing previous emails", aggregate,
+                        current=completed, total=len(message_ids),
+                    )
+                else:
+                    status.finish(True, aggregate)
                 print(
-                    f"History progress: {offset + len(chunk)} of "
+                    f"History progress: {completed} of "
                     f"{len(message_ids)} selected messages checked."
                 )
             return 0

@@ -129,6 +129,8 @@ def build_settings_document(occupant, form):
     if not connection.RUN_AT.fullmatch(run_at):
         raise SettingsError("daily run time must use HH:MM")
     display_name = str(form.get("display_name", "")).strip()
+    role = str(form.get("role", "")).strip()
+    organization = str(form.get("organization", "")).strip()
     signature = str(form.get("signature", "")).strip()
     raw_guidance = form.get("draft_guidance")
     draft_guidance = (
@@ -137,6 +139,10 @@ def build_settings_document(occupant, form):
     )
     if not display_name or len(display_name) > 120:
         raise SettingsError("display name is required and must be under 120 characters")
+    if len(role) > 120:
+        raise SettingsError("coach role must be under 120 characters")
+    if len(organization) > 160:
+        raise SettingsError("school or program must be under 160 characters")
     if not signature or len(signature) > 500:
         raise SettingsError("signature is required and must be under 500 characters")
     if not draft_guidance or len(draft_guidance) > MAX_DRAFT_GUIDANCE_CHARS:
@@ -158,6 +164,8 @@ def build_settings_document(occupant, form):
         "fallback_category": "other",
         "ai_drafting": {
             "display_name": display_name,
+            "role": role,
+            "organization": organization,
             "signature": signature,
             "default_guidance": draft_guidance,
             "max_words": 160,

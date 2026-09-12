@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import html
 import json
+import re
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -27,6 +28,8 @@ SESSION_COOKIE = "email_scanner_session"
 MAX_FORM_BYTES = 8192
 RUN_REFRESH_SECONDS = 4
 MAX_RUN_FEEDBACK_AGE = dt.timedelta(days=2)
+MAX_REVIEW_DRAFTS = 40
+GMAIL_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 COUNT_KEYS = (
     "scanned", "classified", "labeled", "drafted", "needs_review",
     "skipped", "failures", "deferred_draft_limit",
@@ -124,7 +127,87 @@ def _safe_run_details(active):
             value for value in raw_codes
             if isinstance(value, str) and len(value) <= 80
         },
+        "stage": str(run.get("stage") or "")[:80],
+        "current": (
+            run.get("current") if isinstance(run.get("current"), int)
+            and not isinstance(run.get("current"), bool)
+            and run.get("current") >= 0 else 0
+        ),
+        "total": (
+            run.get("total") if isinstance(run.get("total"), int)
+            and not isinstance(run.get("total"), bool)
+            and run.get("total") >= 0 else 0
+        ),
+        "updated_at": str(run.get("updated_at") or ""),
     }
+
+
+def _latest_review_report(active):
+    review_dir = Path(active) / "review"
+    try:
+        candidates = sorted(
+            (item for item in review_dir.glob("*.json") if item.is_file()),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return {}
+    return _read_json(candidates[0]) if candidates else {}
+
+
+def _safe_review_queue(active, limit=MAX_REVIEW_DRAFTS):
+    """Join the private draft journal to bounded review metadata.
+
+    Message bodies and generated draft text are never read. Raw Gmail ids are
+    used only to build validated Gmail links and are not printed on the page.
+    """
+    state = _read_json(Path(active) / "daily-state.json") or {}
+    messages = state.get("messages")
+    messages = messages if isinstance(messages, dict) else {}
+    report = _latest_review_report(active) or {}
+    report_items = report.get("messages")
+    report_items = report_items if isinstance(report_items, list) else []
+    by_opaque = {
+        item.get("opaque_message_id"): item for item in report_items
+        if isinstance(item, dict)
+        and isinstance(item.get("opaque_message_id"), str)
+    }
+    rows = []
+    seen_drafts = set()
+    for raw_message_id, record in reversed(list(messages.items())):
+        if len(rows) >= limit:
+            break
+        if not isinstance(record, dict):
+            continue
+        draft_id = record.get("draft_id")
+        thread_id = record.get("thread_id")
+        if (not isinstance(draft_id, str) or not GMAIL_ID.fullmatch(draft_id)
+                or draft_id in seen_drafts):
+            continue
+        seen_drafts.add(draft_id)
+        context = by_opaque.get(
+            hashlib.sha256(str(raw_message_id).encode("utf-8")).hexdigest()[:16],
+            {},
+        )
+        recruit = context.get("recruit_profile")
+        recruit = recruit if isinstance(recruit, dict) else {}
+        rows.append({
+            "status": str(record.get("status") or "draft_created")[:32],
+            "thread_id": (
+                thread_id if isinstance(thread_id, str)
+                and GMAIL_ID.fullmatch(thread_id) else ""
+            ),
+            "category": str(context.get("category") or "unknown")[:80],
+            "confidence": str(context.get("confidence") or "unknown")[:24],
+            "recruit": {
+                key: str(recruit.get(key) or "unknown")[:120]
+                for key in (
+                    "name", "school", "position", "location", "grad_year",
+                    "sender_type",
+                )
+            },
+        })
+    return rows
 
 
 def _timestamp(value):
@@ -242,6 +325,109 @@ def _safe_labels(active):
                 "drafting": drafting.get("mode") == "generic",
             })
     return labels
+
+
+def _safe_coach_profile(active):
+    document = _read_json(Path(active) / "account.json") or {}
+    ai = document.get("ai_drafting")
+    ai = ai if isinstance(ai, dict) else {}
+    return {
+        key: str(ai.get(key) or "")[:limit]
+        for key, limit in {
+            "display_name": 120,
+            "role": 120,
+            "organization": 160,
+            "default_guidance": 1200,
+        }.items()
+    }
+
+
+FAILURE_MESSAGES = {
+    "gmail_reauthorization_required": "Reconnect Google, then run the scan again.",
+    "required_labels_missing": "Save the label settings again, then retry.",
+    "message_fetch_failed": "Some Gmail messages could not be read. Retry the run.",
+    "history_chunk_failed": "The history scan paused. Completed work was saved.",
+    "account_setup_incomplete": "Finish the coach profile and label settings.",
+    "label_setup_failed": "Gmail labels could not be prepared. Save settings again.",
+    "label_setup_invalid": "The saved label plan needs to be refreshed.",
+}
+
+
+def _render_run_progress(details):
+    if details.get("outcome") != "running":
+        return ""
+    current = details.get("current", 0)
+    total = details.get("total", 0)
+    percent = round((current / total) * 100) if total else 0
+    stage = _escape(details.get("stage"), "Working")
+    amount = f"{current} of {total}" if total else "Preparing"
+    return f"""
+      <section class="panel run-progress" aria-live="polite">
+        <div class="section-head"><div><p class="eyebrow">Live run</p>
+          <h2>{stage}</h2></div><strong>{html.escape(amount)}</strong></div>
+        <progress max="{max(1, total)}" value="{min(current, max(1, total))}">{percent}%</progress>
+        <p>{percent}% complete · updates every {RUN_REFRESH_SECONDS} seconds.</p>
+      </section>"""
+
+
+def _render_failure_alert(details):
+    if details.get("outcome") != "failed":
+        return ""
+    messages = [
+        FAILURE_MESSAGES.get(code, "Review the latest run and try again.")
+        for code in sorted(details.get("codes") or ())
+    ]
+    action = messages[0] if messages else "Review the settings, then retry the run."
+    return f"""
+      <section class="failure-alert" role="alert">
+        <div><p class="eyebrow">Run needs attention</p>
+          <h2>The last scan stopped safely</h2>
+          <p>{html.escape(action)} No email was sent.</p></div>
+        <a class="secondary" href="/settings">Review settings</a>
+      </section>"""
+
+
+def _render_review_queue(rows):
+    if not rows:
+        return (
+            '<p class="empty">No generated drafts are waiting yet. They will '
+            'appear here after a scan.</p>'
+        )
+    cards = []
+    for row in rows:
+        thread_id = row.get("thread_id")
+        gmail_url = (
+            f"https://mail.google.com/mail/u/0/#all/{thread_id}"
+            if thread_id else "https://mail.google.com/mail/u/0/#drafts"
+        )
+        recruit = row.get("recruit") or {}
+        details = []
+        for key, label in (
+            ("name", "Recruit"), ("grad_year", "Class"),
+            ("position", "Position"), ("school", "School / club"),
+            ("location", "Location"),
+        ):
+            value = str(recruit.get(key) or "unknown")
+            if value.casefold() != "unknown":
+                details.append(
+                    f'<span><small>{label}</small>{_escape(value)}</span>'
+                )
+        insight = (
+            '<div class="recruit-fields">' + "".join(details) + "</div>"
+            if details else
+            '<p class="field-note">No recruiting details were stated clearly.</p>'
+        )
+        cards.append(f"""
+          <article class="draft-card">
+            <div class="draft-card-head"><div>
+              <span class="tag">{_escape(row.get('category'), 'Other')}</span>
+              <span class="confidence">{_escape(row.get('confidence'), 'unknown')} confidence</span>
+            </div><a class="secondary" href="{html.escape(gmail_url)}"
+              target="_blank" rel="noopener noreferrer">Review in Gmail</a></div>
+            {insight}
+            <p class="verify-note">AI-extracted details · verify against the email before sending.</p>
+          </article>""")
+    return "".join(cards)
 
 
 def _cookie_map(environ):
@@ -568,6 +754,9 @@ class HostedDashboardApp:
                     "Refresh",
                     f"{RUN_REFRESH_SECONDS}; url=/?run=checking&after={requested_epoch}",
                 ))
+            elif feedback_occupant is not None and _safe_run_details(
+                    feedback_occupant.directory).get("outcome") == "running":
+                headers.append(("Refresh", f"{RUN_REFRESH_SECONDS}; url=/"))
             return self._respond(
                 start_response, "200 OK",
                 self._dashboard(
@@ -746,6 +935,9 @@ class HostedDashboardApp:
             next_run = "—"
             labels = []
             counts = {}
+            run_details = {}
+            review_rows = []
+            coach_profile = {}
         else:
             account = occupant.account
             next_run = connection_schedule.next_run(occupant, now).strftime(
@@ -753,12 +945,24 @@ class HostedDashboardApp:
             )
             labels = _safe_labels(occupant.directory)
             counts = _safe_counts(occupant.directory)
+            run_details = _safe_run_details(occupant.directory)
+            review_rows = _safe_review_queue(occupant.directory)
+            coach_profile = _safe_coach_profile(occupant.directory)
 
         expiry = public.get("expiry") or {}
         last = public.get("last_run") or {}
         connected = state.get("state") == "connected"
         status_tone = "good" if connected else "warn"
         status_text = "Active" if connected else state.get("state", "Vacant")
+        progress_panel = _render_run_progress(run_details)
+        failure_alert = _render_failure_alert(run_details)
+        review_queue = _render_review_queue(review_rows)
+        coach_name = coach_profile.get("display_name") or "Coach profile"
+        coach_context = " · ".join(
+            value for value in (
+                coach_profile.get("role"), coach_profile.get("organization")
+            ) if value
+        ) or "Add your role and program so replies sound like you."
 
         count_cards = "".join(
             f'<div class="metric"><span>{_escape(key.replace("_", " "))}</span>'
@@ -839,6 +1043,7 @@ class HostedDashboardApp:
             {saved_notice}
             {connection_notice}
             {run_notice}
+            {failure_alert}
             <section class="account-hero">
               <div>
                 <p class="eyebrow">Connected inbox</p>
@@ -849,6 +1054,8 @@ class HostedDashboardApp:
               <div class="hero-actions"><span class="status {status_tone}"><i></i>{_escape(status_text)}</span>
                 {connect_form}{run_form}</div>
             </section>
+
+            {progress_panel}
 
             <section class="overview-grid">
               <article class="panel schedule">
@@ -887,13 +1094,21 @@ class HostedDashboardApp:
               </article>
             </section>
 
-            <section class="panel safety">
-              <div><p class="eyebrow">Review queue</p>
-                <h2>Every response stays in Gmail Drafts</h2>
-                <p>The assistant drafts every message with a safe reply
-                address. Spam, trash, sent mail, drafts, and non-replyable
-                bounce or no-reply addresses stay excluded.</p></div>
-              <a class="secondary" href="https://mail.google.com/mail/u/0/#drafts">Open Gmail drafts</a>
+            <section class="panel coach-card">
+              <div><p class="eyebrow">Coach voice</p>
+                <h2>{_escape(coach_name)}</h2>
+                <p>{_escape(coach_context)}</p></div>
+              {settings_link}
+            </section>
+
+            <section class="panel review-queue">
+              <div class="section-head"><div><p class="eyebrow">Review queue</p>
+                <h2>Recruit replies ready in Gmail</h2>
+                <p>Review, edit, and send each response from Gmail. Nothing
+                leaves Drafts automatically.</p></div>
+                <a class="secondary" href="https://mail.google.com/mail/u/0/#drafts"
+                  target="_blank" rel="noopener noreferrer">Open all drafts</a></div>
+              <div class="draft-list">{review_queue}</div>
             </section>
           </main>
         """)
@@ -925,6 +1140,8 @@ class HostedDashboardApp:
                             or occupant.timezone_name),
             "run_at": occupant.run_at,
             "display_name": str(ai.get("display_name", "")),
+            "role": str(ai.get("role", "")),
+            "organization": str(ai.get("organization", "")),
             "signature": str(ai.get("signature", "")),
             "draft_guidance": str(
                 ai.get("default_guidance")
@@ -940,7 +1157,8 @@ class HostedDashboardApp:
         fields = {
             key: html.escape(str(values.get(key, ""))) for key in (
                 "labels", "timezone", "run_at", "display_name", "signature",
-                "draft_guidance", "max_scan", "limit", "max_drafts",
+                "role", "organization", "draft_guidance", "max_scan", "limit",
+                "max_drafts",
             )
         }
         error_notice = (
@@ -994,20 +1212,32 @@ class HostedDashboardApp:
                 </div>
               </section>
               <section class="panel form-section">
-                <div class="form-copy"><p class="eyebrow">3 · Replies</p>
-                  <h2>Draft voice</h2><p>These details help AI prepare a short
-                  reply. Every result remains an unsent Gmail draft.</p></div>
+                <div class="form-copy"><p class="eyebrow">3 · Coach profile</p>
+                  <h2>Your voice and program</h2><p>Give the assistant enough
+                  context to sound like you while replying to recruits.
+                  Every result remains an unsent Gmail draft.</p></div>
                 <div><label for="display_name">Your name</label><input
                   id="display_name" name="display_name" maxlength="120"
                   value="{fields['display_name']}" required>
+                  <div class="field-grid coach-fields">
+                    <div><label for="role">Role</label><input id="role"
+                      name="role" maxlength="120" value="{fields['role']}"
+                      placeholder="Head Men's Soccer Coach"></div>
+                    <div><label for="organization">School or program</label><input
+                      id="organization" name="organization" maxlength="160"
+                      value="{fields['organization']}"
+                      placeholder="Amherst College"></div>
+                  </div>
                   <label for="signature">Draft signature</label><textarea
                   id="signature" name="signature" rows="3" maxlength="500"
                   required>{fields['signature']}</textarea>
                   <label for="draft_guidance">How replies should sound</label>
                   <textarea id="draft_guidance" name="draft_guidance" rows="5"
                     maxlength="1200" required>{fields['draft_guidance']}</textarea>
-                  <p class="field-note">Add tone, phrasing, and follow-up preferences.
-                  The assistant will still use only facts from each email.</p></div>
+                  <p class="field-note">Describe your tone, what information
+                  recruits should send, and the next steps you usually suggest.
+                  The assistant still uses only facts available in the email
+                  and this approved profile.</p></div>
               </section>
               <section class="panel confirmation">
                 <label class="check-row"><input type="checkbox"
@@ -1144,6 +1374,12 @@ width:24px;height:24px;border-radius:50%;background:#fff;color:#1769e0;font-weig
 .browser-note{{margin:16px 0 0;color:var(--muted);font-size:.88rem;text-align:center}}
 .notice{{padding:11px 13px;border-radius:10px}}.notice.bad{{background:#fff0ed;color:#9b3024}}
 .notice.good{{background:#e2f7ee;color:#116645}}.notice.progress{{background:#eaf3f8;color:#24556f}}
+.failure-alert{{display:flex;align-items:center;justify-content:space-between;gap:24px;
+padding:20px 22px;margin-bottom:22px;background:#fff0ed;border:1px solid #efc1b8;
+border-radius:18px;color:#7d281f}}.failure-alert .eyebrow{{color:#9b3024}}
+.failure-alert h2,.failure-alert p{{margin-bottom:4px}}.run-progress{{margin-bottom:16px}}
+.run-progress .section-head{{align-items:center;margin-bottom:12px}}.run-progress progress{{width:100%;
+height:14px;accent-color:var(--mint-dark)}}.run-progress>p{{font-size:.85rem;margin-top:8px}}
 .settings-shell{{max-width:980px}}.account-hero.compact h1{{font-size:clamp(2rem,4vw,3rem)}}
 .settings-form{{display:grid;gap:16px}}.form-section{{display:grid;grid-template-columns:.75fr 1.25fr;gap:38px}}
 .form-copy p{{color:var(--muted)}}.form-section label{{margin:0 0 8px}}.form-section label:not(:first-child){{margin-top:18px}}
@@ -1154,10 +1390,21 @@ width:24px;height:24px;border-radius:50%;background:#fff;color:#1769e0;font-weig
 .danger-zone{{margin-top:26px;border-color:#f0cbc5;box-shadow:none;display:grid;grid-template-columns:.8fr 1.2fr;gap:38px}}
 .danger-zone p{{color:var(--muted)}}.danger-zone label{{margin:0 0 8px}}.disconnect-row{{display:flex;gap:10px;align-items:center}}
 .danger{{background:#a33b2e;white-space:nowrap}}
+.coach-card{{display:flex;align-items:center;justify-content:space-between;gap:24px;
+margin-bottom:16px}}.coach-card p{{margin-bottom:0}}.review-queue{{margin-bottom:16px}}
+.draft-list{{display:grid;gap:12px}}.draft-card{{padding:18px;border:1px solid #dce8e5;
+border-radius:16px;background:#f9fbfb}}.draft-card-head{{display:flex;align-items:center;
+justify-content:space-between;gap:16px}}.draft-card-head>div{{display:flex;align-items:center;
+gap:9px;flex-wrap:wrap}}.confidence{{font-size:.8rem;color:var(--muted)}}
+.recruit-fields{{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;
+margin-top:16px}}.recruit-fields span{{padding:10px 11px;background:white;border:1px solid #e2ecea;
+border-radius:12px;overflow-wrap:anywhere}}.recruit-fields small{{display:block;color:var(--muted);
+font-size:.72rem;margin-bottom:3px}}.verify-note{{font-size:.78rem;margin:12px 0 0!important}}
+.coach-fields label{{margin-top:18px!important}}
 @media(max-width:850px){{.overview-grid,.content-grid{{grid-template-columns:1fr}}.account-hero,
-.safety{{flex-direction:column;align-items:flex-start}}.metrics{{grid-template-columns:repeat(2,1fr)}}.form-section,.danger-zone,.history-run{{grid-template-columns:1fr;gap:18px}}}}
+.safety,.coach-card,.failure-alert{{flex-direction:column;align-items:flex-start}}.metrics{{grid-template-columns:repeat(2,1fr)}}.form-section,.danger-zone,.history-run{{grid-template-columns:1fr;gap:18px}}.recruit-fields{{grid-template-columns:repeat(2,1fr)}}}}
 @media(max-width:480px){{.workspace{{padding:30px 16px 56px}}.topbar{{padding:0 16px}}
-.panel{{padding:20px}}.metrics,.field-grid{{grid-template-columns:1fr}}h1{{font-size:2rem}}.brand>span:last-child,.ghost-link{{display:none}}.section-actions{{align-items:flex-end;flex-direction:column}}.disconnect-row{{align-items:stretch;flex-direction:column}}}}
+.panel{{padding:20px}}.metrics,.field-grid,.recruit-fields{{grid-template-columns:1fr}}h1{{font-size:2rem}}.brand>span:last-child,.ghost-link{{display:none}}.section-actions,.draft-card-head{{align-items:flex-start;flex-direction:column}}.disconnect-row{{align-items:stretch;flex-direction:column}}}}
 </style></head><body>{content}</body></html>"""
 
 

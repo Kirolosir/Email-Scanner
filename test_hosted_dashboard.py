@@ -60,6 +60,8 @@ def _settings_form(app, **changes):
         "timezone": "America/New_York",
         "run_at": "18:00",
         "display_name": "Owner",
+        "role": "Head Coach",
+        "organization": "Example College",
         "signature": "Owner",
         "max_scan": "50",
         "limit": "40",
@@ -240,6 +242,9 @@ def test_connected_owner_can_open_and_save_settings(tmp_path):
     page = _call(app, "/settings", cookie=cookie)
     assert page["status"].startswith("200")
     assert "Shape your daily assistant" in page["body"]
+    assert "Your voice and program" in page["body"]
+    assert 'name="role"' in page["body"]
+    assert 'name="organization"' in page["body"]
     assert "Nothing is auto-sent" not in page["body"]
     assert "Responses must stay unsent" in page["body"]
 
@@ -253,6 +258,9 @@ def test_connected_owner_can_open_and_save_settings(tmp_path):
         "ai-drafting-approval.json", "label-setup-pending.json",
     ):
         assert (seat.directory / name).is_file()
+    profile = json.loads((seat.directory / "account.json").read_text())
+    assert profile["ai_drafting"]["role"] == "Head Coach"
+    assert profile["ai_drafting"]["organization"] == "Example College"
 
 
 def test_settings_save_requires_csrf_and_draft_confirmation(tmp_path):
@@ -468,6 +476,78 @@ def test_run_page_auto_refreshes_while_working_then_reports_completion(tmp_path)
     )
     assert "Refresh" not in complete["headers"]
     assert "Run complete" in complete["body"]
+
+
+def test_dashboard_shows_live_progress_without_a_request_query(tmp_path):
+    seat = connection.connect(tmp_path, "owner@example.test")
+    (seat.directory / "daily-status.json").write_text(json.dumps({
+        "version": 1,
+        "last_run": {
+            "outcome": "running", "started_at": "2026-09-09T16:00:00+00:00",
+            "finished_at": None, "safe_error_codes": [],
+            "counts": {"scanned": 50, "drafted": 7},
+            "stage": "Creating Gmail labels and drafts",
+            "current": 8, "total": 50,
+        },
+    }), encoding="utf-8")
+    app = _app(tmp_path)
+    response = _call(app, cookie=_login(app))
+
+    assert response["headers"]["Refresh"].startswith("4;")
+    assert "Creating Gmail labels and drafts" in response["body"]
+    assert "8 of 50" in response["body"]
+    assert 'value="8"' in response["body"]
+
+
+def test_dashboard_keeps_failed_run_alert_visible(tmp_path):
+    seat = connection.connect(tmp_path, "owner@example.test")
+    (seat.directory / "daily-status.json").write_text(json.dumps({
+        "version": 1,
+        "last_run": {
+            "outcome": "failed", "finished_at": "2026-09-09T16:00:00+00:00",
+            "safe_error_codes": ["message_fetch_failed"],
+            "counts": {"failures": 1},
+        },
+    }), encoding="utf-8")
+    response = _call(_app(tmp_path), cookie=_login(_app(tmp_path)))
+
+    assert 'role="alert"' in response["body"]
+    assert "The last scan stopped safely" in response["body"]
+    assert "Some Gmail messages could not be read" in response["body"]
+
+
+def test_dashboard_renders_recruit_review_queue_without_message_content(tmp_path):
+    seat = connection.connect(tmp_path, "owner@example.test")
+    raw_id = "message-123"
+    opaque = __import__("hashlib").sha256(raw_id.encode()).hexdigest()[:16]
+    (seat.directory / "daily-state.json").write_text(json.dumps({
+        "messages": {raw_id: {
+            "status": "complete", "thread_id": "thread_123",
+            "draft_id": "draft_123",
+        }},
+    }), encoding="utf-8")
+    review = seat.directory / "review"
+    review.mkdir()
+    (review / "latest.json").write_text(json.dumps({
+        "messages": [{
+            "opaque_message_id": opaque,
+            "category": "recruiting", "confidence": "high",
+            "recruit_profile": {
+                "name": "Jordan Lee", "school": "North High",
+                "position": "Center back", "location": "Boston, MA",
+                "grad_year": "2028", "sender_type": "recruit",
+            },
+        }],
+    }), encoding="utf-8")
+    app = _app(tmp_path)
+    response = _call(app, cookie=_login(app))
+
+    assert "Jordan Lee" in response["body"]
+    assert "North High" in response["body"]
+    assert "Center back" in response["body"]
+    assert "Class" in response["body"] and "2028" in response["body"]
+    assert "#all/thread_123" in response["body"]
+    assert raw_id not in response["body"]
 
 
 def test_run_page_ignores_impossible_request_timestamp(tmp_path):

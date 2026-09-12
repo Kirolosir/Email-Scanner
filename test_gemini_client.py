@@ -45,6 +45,33 @@ def test_parse_result_validates_category_and_grad_year(caplog):
     assert secret_echo not in caplog.text
 
 
+def test_classifier_extracts_bounded_recruiting_fields():
+    result = gemini_client.parse_result(
+        "CATEGORY: recruit_intro\nGRAD_YEAR: 2028\n"
+        "SENDER_TYPE: recruit\nRECRUIT_NAME: Jordan Lee\n"
+        "SCHOOL: North High School\nPOSITION: Center back\n"
+        "LOCATION: Boston, MA\nCONFIDENCE: high\n"
+        "EVIDENCE: class of 2028 center back\nREASON: recruit introduction"
+    )
+
+    assert result["recruit_name"] == "Jordan Lee"
+    assert result["school"] == "North High School"
+    assert result["position"] == "Center back"
+    assert result["location"] == "Boston, MA"
+    assert result["grad_year"] == "2028"
+
+
+def test_legacy_classifier_shape_defaults_recruiting_fields_to_unknown():
+    result = gemini_client.parse_result(
+        "CATEGORY: parent\nGRAD_YEAR: unknown\n"
+        "SENDER_TYPE: parent\nCONFIDENCE: high\n"
+        "EVIDENCE: parent question\nREASON: direct request"
+    )
+
+    assert result["valid"] is True
+    assert result["recruit_name"] == "unknown"
+    assert result["school"] == "unknown"
+
 @pytest.mark.parametrize("category,sender_type", [
     ("recruit_intro", "recruit"),
     ("recruit_update", "recruit"),

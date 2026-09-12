@@ -80,6 +80,28 @@ def test_report_contains_decisions_but_no_message_content_or_raw_ids():
         assert marker not in text
 
 
+def test_report_keeps_only_bounded_recruit_review_fields():
+    plan = _plan()
+    plan["classification"].update({
+        "recruit_name": "Jordan Lee",
+        "school": "North High School",
+        "position": "Center back",
+        "location": "Boston, MA",
+        "grad_year": "2028",
+        "sender_type": "recruit",
+    })
+
+    recruit = _document(plan)["messages"][0]["recruit_profile"]
+    assert recruit == {
+        "name": "Jordan Lee",
+        "school": "North High School",
+        "position": "Center back",
+        "location": "Boston, MA",
+        "grad_year": "2028",
+        "sender_type": "recruit",
+    }
+
+
 def test_report_marks_draft_and_write_deferrals_with_safe_codes():
     draft_plan = _plan("draft-limited")
     write_plan = _plan("write-limited")

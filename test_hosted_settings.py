@@ -15,6 +15,8 @@ def _form(**changes):
         "timezone": "America/New_York",
         "run_at": "18:00",
         "display_name": "Owner",
+        "role": "Head Coach",
+        "organization": "Example College",
         "signature": "Owner",
         "max_scan": "50",
         "limit": "40",
@@ -65,6 +67,8 @@ def test_saving_settings_writes_a_complete_approved_bundle(tmp_path):
     assert config["ai_drafting"]["default_guidance"] == (
         settings.DEFAULT_DRAFT_GUIDANCE
     )
+    assert config["ai_drafting"]["role"] == "Head Coach"
+    assert config["ai_drafting"]["organization"] == "Example College"
 
 
 def test_draft_voice_is_editable_and_bounded(tmp_path):

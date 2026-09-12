@@ -61,6 +61,22 @@ def test_status_is_atomic_private_and_contains_no_pii(tmp_path):
     assert not list(path.parent.glob(f".{path.name}.*"))
 
 
+def test_status_publishes_bounded_live_progress(tmp_path):
+    path = tmp_path / "private" / "status.json"
+    status = RunStatus(path)
+    status.start("daily:scheduled")
+    status.progress(
+        "Creating Gmail labels and drafts", {"scanned": 50, "drafted": 7},
+        current=8, total=50,
+    )
+
+    run = json.loads(path.read_text(encoding="utf-8"))["last_run"]
+    assert run["outcome"] == "running"
+    assert (run["current"], run["total"]) == (8, 50)
+    assert run["stage"] == "Creating Gmail labels and drafts"
+    assert run["counts"]["drafted"] == 7
+
+
 # --------------------------------------------------------------------
 # mkdir(parents=True, mode=0o700) applies the mode to the LAST component
 # only; parents get the umask, 0755 in practice. A nested state_dir such

@@ -892,6 +892,10 @@ def _run_locked(args, classifier, config, templates, state, status,
         )
         print(f"Gmail selection: {len(message_ids)} privately queued messages")
     counts["scanned"] = len(message_ids)
+    status.progress(
+        "Reading selected emails", counts,
+        current=0, total=len(message_ids),
+    )
 
     if args.estimate_only:
         messages, failures = fetch_message_metadata(
@@ -976,7 +980,11 @@ def _run_locked(args, classifier, config, templates, state, status,
     counts["skipped"] += skipped
 
     plans = []
-    for message in candidates:
+    for index, message in enumerate(candidates, start=1):
+        status.progress(
+            "Analyzing emails and writing replies", counts,
+            current=index - 1, total=len(candidates),
+        )
         email = message_to_email(
             message, max_body_chars=args.max_body_chars,
             own_address=own_address, profile=args.profile,
@@ -996,6 +1004,12 @@ def _run_locked(args, classifier, config, templates, state, status,
         add_daily_review_policy(plan, config, getattr(args, "profile", None))
         plan["processed_label"] = processed_name
         plans.append(plan)
+        counts["classified"] += int(bool(plan["classification_called"]))
+        counts["needs_review"] += int(bool(plan["needs_review"]))
+        status.progress(
+            "Analyzing emails and writing replies", counts,
+            current=index, total=len(candidates),
+        )
 
     counts["classified"] = sum(plan["classification_called"] for plan in plans)
     counts["skipped"] += sum(
@@ -1088,7 +1102,11 @@ def _run_locked(args, classifier, config, templates, state, status,
     error_codes = []
     created_draft_threads = set()
     with DraftLog(log_path, header) as draft_log:
-        for plan in plans:
+        status.progress(
+            "Creating Gmail labels and drafts", counts,
+            current=0, total=len(plans),
+        )
+        for index, plan in enumerate(plans, start=1):
             try:
                 labels, _draft_id, plan_errors = execute_daily_plan(
                     service, plan, account_labels, throttle, draft_log,
@@ -1108,7 +1126,11 @@ def _run_locked(args, classifier, config, templates, state, status,
                     if args.scheduled else plan["email"]["message_id"]
                 )
                 print(f"  ERROR {display_id}: {code} ({error.rsplit('(', 1)[-1].rstrip(')')})")
-        counts["drafted"] = draft_log.count
+            counts["drafted"] = draft_log.count
+            status.progress(
+                "Creating Gmail labels and drafts", counts,
+                current=index, total=len(plans),
+            )
 
     if args.mode == "daily" and counts["failures"] == 0 and not deferred:
         state.mark_daily_complete(today)

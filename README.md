@@ -34,6 +34,14 @@ eligible messages without an age cutoff. Large history jobs are applied in
 restart-safe groups of 50, so completed work is saved continuously and never
 duplicated.
 
+The dashboard shows live analysis and drafting progress, keeps failed runs
+visible until they are resolved, and provides a review queue with direct links
+to Gmail drafts. A coach profile stores the owner's role, program, signature,
+and voice guidance. For recruiting messages, the classifier also extracts the
+stated recruit name, graduation year, position, school or club, and location.
+The dashboard marks these details as AI-extracted so the coach verifies them
+against the original email before sending.
+
 Triage assigns messages to categories configured for that account, then adds
 the matching Gmail labels. Existing labels are left alone. A one-time,
 account-bound activation can enable an unsent AI draft for every message with a
@@ -46,9 +54,9 @@ and Needs Review labels plus a neutral acknowledgement draft.
 
 The activation is off by default and tied to a digest of the account settings.
 The account owner must type the full confirmation; `--yes` cannot create it.
-Every generated draft carries a fixed warning and remains in Gmail for the
-owner to review, edit, send manually, or discard. Failed or rejected generation
-is retried once, then replaced with a fact-free acknowledgement. Older
+Every generated reply remains in Gmail Drafts for the owner to review, edit,
+send manually, or discard. Failed or rejected generation is retried once, then
+replaced with a fact-free acknowledgement. Older
 category-specific and fixed-template approvals remain supported for migration.
 
 Recruiting-year labels have their own check. A classification alone cannot add
