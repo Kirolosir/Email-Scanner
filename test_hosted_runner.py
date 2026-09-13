@@ -272,6 +272,15 @@ def test_history_request_overrides_batch_and_uses_all_history_query(
 
     def daily_main(argv, *, gmail_service=None, message_ids_override=None):
         calls.append((argv, gmail_service, list(message_ids_override or [])))
+        if len(calls) == 1:
+            daily_main.last_result = {
+                "failed_ids": [message_ids[0]],
+                "completed_ids": message_ids[1:50],
+            }
+            return 1
+        daily_main.last_result = {
+            "failed_ids": [], "completed_ids": message_ids[50:]
+        }
         return 0
 
     monkeypatch.setattr(
@@ -281,6 +290,10 @@ def test_history_request_overrides_batch_and_uses_all_history_query(
     assert runner.run_if_due(env, now=now, service_builder=service_builder) == 0
     assert [len(call[2]) for call in calls] == [50, 25]
     assert [call[2] for call in calls] == [message_ids[:50], message_ids[50:]]
+    queued = json.loads(
+        (seat.directory / runner.RETRY_QUEUE_FILE).read_text(encoding="utf-8")
+    )
+    assert [item["message_id"] for item in queued["entries"]] == [message_ids[0]]
     argv = calls[0][0]
     assert "--history-scan" in argv
     assert "--force" in argv

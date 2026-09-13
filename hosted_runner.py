@@ -391,12 +391,13 @@ def run_if_due(env=None, *, now=None, service_builder=build,
                 values.append("--force")
             return values
 
-        def _update_reliability(code):
-            result = getattr(daily_triage.main, "last_result", {}) or {}
-            retry_queue.update(
-                result.get("failed_ids", ()), result.get("completed_ids", ()),
-                now=now,
-            )
+        def _update_reliability(code, *, apply_result=True):
+            if apply_result:
+                result = getattr(daily_triage.main, "last_result", {}) or {}
+                retry_queue.update(
+                    result.get("failed_ids", ()),
+                    result.get("completed_ids", ()), now=now,
+                )
             status = RunStatus(status_path)
             run = status.data.get("last_run") or {}
             counts = dict(run.get("counts") or {})
@@ -469,7 +470,7 @@ def run_if_due(env=None, *, now=None, service_builder=build,
             if not message_ids:
                 overall_status.finish(True, aggregate)
                 print("No eligible historical messages were found.")
-                return _update_reliability(0)
+                return _update_reliability(0, apply_result=False)
 
             overall_status = RunStatus(status_path)
             overall_status.progress(
@@ -494,7 +495,8 @@ def run_if_due(env=None, *, now=None, service_builder=build,
                     result.get("completed_ids", ()), now=now,
                 )
                 _add_counts(aggregate, _latest_counts(status_path))
-                if code != 0:
+                queued_failures = bool(result.get("failed_ids"))
+                if code != 0 and not queued_failures:
                     status = RunStatus(status_path)
                     status.finish(
                         False, aggregate, ["history_chunk_failed"]
@@ -518,7 +520,7 @@ def run_if_due(env=None, *, now=None, service_builder=build,
                     f"History progress: {completed} of "
                     f"{len(message_ids)} selected messages checked."
                 )
-            return _update_reliability(0)
+            return _update_reliability(0, apply_result=False)
         finally:
             campaign.DRAFT_LOG_DIR = old_log_dir
             credentials = None
