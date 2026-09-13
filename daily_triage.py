@@ -338,7 +338,8 @@ def select_candidates(messages, limit, already_processed):
 
 
 def already_processed_for_draft_policy(
-        message, processed_name, state, account_wide_drafting=False):
+        message, processed_name, state, account_wide_drafting=False,
+        draft_threads=None):
     """Whether a message is complete under the drafting policy now in force.
 
     The Gmail label remains sufficient for legacy/category-only operation.
@@ -354,7 +355,9 @@ def already_processed_for_draft_policy(
     if not completed or not account_wide_drafting:
         return completed
     if record.get("draft_id"):
-        return True
+        if draft_threads is None:
+            return True
+        return draft_threads.get(message.get("threadId", "")) == record["draft_id"]
     return (
         record.get("draft_policy_version", 0)
         >= CURRENT_DRAFT_POLICY_VERSION
@@ -476,9 +479,15 @@ def reconcile_existing_drafts(plans, state, draft_threads, config):
             and recorded_id == existing_id
         ))
         missing_owned = bool(
-            recorded_status == "draft_created" and recorded_id and not existing_id
+            recorded_status in {"draft_created", "complete"}
+            and recorded_id and not existing_id
         )
-        if not (external or missing_owned):
+        if missing_owned:
+            # The source message is still replyable, but its program-owned
+            # draft was deleted. Recreate it instead of trusting stale state.
+            plan["replace_missing_owned_draft"] = True
+            continue
+        if not external:
             continue
         plan["template"] = None
         plan["template_key"] = None
@@ -486,8 +495,6 @@ def reconcile_existing_drafts(plans, state, draft_threads, config):
         plan["missing_owned_draft"] = missing_owned
         plan["draft_skip"] = (
             "existing manual/external draft requires review; not drafting"
-            if external else
-            "program-recorded draft is missing; requires review; not drafting"
         )
         if review_name not in email.get("label_names", []):
             if review_name not in plan["decision"].add:
@@ -561,7 +568,8 @@ def execute_daily_plan(service, plan, account_labels, throttle, draft_log,
 
     if plan["template"] is not None:
         record = state.record_for(message_id)
-        if record.get("status") in {"draft_created", "complete"}:
+        if (record.get("status") in {"draft_created", "complete"}
+                and not plan.get("replace_missing_owned_draft")):
             draft_id = record.get("draft_id", "")
         elif (thread_id in draft_threads and created_draft_threads is not None
               and thread_id in created_draft_threads):
@@ -946,11 +954,16 @@ def _run_locked(args, classifier, config, templates, state, status,
         )
         and getattr(args.ai_drafting_approvals, "include_bulk_messages", False)
     )
+    # Read the draft index before candidate selection. A completion record is
+    # only skipped when its draft still exists in Gmail; if the owner deleted
+    # that draft, the message is revisited and the missing draft is restored.
+    draft_threads = list_existing_draft_threads(service, throttle)
 
     def _already_processed(message):
         attach_label_names([message], account_labels)
         return already_processed_for_draft_policy(
-            message, processed_name, state, account_wide_drafting
+            message, processed_name, state, account_wide_drafting,
+            draft_threads,
         )
 
     def _would_consume_budget(message):
@@ -1014,9 +1027,6 @@ def _run_locked(args, classifier, config, templates, state, status,
     counts["classified"] = sum(plan["classification_called"] for plan in plans)
     counts["skipped"] += sum(
         bool(plan.get("suppression_code")) for plan in plans
-    )
-    draft_threads = (
-        list_existing_draft_threads(service, throttle) if plans else {}
     )
     reconcile_existing_drafts(plans, state, draft_threads, config)
 

@@ -964,8 +964,12 @@ class HostedDashboardApp:
             ) if value
         ) or "Add your role and program so replies sound like you."
 
+        count_labels = {
+            "drafted": "new drafts",
+            "skipped": "already covered / no reply address",
+        }
         count_cards = "".join(
-            f'<div class="metric"><span>{_escape(key.replace("_", " "))}</span>'
+            f'<div class="metric"><span>{_escape(count_labels.get(key, key.replace("_", " ")))}</span>'
             f'<strong>{value}</strong></div>'
             for key, value in counts.items()
         ) or '<p class="empty">Results will appear after the first run.</p>'
@@ -1018,8 +1022,9 @@ class HostedDashboardApp:
             <div><p class="eyebrow">Inbox catch-up</p>
               <h2>Scan previous emails</h2>
               <p>Choose how many of the newest eligible messages to check.
-              Each one gets a label, and every safe reply address gets one
-              unsent draft. Already-completed messages are not duplicated.
+              Every message with a usable reply address ends with one unsent
+              draft. Existing drafts are kept, and deleted program drafts are
+              rebuilt instead of being silently skipped.
               Larger batches take longer because every reply is written
               individually; 5,000 messages can run for many hours.</p></div>
             <form method="post" action="/run-history">
@@ -1087,7 +1092,7 @@ class HostedDashboardApp:
               </article>
               <article class="panel labels">
                 <div class="section-head"><div><p class="eyebrow">Rules</p>
-                  <h2>Your AI labels</h2></div>
+                  <h2>Your Gmail labels</h2></div>
                   <div class="section-actions"><span class="count-badge">{len(labels)}</span>
                   {settings_link}</div></div>
                 <ul>{label_rows}</ul>
@@ -1130,11 +1135,11 @@ class HostedDashboardApp:
         ai = ai if isinstance(ai, dict) else {}
         return {
             "labels": "\n".join(lines) or (
-                "Action needed | AI/Action Needed\n"
-                "Scheduling | AI/Scheduling\n"
-                "Finance | AI/Finance\n"
-                "Newsletters | AI/Newsletters\n"
-                "Other | AI/Other"
+                "Action needed | Action Needed\n"
+                "Scheduling | Scheduling\n"
+                "Finance | Finance\n"
+                "Newsletters | Newsletters\n"
+                "Other | Other"
             ),
             "timezone": str(document.get("timezone")
                             or occupant.timezone_name),
@@ -1190,7 +1195,7 @@ class HostedDashboardApp:
                 <div><label for="labels">Labels, up to 12</label>
                   <textarea id="labels" name="labels" rows="8" required
                     spellcheck="false">{fields['labels']}</textarea>
-                  <p class="field-note">Example: Scheduling | AI/Scheduling</p></div>
+                  <p class="field-note">Example: Scheduling | Scheduling</p></div>
               </section>
               <section class="panel form-section">
                 <div class="form-copy"><p class="eyebrow">2 · Schedule</p>

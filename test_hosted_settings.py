@@ -33,6 +33,10 @@ def test_label_lines_create_safe_categories_and_other_fallback():
         "scheduling", "finance", "other"
     ]
     assert categories[0]["label"] == "AI/Scheduling"
+    assert settings.parse_label_lines("Scheduling")[0]["label"] == "Scheduling"
+    assert settings.DEFAULT_SYSTEM_LABELS == {
+        "needs_review": "Needs Review", "processed": "Processed",
+    }
 
 
 def test_invalid_and_duplicate_labels_are_refused():

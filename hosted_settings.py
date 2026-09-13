@@ -37,8 +37,8 @@ DEFAULT_DRAFT_GUIDANCE = (
     "tone warm, direct, and natural."
 )
 DEFAULT_SYSTEM_LABELS = {
-    "needs_review": "AI/Needs Review",
-    "processed": "AI/Processed",
+    "needs_review": "Needs Review",
+    "processed": "Processed",
 }
 
 
@@ -71,7 +71,7 @@ def parse_label_lines(raw):
     for line in lines:
         display, separator, label = line.partition("|")
         display = display.strip()
-        label = label.strip() if separator else f"AI/{display}"
+        label = label.strip() if separator else display
         if not display:
             raise SettingsError("every label needs a display name")
         try:
@@ -105,10 +105,10 @@ def parse_label_lines(raw):
             "display": "Other",
             "description": "Replyable messages that fit no narrower category.",
             "examples": [],
-            "label": "AI/Other",
+            "label": "Other",
             "drafting": {"mode": "generic"},
         })
-        names.add("ai/other")
+        names.add("other")
 
     for system_name in DEFAULT_SYSTEM_LABELS.values():
         if system_name.casefold() in names:

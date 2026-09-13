@@ -52,6 +52,12 @@ targets, self-replies, missing or ambiguous addresses, and malformed reply
 metadata never get a new draft. Uncertain messages receive the configured Other
 and Needs Review labels plus a neutral acknowledgement draft.
 
+For account-wide runs, saved completion state is checked against the drafts
+that currently exist in Gmail. If a program-created draft was deleted, the
+message becomes eligible again and the missing draft is rebuilt. Hosted label
+defaults use ordinary Gmail names such as `Finance`, `Other`, `Needs Review`,
+and `Processed`; they do not add an `AI/` prefix.
+
 The activation is off by default and tied to a digest of the account settings.
 The account owner must type the full confirmation; `--yes` cannot create it.
 Every generated reply remains in Gmail Drafts for the owner to review, edit,

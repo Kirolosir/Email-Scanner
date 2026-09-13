@@ -909,6 +909,44 @@ def test_recorded_draft_is_complete_across_draft_policy_upgrade(tmp_path):
     ) is True
 
 
+def test_recorded_draft_is_revisited_when_it_was_deleted_from_gmail(tmp_path):
+    state = DailyState(tmp_path / "state.json")
+    state.data["messages"]["drafted"] = {
+        "status": "complete", "thread_id": "t1", "draft_id": "d1",
+        "draft_policy_version": 2,
+    }
+    message = {
+        "id": "drafted", "threadId": "t1", "_label_names": ["Processed"],
+    }
+    assert already_processed_for_draft_policy(
+        message, "Processed", state, account_wide_drafting=True,
+        draft_threads={"t1": "d1"},
+    ) is True
+    assert already_processed_for_draft_policy(
+        message, "Processed", state, account_wide_drafting=True,
+        draft_threads={},
+    ) is False
+
+
+def test_missing_program_owned_draft_is_recreated(tmp_path):
+    plan = _execution_plan()
+    state = DailyState(tmp_path / "state.json")
+    state.record_complete("m1", "t1", "deleted-draft", draft_policy_version=2)
+    reconcile_existing_drafts([plan], state, {}, CONFIG)
+    assert plan["replace_missing_owned_draft"] is True
+    assert plan["template"] is not None
+
+    service = _ExecutionGmail()
+    log = _Log()
+    _added, draft_id, errors = execute_daily_plan(
+        service, plan, ACCOUNT_LABELS, QuotaThrottle(100_000), log,
+        state, {}, set(),
+    )
+    assert errors == []
+    assert draft_id == "draft-1"
+    assert state.record_for("m1")["draft_id"] == "draft-1"
+
+
 def test_account_wide_candidate_read_stops_at_draft_cap():
     assert candidate_read_limit(25, 5, account_wide_drafting=True) == 5
     assert candidate_read_limit(3, 5, account_wide_drafting=True) == 3
