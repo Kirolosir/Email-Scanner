@@ -5,9 +5,9 @@ This is a Python tool for sorting a Gmail inbox and saving reply drafts. It
 never sends mail. The person using the account opens each draft in Gmail and
 decides whether to edit, send, or delete it.
 
-Created as a college-junior software engineering project, it combines a small
-Python web dashboard, Google OAuth, the Gmail API, scheduled background work,
-and Gemini-powered classification and reply generation.
+The project combines a small Python web dashboard, Google OAuth, the Gmail API,
+scheduled background work, and Gemini-powered classification and reply
+generation.
 
 ## What it does
 

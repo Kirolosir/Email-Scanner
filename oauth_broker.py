@@ -353,9 +353,8 @@ class OAuthBroker:
                 start_response,
                 "Email Scanner",
                 """
-                <p class="lede">An inbox assistant built by a college junior
-                for one
-                connected Google account.</p>
+                <p class="lede">An inbox assistant for one connected Google
+                account.</p>
                 <p>Email Scanner organizes Gmail with labels and creates
                 reply drafts for review. It never sends email automatically.</p>
                 <p><a href="/privacy">Privacy policy</a>
@@ -409,9 +408,8 @@ class OAuthBroker:
                 "Terms of service",
                 """
                 <p class="updated">Last updated September 9, 2026</p>
-                <p>Email Scanner is an inbox assistant built by a college
-                junior. Use it only with a Google account you own or are
-                authorized to manage.</p>
+                <p>Email Scanner is an inbox assistant. Use it only with a
+                Google account you own or are authorized to manage.</p>
                 <p>The app applies labels and creates draft replies; it does
                 not send messages automatically. You are responsible for
                 reviewing every draft and for changes made in your mailbox.</p>

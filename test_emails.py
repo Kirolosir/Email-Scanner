@@ -31,7 +31,7 @@ TEST_EMAILS = [
         "from": "rebecca.chen.parent@gmail.com",
         "subject": "On behalf of my son Marcus Chen",
         "body": "Hi Coach, I'm Marcus Chen's mother - he's a "
-                "junior midfielder who emailed you last month. He's a "
+                "midfielder who emailed you last month. He's a "
                 "bit shy about reaching out too often so I wanted to "
                 "follow up and ask whether you'll be at the showcase in "
                 "October.",
