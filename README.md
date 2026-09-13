@@ -46,6 +46,18 @@ stated recruit name, graduation year, position, school or club, and location.
 The dashboard marks these details as model-extracted so the coach verifies them
 against the original email before sending.
 
+Each completed run also publishes a content-free reliability summary. It
+separates created, preserved, and rebuilt drafts from messages without a safe
+reply address and from retrieval or generation failures. Temporary failures
+enter a private, bounded retry queue; the existing 15-minute scheduler resumes
+only the due messages, so a large history job does not need to start over.
+Configuration and bounded run history are encrypted with the deployment key,
+written to rotating backups, decrypted immediately for an integrity check, and
+covered by an offline restore test. The dashboard reports Gmail requests and
+retries, quota units, model calls and tokens, estimated standard paid-tier
+cost, run
+time, average run time, queue depth, and backup health.
+
 Triage assigns messages to categories configured for that account, then adds
 the matching Gmail labels. Existing labels are left alone. A one-time,
 account-bound activation can enable an unsent generated draft for every message with a

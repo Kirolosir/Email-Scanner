@@ -17,6 +17,12 @@ REPORT_VERSION = 1
 COUNT_KEYS = frozenset({
     "scanned", "classified", "labeled", "drafted", "needs_review",
     "skipped", "failures", "deferred_draft_limit", "deferred_write_limit",
+    "drafts_existing", "drafts_rebuilt", "no_reply_address",
+    "fetch_failures", "generation_fallbacks", "retry_queued",
+    "gmail_requests", "gmail_retries", "gmail_quota_units", "gemini_calls",
+    "gemini_input_tokens", "gemini_output_tokens", "estimated_cost_microusd",
+    "duration_seconds", "average_duration_seconds", "backup_verified",
+    "backup_failures",
 })
 REASON_CODES = frozenset({
     "automated_message",

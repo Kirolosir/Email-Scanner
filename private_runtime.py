@@ -228,7 +228,13 @@ class RunStatus:
     COUNT_KEYS = {
         "scanned", "classified", "labeled", "drafted", "needs_review",
         "skipped", "failures", "deferred_draft_limit",
-        "deferred_write_limit",
+        "deferred_write_limit", "drafts_existing", "drafts_rebuilt",
+        "no_reply_address", "fetch_failures", "generation_fallbacks",
+        "retry_queued", "gmail_requests", "gmail_retries",
+        "gmail_quota_units", "gemini_calls", "gemini_input_tokens",
+        "gemini_output_tokens", "estimated_cost_microusd",
+        "duration_seconds", "average_duration_seconds", "backup_verified",
+        "backup_failures",
     }
 
     def __init__(self, path):
@@ -301,11 +307,34 @@ class RunStatus:
 
     def finish(self, success, counts=None, error_codes=(), lock_held=False):
         run = self.data.get("last_run") or {}
+        prior_finished_at = run.get("finished_at")
         normalized_counts = {key: 0 for key in sorted(self.COUNT_KEYS)}
         for key, value in (counts or {}).items():
             if key in self.COUNT_KEYS:
                 normalized_counts[key] = max(0, int(value))
         now = self._timestamp()
+        try:
+            started = dt.datetime.fromisoformat(str(run.get("started_at")))
+            finished = dt.datetime.fromisoformat(now)
+            normalized_counts["duration_seconds"] = max(
+                0, round((finished - started).total_seconds())
+            )
+        except (TypeError, ValueError):
+            pass
+        history = list(self.data.get("history", []))[-30:]
+        if (prior_finished_at and history
+                and history[-1].get("finished_at") == prior_finished_at):
+            history.pop()
+        prior_durations = [
+            item.get("duration_seconds") for item in history
+            if isinstance(item, dict)
+            and isinstance(item.get("duration_seconds"), int)
+            and item.get("duration_seconds") >= 0
+        ]
+        durations = prior_durations + [normalized_counts["duration_seconds"]]
+        normalized_counts["average_duration_seconds"] = round(
+            sum(durations) / len(durations)
+        )
         run.update({
             "outcome": "success" if success else "failed",
             "counts": normalized_counts,
@@ -318,4 +347,17 @@ class RunStatus:
         self.data["last_run"] = run
         if success:
             self.data["last_successful_at"] = now
+        history = history[-29:]
+        history.append({
+            "finished_at": now,
+            "outcome": run["outcome"],
+            "duration_seconds": normalized_counts["duration_seconds"],
+            "gmail_requests": normalized_counts["gmail_requests"],
+            "gemini_calls": normalized_counts["gemini_calls"],
+            "failures": normalized_counts["failures"],
+            "estimated_cost_microusd": normalized_counts[
+                "estimated_cost_microusd"
+            ],
+        })
+        self.data["history"] = history
         atomic_write_json(self.path, self.data)

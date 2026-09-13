@@ -826,16 +826,28 @@ def _run_locked(args, classifier, config, templates, state, status,
         "scanned": 0, "classified": 0, "labeled": 0, "drafted": 0,
         "needs_review": 0, "skipped": 0, "failures": 0,
         "deferred_draft_limit": 0, "deferred_write_limit": 0,
+        "drafts_existing": 0, "drafts_rebuilt": 0,
+        "no_reply_address": 0, "fetch_failures": 0,
+        "generation_fallbacks": 0, "retry_queued": 0,
     }
     report_plans = []
     deferred_reasons = {}
+    retry_failed_ids = set()
+    retry_completed_ids = set()
 
     def done(code, error_codes=()):
+        from runtime_metrics import snapshot
+        counts.update(snapshot())
+        counts["retry_queued"] = len(retry_failed_ids)
         args._review_context = {
             "plans": list(report_plans),
             "counts": dict(counts),
             "deferred_reasons": dict(deferred_reasons),
             "error_codes": list(error_codes),
+        }
+        args._retry_context = {
+            "failed_ids": sorted(retry_failed_ids),
+            "completed_ids": sorted(retry_completed_ids - retry_failed_ids),
         }
         status.finish(code == 0, counts, error_codes=error_codes)
         return code
@@ -985,14 +997,28 @@ def _run_locked(args, classifier, config, templates, state, status,
         limit=candidate_limit, is_candidate=_would_consume_budget,
     )
     for message_id, failure in failures:
+        retry_failed_ids.add(message_id)
         display_id = opaque_id(message_id) if args.scheduled else message_id
         print(f"  ERROR {display_id}: fetch failed ({failure}); skipped")
     counts["failures"] += len(failures)
+    counts["fetch_failures"] = len(failures)
     attach_label_names(messages, account_labels)
     candidates, skipped = select_candidates(
         messages, candidate_limit, _already_processed
     )
     counts["skipped"] += skipped
+    candidate_ids = {message["id"] for message in candidates}
+    for message in messages:
+        if message["id"] in candidate_ids:
+            continue
+        record = state.record_for(message["id"])
+        if (record.get("draft_id")
+                and draft_threads.get(message.get("threadId", ""))
+                == record.get("draft_id")):
+            counts["drafts_existing"] += 1
+        else:
+            counts["no_reply_address"] += 1
+        retry_completed_ids.add(message["id"])
 
     plans = []
     for index, message in enumerate(candidates, start=1):
@@ -1031,6 +1057,14 @@ def _run_locked(args, classifier, config, templates, state, status,
         bool(plan.get("suppression_code")) for plan in plans
     )
     reconcile_existing_drafts(plans, state, draft_threads, config)
+    counts["generation_fallbacks"] = sum(
+        bool(plan.get("draft_fallback_used")) for plan in plans
+    )
+    counts["no_reply_address"] += sum(
+        plan.get("suppression_code") in {
+            "automated_message", "unsafe_reply_metadata"
+        } for plan in plans
+    )
 
     # The write budget is applied HERE, before the preview, so a dry run
     # reports exactly what an --apply run would do. Computing it in the
@@ -1138,6 +1172,14 @@ def _run_locked(args, classifier, config, templates, state, status,
                     if args.scheduled else plan["email"]["message_id"]
                 )
                 print(f"  ERROR {display_id}: {code} ({error.rsplit('(', 1)[-1].rstrip(')')})")
+                retry_failed_ids.add(plan["email"]["message_id"])
+            if not plan_errors:
+                retry_completed_ids.add(plan["email"]["message_id"])
+            if (plan.get("new_draft_created")
+                    and plan.get("replace_missing_owned_draft")):
+                counts["drafts_rebuilt"] += 1
+            elif _draft_id and not plan.get("new_draft_created"):
+                counts["drafts_existing"] += 1
             counts["drafted"] = draft_log.count
             status.progress(
                 "Creating Gmail labels and drafts", counts,
@@ -1154,6 +1196,8 @@ def _run_locked(args, classifier, config, templates, state, status,
 
 def _main_with_args(args, classifier=None, gmail_service=None,
                     message_ids_override=None):
+    from runtime_metrics import reset
+    reset()
     logging.basicConfig(
         level=logging.WARNING if args.scheduled else logging.INFO,
         format="%(levelname)s %(message)s",
@@ -1294,9 +1338,13 @@ def main(argv=None, classifier=None, gmail_service=None,
         except OSError:
             pass
     code = _finalize_review_report(args, reporter, code)
+    main.last_result = dict(getattr(args, "_retry_context", {}) or {})
     if args.notify_on_failure and code != 0:
         notify_failure(code, _status_document(args.status_path))
     return code
+
+
+main.last_result = {}
 
 
 if __name__ == "__main__":

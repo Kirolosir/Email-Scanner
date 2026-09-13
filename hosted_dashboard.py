@@ -33,7 +33,12 @@ GMAIL_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 COUNT_KEYS = (
     "scanned", "classified", "labeled", "drafted", "needs_review",
     "skipped", "failures", "deferred_draft_limit",
-    "deferred_write_limit",
+    "deferred_write_limit", "drafts_existing", "drafts_rebuilt",
+    "no_reply_address", "fetch_failures", "generation_fallbacks",
+    "retry_queued", "gmail_requests", "gmail_retries", "gmail_quota_units",
+    "gemini_calls", "gemini_input_tokens", "gemini_output_tokens",
+    "estimated_cost_microusd", "duration_seconds", "average_duration_seconds",
+    "backup_verified", "backup_failures",
 )
 
 HTML_HEADERS = [
@@ -965,14 +970,62 @@ class HostedDashboardApp:
         ) or "Add your role and program so replies sound like you."
 
         count_labels = {
-            "drafted": "new drafts",
-            "skipped": "already covered / no reply address",
+            "drafted": "drafts created",
+            "drafts_existing": "existing drafts preserved",
+            "drafts_rebuilt": "missing drafts rebuilt",
+            "no_reply_address": "no reply address",
+            "fetch_failures": "email retrieval failures",
+            "generation_fallbacks": "generation fallbacks",
+            "retry_queued": "queued for retry",
+            "gmail_requests": "Gmail requests",
+            "gmail_retries": "Gmail retries",
+            "gmail_quota_units": "Gmail quota units",
+            "gemini_calls": "model calls",
+            "gemini_input_tokens": "input tokens",
+            "gemini_output_tokens": "output tokens",
+            "estimated_cost_microusd": "estimated cost (millionths of $)",
+            "duration_seconds": "run time (seconds)",
+            "average_duration_seconds": "average run time (seconds)",
+            "backup_verified": "verified backups",
+            "backup_failures": "backup failures",
         }
+        coverage_keys = {
+            "drafted", "drafts_existing", "drafts_rebuilt",
+            "no_reply_address", "fetch_failures", "generation_fallbacks",
+            "retry_queued",
+        }
+        usage_keys = {
+            "gmail_requests", "gmail_retries", "gmail_quota_units",
+            "gemini_calls", "gemini_input_tokens", "gemini_output_tokens",
+            "estimated_cost_microusd", "duration_seconds",
+            "average_duration_seconds", "backup_verified", "backup_failures",
+        }
+
+        def metric_cards(keys):
+            cards = []
+            for key, value in counts.items():
+                if key not in keys:
+                    continue
+                displayed = (
+                    f"${value / 1_000_000:.4f}"
+                    if key == "estimated_cost_microusd" else str(value)
+                )
+                cards.append(
+                    f'<div class="metric"><span>{_escape(count_labels.get(key, key.replace("_", " ")))}</span>'
+                    f'<strong>{_escape(displayed)}</strong></div>'
+                )
+            return "".join(cards) or (
+                '<p class="empty">Results will appear after the first run.</p>'
+            )
+
         count_cards = "".join(
             f'<div class="metric"><span>{_escape(count_labels.get(key, key.replace("_", " ")))}</span>'
             f'<strong>{value}</strong></div>'
             for key, value in counts.items()
+            if key not in coverage_keys | usage_keys
         ) or '<p class="empty">Results will appear after the first run.</p>'
+        coverage_cards = metric_cards(coverage_keys)
+        usage_cards = metric_cards(usage_keys)
         label_rows = "".join(
             '<li><div><strong>' + _escape(item["display"]) + '</strong>'
             '<span>' + _escape(item["name"]) + '</span></div>'
@@ -1096,6 +1149,19 @@ class HostedDashboardApp:
                   <div class="section-actions"><span class="count-badge">{len(labels)}</span>
                   {settings_link}</div></div>
                 <ul>{label_rows}</ul>
+              </article>
+            </section>
+
+            <section class="content-grid">
+              <article class="panel results">
+                <div class="section-head"><div><p class="eyebrow">Coverage</p>
+                  <h2>Draft coverage</h2></div></div>
+                <div class="metrics">{coverage_cards}</div>
+              </article>
+              <article class="panel results">
+                <div class="section-head"><div><p class="eyebrow">Reliability</p>
+                  <h2>Usage and recovery</h2></div></div>
+                <div class="metrics">{usage_cards}</div>
               </article>
             </section>
 

@@ -142,6 +142,10 @@ def gmail_execute(request, *, attempts=MAX_GMAIL_ATTEMPTS, sleeper=time.sleep):
 
     last = None
     for attempt in range(1, max(1, int(attempts)) + 1):
+        from runtime_metrics import add
+        add("gmail_requests")
+        if attempt > 1:
+            add("gmail_retries")
         try:
             return request.execute()
         except TRANSPORT_FAULTS as exc:

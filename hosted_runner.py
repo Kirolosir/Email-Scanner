@@ -39,6 +39,8 @@ import hosted_run_request
 import hosted_settings
 from private_runtime import RunStatus, ensure_private_directory
 import setup_labels
+from encrypted_backup import create_verified_backup
+from retry_queue import RetryQueue
 from triage_config import load_triage_label_config
 
 
@@ -50,6 +52,8 @@ STATUS_FILE = "daily-status.json"
 LOCK_DIR = "locks"
 REVIEW_DIR = "review"
 DRAFT_LOG_DIR = "draft-logs"
+RETRY_QUEUE_FILE = "retry-queue.json"
+BACKUP_DIR = "backups"
 PENDING_LABEL_SETUP = hosted_settings.PENDING_LABEL_SETUP
 HISTORY_CHUNK_SIZE = 50
 
@@ -287,6 +291,7 @@ def run_if_due(env=None, *, now=None, service_builder=build,
 
         active = Path(occupant.directory)
         status_path = active / STATUS_FILE
+        retry_queue = RetryQueue(active / RETRY_QUEUE_FILE)
         try:
             run_request = hosted_run_request.consume_request(
                 active, occupant, now=now
@@ -324,7 +329,10 @@ def run_if_due(env=None, *, now=None, service_builder=build,
         due, reason = connection_schedule.is_due(
             occupant, now, last_completed_date=last_completed
         )
-        if not due and not force_requested and prepared_labels is None:
+        retry_ids = retry_queue.due(now, occupant.max_scan)
+        retry_requested = bool(retry_ids and not due and not force_requested)
+        if (not due and not force_requested and prepared_labels is None
+                and not retry_requested):
             print(f"No run due: {reason}.")
             return 0
 
@@ -350,7 +358,7 @@ def run_if_due(env=None, *, now=None, service_builder=build,
                 _record_blocked(status_path, "label_setup_failed")
                 print(f"Gmail label setup stopped safely ({type(exc).__name__}).")
                 return 2
-            if not due and not force_requested:
+            if not due and not force_requested and not retry_requested:
                 print("Reviewed Gmail labels are ready; no daily run was due.")
                 return 0
 
@@ -379,9 +387,36 @@ def run_if_due(env=None, *, now=None, service_builder=build,
             ]
             if history:
                 values.append("--history-scan")
-            if force_requested:
+            if force_requested or retry_requested:
                 values.append("--force")
             return values
+
+        def _update_reliability(code):
+            result = getattr(daily_triage.main, "last_result", {}) or {}
+            retry_queue.update(
+                result.get("failed_ids", ()), result.get("completed_ids", ()),
+                now=now,
+            )
+            status = RunStatus(status_path)
+            run = status.data.get("last_run") or {}
+            counts = dict(run.get("counts") or {})
+            counts["retry_queued"] = len(retry_queue)
+            error_codes = list(run.get("safe_error_codes") or [])
+            if (not callable(getattr(provider, "wrap", None))
+                    or not callable(getattr(provider, "unwrap", None))):
+                status.finish(code == 0, counts, error_codes)
+                return code
+            try:
+                create_verified_backup(
+                    active, active / BACKUP_DIR, occupant.id, provider, now=now
+                )
+                counts["backup_verified"] = 1
+            except Exception as exc:  # noqa: BLE001 - status remains PII-free
+                counts["backup_failures"] = 1
+                error_codes.append("backup_verification_failed")
+                print(f"Encrypted backup stopped safely ({type(exc).__name__}).")
+            status.finish(code == 0, counts, error_codes)
+            return code
 
         # DraftLog uses the profile's configured path. Keep hosted artifacts on
         # the durable active volume even if a restored profile names an old local
@@ -390,11 +425,19 @@ def run_if_due(env=None, *, now=None, service_builder=build,
         campaign.DRAFT_LOG_DIR = str(active / DRAFT_LOG_DIR)
         try:
             if history_count is None:
+                scan_limit = len(retry_ids) if retry_requested else occupant.max_scan
                 argv = _argv(
-                    occupant.max_scan,
+                    scan_limit,
                     _review_path(active / REVIEW_DIR, now),
                 )
-                return daily_triage.main(argv, gmail_service=gmail_service)
+                if retry_requested:
+                    code = daily_triage.main(
+                        argv, gmail_service=gmail_service,
+                        message_ids_override=retry_ids,
+                    )
+                else:
+                    code = daily_triage.main(argv, gmail_service=gmail_service)
+                return _update_reliability(code)
 
             overall_status = RunStatus(status_path)
             overall_status.start("daily:history-batch")
@@ -426,7 +469,7 @@ def run_if_due(env=None, *, now=None, service_builder=build,
             if not message_ids:
                 overall_status.finish(True, aggregate)
                 print("No eligible historical messages were found.")
-                return 0
+                return _update_reliability(0)
 
             overall_status = RunStatus(status_path)
             overall_status.progress(
@@ -444,6 +487,11 @@ def run_if_due(env=None, *, now=None, service_builder=build,
                 code = daily_triage.main(
                     argv, gmail_service=gmail_service,
                     message_ids_override=chunk,
+                )
+                result = getattr(daily_triage.main, "last_result", {}) or {}
+                retry_queue.update(
+                    result.get("failed_ids", ()),
+                    result.get("completed_ids", ()), now=now,
                 )
                 _add_counts(aggregate, _latest_counts(status_path))
                 if code != 0:
@@ -470,7 +518,7 @@ def run_if_due(env=None, *, now=None, service_builder=build,
                     f"History progress: {completed} of "
                     f"{len(message_ids)} selected messages checked."
                 )
-            return 0
+            return _update_reliability(0)
         finally:
             campaign.DRAFT_LOG_DIR = old_log_dir
             credentials = None

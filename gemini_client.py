@@ -420,10 +420,14 @@ def generate_text(prompt, max_retries=3, model=None):
     for attempt in range(1, max_retries + 1):
         _throttle()
         _call_count += 1
+        from runtime_metrics import record_model_call
+        record_model_call()
         try:
             response = get_client().models.generate_content(
                 model=model, contents=prompt,
             )
+            from runtime_metrics import record_model_response
+            record_model_response(response)
         except Exception as exc:
             status = _status_code(exc)
             if not is_transient_error(exc):
@@ -475,11 +479,15 @@ def classify(email, max_retries=3, model=None, profile=None):
     for attempt in range(1, max_retries + 1):
         _throttle()
         _call_count += 1
+        from runtime_metrics import record_model_call
+        record_model_call()
         try:
             response = get_client().models.generate_content(
                 model=model,
                 contents=prompt,
             )
+            from runtime_metrics import record_model_response
+            record_model_response(response)
         except Exception as exc:
             status = _status_code(exc)
             if not is_transient_error(exc):

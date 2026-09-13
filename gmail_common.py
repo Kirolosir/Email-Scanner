@@ -46,6 +46,8 @@ class QuotaThrottle:
     def consume(self, units):
         if units < 0:
             raise ValueError("quota units cannot be negative")
+        from runtime_metrics import add
+        add("gmail_quota_units", units)
         now = time.monotonic()
         scheduled = max(now, self._next_available)
         wait = scheduled - now
