@@ -3,7 +3,7 @@
 Saving settings is the account owner's explicit approval of the displayed
 label set and unsent-draft policy. The connection is disabled before any of
 the related files change and re-enabled only after the config, taxonomy
-confirmation, AI approval, and pending Gmail-label setup record all exist.
+confirmation, drafting approval, and pending Gmail-label setup record all exist.
 A crash or partial disk failure therefore stops scheduled work instead of
 running with a half-old approval bundle.
 """
@@ -151,7 +151,7 @@ def build_settings_document(occupant, form):
         )
     if form.get("confirm_unsent_drafts") != "yes":
         raise SettingsError(
-            "confirm that AI responses are unsent drafts requiring review"
+            "confirm that generated responses are unsent drafts requiring review"
         )
 
     document = {
@@ -215,7 +215,7 @@ def save_settings(root, form):
         except ValueError as exc:
             raise SettingsError("settings approval could not be created") from exc
         if ai_document is None:
-            raise SettingsError("AI draft approval was not produced")
+            raise SettingsError("drafting approval was not produced")
 
         # Stop the timer before the multi-file bundle changes. Re-enabling is
         # the commit marker; any failure in between remains visibly disabled.

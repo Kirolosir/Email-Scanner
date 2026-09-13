@@ -40,7 +40,10 @@ def parse_args(argv=None):
     )
     parser.add_argument("--account-config", required=True)
     parser.add_argument("--taxonomy-confirmation", required=True)
-    parser.add_argument("--ai-drafting-approval")
+    parser.add_argument(
+        "--drafting-approval", "--ai-drafting-approval",
+        dest="ai_drafting_approval",
+    )
     parser.add_argument("--template-approval")
     parser.add_argument("--templates", default="templates")
     parser.add_argument(

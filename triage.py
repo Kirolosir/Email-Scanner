@@ -1,5 +1,5 @@
 """Triage pipeline: read messages from a Gmail label, classify each with
-Gemini, apply matching labels, and create approved template or AI draft replies.
+Gemini, apply matching labels, and create approved template or generated replies.
 
 Flow per message:
     read -> classify -> decide_labels -> apply_labels -> template -> draft
@@ -839,7 +839,7 @@ def plan_message(email, templates, year_labels, category_labels, no_label,
                     )
                 if template is None:
                     draft_skip = (
-                        "AI draft generation and safe fallback failed; "
+                        "draft generation and safe fallback failed; "
                         "not drafting"
                     )
                 else:
@@ -905,7 +905,7 @@ def plan_message(email, templates, year_labels, category_labels, no_label,
                     except Exception as exc:
                         draft_generation_error = type(exc).__name__
                         draft_skip = (
-                            "AI draft generation failed safely; not drafting"
+                            "draft generation failed safely; not drafting"
                         )
             else:
                 template, template_key, draft_skip = resolve_template(
@@ -1126,9 +1126,11 @@ def parse_args(argv=None):
     parser.add_argument("--templates-approved", metavar="KEYS", help=(
                         "Comma-separated template keys approved for this "
                         "supervised run (per-category; does NOT pin wording)"))
-    parser.add_argument("--ai-drafting-approval", metavar="FILE", help=(
+    parser.add_argument(
+        "--drafting-approval", "--ai-drafting-approval",
+        dest="ai_drafting_approval", metavar="FILE", help=(
                         "Private account-wide or legacy category approval for "
-                        "AI-generated unsent drafts"))
+                        "generated unsent drafts"))
     parser.add_argument("--limit", type=int, metavar="N",
                         help="Process at most N messages")
     parser.add_argument(
@@ -1160,7 +1162,7 @@ def main(argv=None):
     templates = load_templates(args.templates)
     if not templates:
         print(f"No templates found in {args.templates!r}; template-mode "
-              "categories cannot draft, but approved AI drafting can continue.")
+              "categories cannot draft, but approved generated drafting can continue.")
     else:
         print(f"Loaded {len(templates)} templates: {', '.join(sorted(templates))}")
     unsafe = unsafe_template_paths(templates, args.templates)
@@ -1221,7 +1223,7 @@ def main(argv=None):
         return 1
     if profile.taxonomy:
         print(f"Taxonomy confirmed for: {taxonomy_confirmation.describe()}")
-    print(f"AI drafting approvals: {ai_drafting_approvals.describe()}")
+    print(f"Drafting approvals: {ai_drafting_approvals.describe()}")
 
     try:
         template_approvals = build_template_approvals(

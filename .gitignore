@@ -30,9 +30,9 @@ campaign-approval*.json
 template-approval*.json
 !template-approval.example.json
 ai-drafting-approval*.json
-!ai-drafting-approval.example.json
+!drafting-approval.example.json
 account-config*.json
-!account-config.ai.example.json
+!account-config.generated.example.json
 # Drafted wording guidance for an account that is not live yet. Contains no
 # secret, no approval, and no confirmation - it is inert configuration kept
 # in the repo so it can be reviewed before it is ever used.

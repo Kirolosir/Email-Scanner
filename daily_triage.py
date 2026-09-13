@@ -657,9 +657,11 @@ def parse_args(argv=None):
     parser.add_argument("--templates-approved", metavar="KEYS", help=(
                         "Comma-separated template keys approved for this "
                         "supervised run (per-category; does NOT pin wording)"))
-    parser.add_argument("--ai-drafting-approval", metavar="FILE", help=(
+    parser.add_argument(
+        "--drafting-approval", "--ai-drafting-approval",
+        dest="ai_drafting_approval", metavar="FILE", help=(
                         "Private account-wide or legacy category approval for "
-                        "AI-generated unsent drafts"))
+                        "generated unsent drafts"))
     parser.add_argument("--state-path", default=DEFAULT_STATE_PATH)
     parser.add_argument("--status-path", default=DEFAULT_STATUS_PATH,
                         help="Private PII-free atomic run-status JSON")
@@ -937,7 +939,7 @@ def _run_locked(args, classifier, config, templates, state, status,
         print(f"  Gemini candidates:       {estimate['gemini_candidates']}")
         print(f"  classification calls:    up to {candidate_count}")
         if generic_enabled:
-            print(f"  AI draft calls:          up to {candidate_count}")
+            print(f"  reply-generation calls: up to {candidate_count}")
             print(f"  total model calls:       up to {maximum_model_calls}")
         print(f"  minimum model spacing:   {minimum_seconds:.0f} seconds")
         if generic_enabled:

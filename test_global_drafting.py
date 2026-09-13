@@ -11,6 +11,7 @@ from drafting import (
     AiDraftingApprovals,
     DraftingConfigError,
     LEGACY_GLOBAL_DRAFTING_ACKNOWLEDGEMENT,
+    PREVIOUS_GLOBAL_DRAFTING_ACKNOWLEDGEMENT,
     load_ai_drafting_approval,
 )
 from message_safety import assess_delivery_headers
@@ -406,6 +407,21 @@ def test_legacy_global_approval_loads_with_its_narrower_scope(tmp_path):
     assert loaded.include_bulk_messages is False
 
 
+def test_previous_global_approval_remains_compatible(tmp_path):
+    profile, _ = _profile(tmp_path)
+    _taxonomy, document = approve_account.build_documents(profile)
+    document["version"] = 3
+    document["acknowledgement"] = PREVIOUS_GLOBAL_DRAFTING_ACKNOWLEDGEMENT
+    path = tmp_path / "previous-approval.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    loaded = load_ai_drafting_approval(
+        path, ACCOUNT, profile.valid_categories, profile=profile
+    )
+    assert loaded.draft_all_replyable_messages is True
+    assert loaded.include_bulk_messages is True
+
+
 def test_protected_label_keeps_evidence_and_permission_gates(tmp_path):
     profile, _ = _profile(tmp_path, protected=True)
     result = _classification(year="2027", sender="recruit")
@@ -475,7 +491,7 @@ def test_global_activation_requires_exact_typed_phrase_and_has_no_yes(tmp_path):
     )
     assert approve_account.main(argv, reader=lambda _prompt: phrase) == 0
     document = json.loads(approval_path.read_text(encoding="utf-8"))
-    assert document["version"] == 3
+    assert document["version"] == 4
     assert document["draft_all_replyable_messages"] is True
 
     with pytest.raises(SystemExit) as caught:

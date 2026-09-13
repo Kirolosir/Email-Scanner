@@ -36,7 +36,7 @@ B = "someone.else@example.test"
 T0 = dt.datetime(2026, 9, 6, 18, 0, tzinfo=dt.timezone.utc)
 
 TOKEN_MARKER = "SECRET-REFRESH-VALUE"
-CONSENT_MARKER = "I approve AI-generated unsent drafts"
+CONSENT_MARKER = "I approve generated unsent drafts"
 
 
 def _populated(tmp_path, account=A):

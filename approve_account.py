@@ -1,4 +1,4 @@
-"""Create private taxonomy and AI-drafting approvals after one human review.
+"""Create private taxonomy and generated-drafting approvals after review.
 
 This is an offline setup helper. It never imports Gmail or Gemini modules,
 never changes the account config, and refuses to overwrite an existing
@@ -41,13 +41,13 @@ def confirmation_phrase(profile, generic_categories,
     if global_policy:
         phrase = (
             f"I reviewed {len(profile.taxonomy)} categories for {profile.account} "
-            "and activate unsent AI drafts for every message with a safe "
+            "and activate unsent generated drafts for every message with a safe "
             "reply address outside Spam, Trash, Sent, and Drafts"
         )
     else:
         phrase = (
             f"I reviewed {len(profile.taxonomy)} categories for {profile.account} "
-            f"and approve unsent AI drafts for {len(generic_categories)} categories"
+            f"and approve unsent generated drafts for {len(generic_categories)} categories"
         )
     if allow_protected_labels:
         phrase += ", including messages under protected labels"
@@ -127,7 +127,7 @@ def write_documents(taxonomy_path, taxonomy_document, ai_path=None,
     if ai_document is not None:
         if not ai_path:
             raise ValueError(
-                "--ai-output is required because generic drafting is enabled"
+                "--drafting-output is required because generic drafting is enabled"
             )
         targets.append(ai_path)
     existing = [path for path in targets if os.path.exists(path)]
@@ -157,15 +157,15 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description=(
             "Review one account taxonomy and create private, account-bound "
-            "taxonomy/AI-drafting approval files. Makes zero network calls."
+            "taxonomy and generated-drafting approval files. Makes zero network calls."
         )
     )
     parser.add_argument("--account-config", required=True)
     parser.add_argument("--taxonomy-output", required=True)
-    parser.add_argument("--ai-output")
+    parser.add_argument("--drafting-output", "--ai-output", dest="ai_output")
     parser.add_argument(
         "--allow-protected-labels", action="store_true",
-        help=("Allow AI drafts for approved messages that already carry or "
+        help=("Allow generated drafts for approved messages that already carry or "
               "will receive a protected label"),
     )
     parser.add_argument(
@@ -201,12 +201,12 @@ def main(argv=None, reader=input):
         if entry.get("description"):
             print(f"    {entry['description']}")
     if global_policy:
-        print("AI-generated drafts: all replyable messages")
+        print("Generated drafts: all replyable messages")
         print(f"Fallback category: {profile.fallback_category}")
     else:
-        print(f"AI-generated draft categories: {', '.join(generic) or 'none'}")
+        print(f"Generated draft categories: {', '.join(generic) or 'none'}")
     print(
-        "Protected-label AI drafting: "
+        "Protected-label generated drafting: "
         + ("approved" if args.allow_protected_labels else "blocked")
     )
 

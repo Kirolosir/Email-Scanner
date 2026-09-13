@@ -619,13 +619,13 @@ def _plan_with_draft(subject, category, body, source="ai"):
 def test_preview_shows_the_full_generated_wording():
     from daily_triage import render_draft_preview
 
-    body = ("AI-DRAFTED - UNREVIEWED WORDING\n\n"
+    body = ("LEGACY GENERATED WARNING\n\n"
             "Thanks for reaching out. I will take a look and follow up.")
     text = render_draft_preview([_plan_with_draft("A job for you",
                                                   "job_opportunities", body)])
 
     assert "Thanks for reaching out" in text
-    assert "AI-DRAFTED" in text
+    assert "LEGACY GENERATED WARNING" in text
     assert "job_opportunities" in text
     assert "A job for you" in text
 

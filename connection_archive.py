@@ -7,7 +7,7 @@ policy for all of them would be wrong in at least one direction. Four kinds:
                encrypted token "in case they return" is keeping a live
                credential for a mailbox nobody serves any more.
 
-  CONSENT      the taxonomy confirmation and the AI-drafting approval.
+  CONSENT      the taxonomy confirmation and generated-drafting approval.
                Archived, but INERT: nothing reads them back. Disconnecting is
                the clearest available signal that somebody has withdrawn, and
                silently resuming unattended drafting months later on the

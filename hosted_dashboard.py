@@ -425,7 +425,7 @@ def _render_review_queue(rows):
             </div><a class="secondary" href="{html.escape(gmail_url)}"
               target="_blank" rel="noopener noreferrer">Review in Gmail</a></div>
             {insight}
-            <p class="verify-note">AI-extracted details · verify against the email before sending.</p>
+            <p class="verify-note">Automatically extracted details · verify against the email before sending.</p>
           </article>""")
     return "".join(cards)
 
@@ -1053,7 +1053,7 @@ class HostedDashboardApp:
               <div>
                 <p class="eyebrow">Connected inbox</p>
                 <h1>{_escape(account)}</h1>
-                <p class="lede">AI organizes eligible mail and prepares
+                <p class="lede">Gemini organizes eligible mail and prepares
                 unsent Gmail drafts for review. Nothing is auto-sent.</p>
               </div>
               <div class="hero-actions"><span class="status {status_tone}"><i></i>{_escape(status_text)}</span>
@@ -1247,7 +1247,7 @@ class HostedDashboardApp:
               <section class="panel confirmation">
                 <label class="check-row"><input type="checkbox"
                   name="confirm_unsent_drafts" value="yes" required>
-                  <span><strong>I approve these labels and AI drafts.</strong>
+                  <span><strong>I approve these labels and generated drafts.</strong>
                   Responses must stay unsent in Gmail until I review and send
                   them myself.</span></label>
                 <div class="save-row"><a href="/">Cancel</a>

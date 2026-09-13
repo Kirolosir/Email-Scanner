@@ -47,7 +47,7 @@ def _environment(tmp_path, monkeypatch):
 
 def _settings_form():
     return {
-        "labels": "Scheduling | AI/Scheduling\nFinance | AI/Finance",
+        "labels": "Scheduling | Scheduling\nFinance | Finance",
         "timezone": "America/New_York",
         "run_at": "18:00",
         "display_name": "Owner",

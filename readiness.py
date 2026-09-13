@@ -185,7 +185,7 @@ def check_drafting_approvals(profile, ai_approval_path, bound_account):
                 "generic mode without sufficient approval: "
                 + "; ".join(missing)
             )
-        detail = f"AI drafting approved for {', '.join(generic)}"
+        detail = f"Generated drafting approved for {', '.join(generic)}"
         protected_generic = sorted(set(generic) & protected_categories)
         if protected_generic:
             detail += ("; protected-label grant covers "
@@ -338,7 +338,7 @@ def build_report(config_path, confirmation_path, ai_approval_path,
         check_taxonomy_confirmed(profile, confirmation_path, bound_account),
     ))
     report.results.append(_guarded(
-        "AI drafting approval",
+        "Generated drafting approval",
         check_drafting_approvals(profile, ai_approval_path, bound_account),
     ))
     report.results.append(_guarded(

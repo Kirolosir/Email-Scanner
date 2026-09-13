@@ -70,7 +70,8 @@ unsent Gmail draft until the account owner acts on it manually.
 
 `YEAR_LABEL` is the exact campaign label. Deduplication works on the normalized
 sender address, and you can supply known aliases explicitly through
-`aliases.example.txt`. No AI is involved in deciding who is the same person.
+`aliases.example.txt`. No generated model output is involved in deciding who
+is the same person.
 
 Start with a test account and a dry run:
 
@@ -217,7 +218,7 @@ Preview the exact taxonomy and grant without writing anything:
 .venv/bin/python approve_account.py \
   --account-config accounts/owner.json \
   --taxonomy-output accounts/owner-taxonomy.json \
-  --ai-output accounts/owner-ai.json \
+  --drafting-output accounts/owner-drafting.json \
   --dry-run
 ```
 
@@ -229,13 +230,13 @@ their narrower automated/bulk exclusion until the owner saves the current
 settings. There is no `--yes` option for this activation. It is needed once
 during onboarding, not for every message or scheduled run.
 
-Every generated draft carries the hardcoded
-`AI-DRAFTED - UNREVIEWED WORDING - NOT SENT` banner. Unknown, low-confidence,
-or conflicting classifications use the configured `Other` label, also receive
-`Needs Review`, and get a neutral acknowledgement when the return path is
-safe. Generation gets at most two attempts. If both fail validation or error,
-the system uses the hardcoded fact-free `Thank you for your message.` plus the
-configured signature and banner. It never fabricates a recipient.
+Generated drafts contain only the ready-to-review reply body, with no
+machine-added preamble. Unknown, low-confidence, or conflicting
+classifications use the configured `Other` label, also receive `Needs Review`,
+and get a neutral acknowledgement when the return path is safe. Generation
+gets at most two attempts. If both fail validation or error, the system uses
+the fact-free `Thank you for your message.` plus the configured signature. It
+never fabricates a recipient.
 
 Protected-label drafting remains a separate, larger permission. Add
 `--allow-protected-labels` only when intended; the confirmation then adds the
@@ -251,10 +252,9 @@ configured category gets exactly one drafting mode:
   generated.
 - `template`: fixed wording, bound to its SHA-256 approval.
 - `generic`: Gemini writes wording per message. This needs a separate
-  account/category-bound `--ai-drafting-approval`, though not a template
-  digest. Every generated draft carries the hardcoded
-  `AI-DRAFTED - UNREVIEWED WORDING - NOT SENT` banner, and the account owner
-  has to review, edit, or discard it.
+  account/category-bound `--drafting-approval`, though not a template
+  digest. The account owner has to review, edit, or discard every generated
+  draft.
 
 Miss either the legacy mode or its approval and drafting stays off. An unapproved
 generic path is rejected before generation, so no message content reaches the
@@ -268,7 +268,7 @@ approvals offline:
 .venv/bin/python approve_account.py \
   --account-config accounts/owner.json \
   --taxonomy-output accounts/owner-taxonomy.json \
-  --ai-output accounts/owner-ai.json
+  --drafting-output accounts/owner-drafting.json
 ```
 
 The owner types the exact sentence the command prints. If generic categories
@@ -462,7 +462,7 @@ This makes zero Gemini calls and zero Gmail writes:
 .venv/bin/python daily_triage.py initial \
   --account-config accounts/owner.json \
   --taxonomy-confirmation accounts/owner-taxonomy.json \
-  --ai-drafting-approval accounts/owner-ai.json \
+  --drafting-approval accounts/owner-drafting.json \
   --token-path tokens/owner.json --estimate-only --scheduled \
   --max-scan 25 --limit 25 --max-drafts 5
 ```
@@ -480,7 +480,7 @@ Drafts:
 GMAIL_TOKEN_PATH=token.json .venv/bin/python daily_triage.py initial \
   --account-config accounts/owner.json \
   --taxonomy-confirmation accounts/owner-taxonomy.json \
-  --ai-drafting-approval accounts/owner-ai.json \
+  --drafting-approval accounts/owner-drafting.json \
   --max-scan 50 --limit 10 --max-drafts 3 \
   --review-report review/initial-dry-run.json --dry-run
 ```
@@ -492,7 +492,7 @@ and run a small pilot, `--apply` is the explicit write gate:
 GMAIL_TOKEN_PATH=token.json .venv/bin/python daily_triage.py initial \
   --account-config accounts/owner.json \
   --taxonomy-confirmation accounts/owner-taxonomy.json \
-  --ai-drafting-approval accounts/owner-ai.json \
+  --drafting-approval accounts/owner-drafting.json \
   --max-scan 50 --limit 10 --max-drafts 3 \
   --review-report review/initial-pilot.json --apply
 ```
@@ -841,7 +841,7 @@ OAuth, not the broker.
 .venv/bin/python check_readiness.py \
   --account-config accounts/owner.json \
   --taxonomy-confirmation accounts/owner-taxonomy.json \
-  --ai-drafting-approval accounts/owner-ai.json \
+  --drafting-approval accounts/owner-drafting.json \
   --token-path tokens/owner.json
 ```
 
@@ -856,7 +856,7 @@ the refreshed token, never reads a message, and performs zero Gmail writes:
 .venv/bin/python check_readiness.py \
   --account-config accounts/owner.json \
   --taxonomy-confirmation accounts/owner-taxonomy.json \
-  --ai-drafting-approval accounts/owner-ai.json \
+  --drafting-approval accounts/owner-drafting.json \
   --token-path tokens/owner.json \
   --live
 ```
@@ -868,33 +868,16 @@ the result not ready, and so does any check that can't finish.
 
 ## Prepared account configuration (not activated)
 
-`account-config.prepared.json` holds drafted category wording guidance for the
-account owner's eventual mailbox. It's inert, kept in the repository so it can
-be reviewed before anyone uses it. On its own it grants nothing: no approval
-artifact is bound to it, it declares no protected label, and every drafting
-mode in it stays inert until the steps in its `_comment` are done.
+`account-config.prepared.json` is an inert sample for a recruiting mailbox. It
+contains example categories and reply guidance, but no credential or active
+approval. Replace the placeholder account, identity, signature, and program
+details before using it. The owner must still review the taxonomy and create
+account-bound approval artifacts through `approve_account.py`.
 
-Two separate institutional approvals have to land before it goes live, and the
-first doesn't imply the second:
-
-1. **Gmail OAuth.** The last attempt came back `Error 400:
-   admin_policy_enforced`, which is a Workspace policy decision. Ask for the
-   current ticket status. Don't assume it's resolved, and don't work around it.
-2. **Gemini data processing.** Sending recruit email content, which may involve
-   minors, to a third-party model is its own decision. Gmail access doesn't
-   cover it. Gemini also runs on a personal API key right now, which is a
-   governance problem to fix before any production use.
-
-Even after both, the account still needs taxonomy discovery run against it,
-since these categories were drafted rather than discovered. Then the owner
-personally runs `approve_account.py`, and an account-bound AI-drafting approval
-gets created.
-
-`YEAR_LABEL` is deliberately missing from the prepared config. Adding it takes
-a `protected_labels` entry plus an `evidence_gated_labels` rule. AI drafting on
-protected-label messages needs `allow_protected_labels` on top of that, and the
-longer confirmation phrase ending in `including messages under protected
-labels`.
+`YEAR_LABEL` is deliberately absent. Graduation-year labels require a
+`protected_labels` entry and a matching `evidence_gated_labels` rule. Allowing
+generated drafts on protected-label messages also requires the explicit
+`allow_protected_labels` confirmation.
 
 ## Hosted VM services
 

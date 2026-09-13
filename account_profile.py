@@ -24,7 +24,7 @@ DECISION RECORD:
   * Generic drafting never requires exact template wording. It is separately
     approved by account and category, and protected-label messages require an
     explicit acknowledgement in that approval artifact.
-  * The separate AI-drafting approval is the durable acknowledgement. New
+  * The separate generated-drafting approval is the durable acknowledgement. New
     profiles can bind one account-wide activation to the full configuration;
     legacy category-bound approvals remain readable during migration.
 """
@@ -283,7 +283,7 @@ def _load_account_document(document):
         "evidence_gated_labels", "system_labels", "ai_drafting", "paths",
         "unreviewed_bulk_acknowledgement", "draft_all_replyable_messages",
         "fallback_category",
-        # "_comment" only, matching template-approval and ai-drafting-approval.
+        # "_comment" only, matching the two approval artifact formats.
         # A prepared-but-unactivated config needs to explain itself in the file
         # someone will actually open. Every other unknown key stays rejected so
         # a typo fails loudly instead of being silently ignored.
@@ -478,7 +478,7 @@ def _load_account_document(document):
              "ai_drafting max_words must be an integer from 30 to 500")
     ai_drafting["max_words"] = max_words
 
-    # Retained as explicit context for drafting-mode validation. Runtime AI
+    # Retained as explicit context for drafting-mode validation. Runtime model
     # approval decides whether protected-label messages may be drafted.
     protected_categories = {
         slug for slug, label in labels.items() if label in protected_names
@@ -489,7 +489,7 @@ def _load_account_document(document):
 
     acknowledgement = document.get("unreviewed_bulk_acknowledgement")
     # Backward compatibility for configs created before the dedicated
-    # AI-drafting approval existed. New configs do not need this duplicate
+    # generated-drafting approval existed. New configs do not need this duplicate
     # acknowledgement; runtime drafting still fails closed without a separate
     # account-bound activation artifact.
     if acknowledgement is not None:

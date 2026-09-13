@@ -44,9 +44,9 @@ APPROVAL_BINDINGS = {
             "to a hardcoded address instead of the real mailbox"),
     },
     "load_ai_drafting_approval": {
-        0: ("AI drafting approval file path", "a literal would ignore the "
+        0: ("drafting approval file path", "a literal would ignore the "
             "operator-selected approval artifact"),
-        1: ("authenticated Gmail account", "a literal would bind AI drafting "
+        1: ("authenticated Gmail account", "a literal would bind drafting "
             "to a hardcoded mailbox"),
         2: ("runtime taxonomy", "a literal would approve categories outside "
             "the account configuration"),
@@ -103,7 +103,7 @@ def _alias_map(tree):
 
     Without this, a module that imports an approval loader under an alias is
     invisible to every check below. triage.py does exactly that
-    (`load_ai_drafting_approval as _load_ai_drafting_approval`), so its AI
+    (`load_ai_drafting_approval as _load_ai_drafting_approval`), so its drafting
     drafting binding was silently unguarded: a hardcoded account there would
     have passed the whole suite. A guard that can be evaded by renaming an
     import is not a guard.
@@ -212,7 +212,7 @@ def test_both_approval_systems_are_actually_wired():
         "expected both triage.py and daily_triage.py to bind template approvals"
     )
     assert found["load_ai_drafting_approval"] >= 2, (
-        "expected both triage.py and daily_triage.py to bind AI drafting approval"
+        "expected both triage.py and daily_triage.py to bind drafting approval"
     )
 
 
@@ -241,7 +241,7 @@ def test_binding_parameters_have_no_defaults(function, parameters):
 
 
 def test_guard_resolves_aliased_imports():
-    """Guards the guard. triage.py imports the AI drafting loader under an
+    """Guards the guard. triage.py imports the drafting loader under an
     alias; before alias resolution the guard counted zero calls there and
     skipped every argument check, so a hardcoded account in triage.py would
     have passed silently."""
@@ -264,11 +264,11 @@ def test_every_production_file_binding_is_actually_inspected():
         seen.setdefault(filename, set()).add(function)
 
     assert "load_ai_drafting_approval" in seen.get("triage.py", set()), (
-        "triage.py's AI drafting binding is not being inspected"
+        "triage.py's drafting binding is not being inspected"
     )
     assert "load_ai_drafting_approval" in seen.get("daily_triage.py", set()), (
-        "daily_triage.py's AI drafting binding is not being inspected"
+        "daily_triage.py's drafting binding is not being inspected"
     )
     assert "load_ai_drafting_approval" in seen.get("readiness.py", set()), (
-        "readiness.py's AI drafting binding is not being inspected"
+        "readiness.py's drafting binding is not being inspected"
     )

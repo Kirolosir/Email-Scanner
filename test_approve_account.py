@@ -154,7 +154,7 @@ def _pl_run(config_path, out_dir, typed, extra=()):
 
 def test_protected_label_grant_changes_the_confirmed_sentence(tmp_path):
     """A strictly larger permission must not be obtainable by typing the
-    same sentence. Before this, --allow-protected-labels granted AI drafting
+    same sentence. Before this, --allow-protected-labels granted generated drafting
     on protected-label messages while the owner confirmed wording that never
     mentioned it."""
     profile = load_profile(_pl_config(tmp_path))
@@ -255,7 +255,7 @@ def test_dry_run_writes_nothing_even_with_a_correct_phrase(tmp_path):
 
 @pytest.mark.parametrize("typed", [
     "", "yes", "I reviewed 2 categories for owner@example.test",
-    "i reviewed 2 categories for owner@example.test and approve unsent ai "
+    "i reviewed 2 categories for owner@example.test and approve generated "
     "drafts for 1 categories",
 ])
 def test_near_miss_confirmations_are_refused(typed, tmp_path):

@@ -5,6 +5,10 @@ This is a Python tool for sorting a Gmail inbox and saving reply drafts. It
 never sends mail. The person using the account opens each draft in Gmail and
 decides whether to edit, send, or delete it.
 
+Created as a college-junior software engineering project, it combines a small
+Python web dashboard, Google OAuth, the Gmail API, scheduled background work,
+and Gemini-powered classification and reply generation.
+
 ## What it does
 
 The project has two workflows.
@@ -39,12 +43,12 @@ visible until they are resolved, and provides a review queue with direct links
 to Gmail drafts. A coach profile stores the owner's role, program, signature,
 and voice guidance. For recruiting messages, the classifier also extracts the
 stated recruit name, graduation year, position, school or club, and location.
-The dashboard marks these details as AI-extracted so the coach verifies them
+The dashboard marks these details as model-extracted so the coach verifies them
 against the original email before sending.
 
 Triage assigns messages to categories configured for that account, then adds
 the matching Gmail labels. Existing labels are left alone. A one-time,
-account-bound activation can enable an unsent AI draft for every message with a
+account-bound activation can enable an unsent generated draft for every message with a
 safe, unambiguous reply address. The current account-wide policy includes
 mailing-list, bulk-precedence, and auto-submitted messages when they still have
 a safe reply address. Spam, trash, sent mail, existing drafts, bounce/no-reply
@@ -56,7 +60,7 @@ For account-wide runs, saved completion state is checked against the drafts
 that currently exist in Gmail. If a program-created draft was deleted, the
 message becomes eligible again and the missing draft is rebuilt. Hosted label
 defaults use ordinary Gmail names such as `Finance`, `Other`, `Needs Review`,
-and `Processed`; they do not add an `AI/` prefix.
+and `Processed`; they do not add a machine-specific prefix.
 
 The activation is off by default and tied to a digest of the account settings.
 The account owner must type the full confirmation; `--yes` cannot create it.

@@ -170,7 +170,7 @@ def test_generic_mode_without_ai_approval_blocks(tmp_path):
                      ai_approval_path=None,
                      account_labels=_labels(config))
     assert report.ready is False
-    assert any("AI drafting" in r.name for r in report.blocking)
+    assert any("Generated drafting" in r.name for r in report.blocking)
 
 
 def test_generic_mode_with_ai_approval_is_ready(tmp_path):

@@ -11,7 +11,7 @@ A = "owner@example.test"
 
 def _form(**changes):
     form = {
-        "labels": "Scheduling | AI/Scheduling\nFinance | AI/Finance",
+        "labels": "Scheduling | Scheduling\nFinance | Finance",
         "timezone": "America/New_York",
         "run_at": "18:00",
         "display_name": "Owner",
@@ -32,7 +32,7 @@ def test_label_lines_create_safe_categories_and_other_fallback():
     assert [item["slug"] for item in categories] == [
         "scheduling", "finance", "other"
     ]
-    assert categories[0]["label"] == "AI/Scheduling"
+    assert categories[0]["label"] == "Scheduling"
     assert settings.parse_label_lines("Scheduling")[0]["label"] == "Scheduling"
     assert settings.DEFAULT_SYSTEM_LABELS == {
         "needs_review": "Needs Review", "processed": "Processed",
@@ -43,7 +43,7 @@ def test_invalid_and_duplicate_labels_are_refused():
     with pytest.raises(settings.SettingsError):
         settings.parse_label_lines("Inbox")
     with pytest.raises(settings.SettingsError, match="duplicate"):
-        settings.parse_label_lines("Finance | AI/Money\nfinance | AI/Other")
+        settings.parse_label_lines("Finance | Money\nfinance | Other")
 
 
 def test_saving_settings_writes_a_complete_approved_bundle(tmp_path):

@@ -223,7 +223,7 @@ def test_safe_generated_reply_carries_no_machine_preamble():
     text = "Thanks for your message. I will review it."
     body = build_generic_body(text)
     assert body == text + "\n"
-    assert "AI-DRAFTED" not in body
+    assert "LEGACY GENERATED WARNING" not in body
 
 
 def test_generated_output_word_limit_is_locally_enforced():

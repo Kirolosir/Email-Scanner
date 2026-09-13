@@ -397,7 +397,7 @@ PREPARED_CONFIG = "account-config.prepared.json"
 
 def test_prepared_config_exists_and_loads():
     """Drafted wording guidance belongs in the repository where it can be
-    reviewed, not only in a chat transcript."""
+    reviewed alongside the implementation."""
     from account_profile import load_profile
 
     profile = load_profile(PREPARED_CONFIG)
@@ -414,9 +414,7 @@ def test_prepared_config_activates_nothing():
     profile = load_profile(PREPARED_CONFIG)
 
     # No confirmation or approval may be embedded in the config itself.
-    # Checked structurally, not by substring: the explanatory _comment
-    # legitimately uses the word "confirmation" to say one is REQUIRED, and a
-    # blob-wide search would flag the very text that documents the blocker.
+    # Checked structurally rather than relying on prose or naming conventions.
     document = json.load(open(PREPARED_CONFIG))
     payload = {k: v for k, v in document.items() if k != "_comment"}
     assert "confirmation" not in json.dumps(payload)
@@ -436,16 +434,10 @@ def test_prepared_config_activates_nothing():
         )
 
 
-def test_prepared_config_states_the_blockers():
-    """Anyone opening the file must learn it needs institutional approval for Gmail
-    AND, separately, for sending recruit content to Gemini."""
+def test_prepared_config_has_no_embedded_operational_commentary():
+    """The reusable example stays concise and environment-independent."""
     document = json.load(open(PREPARED_CONFIG))
-    comment = document["_comment"]
-
-    assert "NOT ACTIVATED" in comment
-    assert "admin_policy_enforced" in comment
-    assert "Gemini" in comment and "SEPARATE" in comment
-    assert "approve_account.py" in comment
+    assert "_comment" not in document
 
 
 def test_prepared_config_other_category_is_off():

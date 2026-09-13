@@ -56,7 +56,7 @@ def _login(app):
 def _settings_form(app, **changes):
     form = {
         "csrf": app._csrf_value(),
-        "labels": "Scheduling | AI/Scheduling\nFinance | AI/Finance",
+        "labels": "Scheduling | Scheduling\nFinance | Finance",
         "timezone": "America/New_York",
         "run_at": "18:00",
         "display_name": "Owner",
@@ -123,7 +123,7 @@ def test_connected_dashboard_shows_safe_counts_and_labels(tmp_path):
     }), encoding="utf-8")
     (seat.directory / "account.json").write_text(json.dumps({
         "taxonomy": [{
-            "display": "Scheduling", "label": "AI/Scheduling",
+            "display": "Scheduling", "label": "Scheduling",
             "description": "PRIVATE DESCRIPTION",
             "examples": ["PRIVATE SUBJECT"],
             "drafting": {"mode": "generic"},
@@ -133,7 +133,7 @@ def test_connected_dashboard_shows_safe_counts_and_labels(tmp_path):
     response = _call(app, cookie=_login(app))
 
     assert "owner@example.test" in response["body"]
-    assert "AI/Scheduling" in response["body"]
+    assert "Scheduling" in response["body"]
     assert "scanned" in response["body"] and ">9<" in response["body"]
     assert "drafted" in response["body"] and ">3<" in response["body"]
     assert "PRIVATE SUBJECT" not in response["body"]

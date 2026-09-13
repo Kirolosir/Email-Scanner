@@ -1,4 +1,4 @@
-"""Offline tests for per-category drafting opt-in and AI-drafting approval.
+"""Offline tests for per-category drafting opt-in and approval.
 
 Overall property: enabling drafting is a per-category decision, but no generic
 mode can produce text without a separate account/category-bound approval.
@@ -291,7 +291,7 @@ def test_model_output_cannot_select_the_drafting_mode():
 
 
 # --------------------------------------------------------------------
-# D4 / D5: the AI banner
+# D4 / D5: the former generated-draft banner
 # --------------------------------------------------------------------
 
 def test_generic_draft_carries_no_machine_preamble():
@@ -301,7 +301,7 @@ def test_generic_draft_carries_no_machine_preamble():
     body = build_generic_body(text)
 
     assert body == text + "\n"
-    assert "AI-DRAFTED" not in body
+    assert "LEGACY GENERATED WARNING" not in body
     assert "No human has read this text" not in body
 
 
@@ -326,7 +326,7 @@ def test_no_preamble_text_is_injected_into_draft_bodies():
 
 
 # --------------------------------------------------------------------
-# Protected labels require explicit AI-drafting permission
+# Protected labels require explicit generated-drafting permission
 # --------------------------------------------------------------------
 
 def test_generic_mode_can_be_configured_for_a_protected_category():
@@ -528,7 +528,7 @@ def test_comment_key_is_allowed_but_typos_are_still_rejected(tmp_path):
 def test_shipped_example_is_conservative():
     """Examples get copied wholesale. The shipped one must not demonstrate
     the maximally permissive configuration."""
-    document = json.load(open("ai-drafting-approval.example.json"))
+    document = json.load(open("drafting-approval.example.json"))
 
     assert document["allow_protected_labels"] is False
     assert len(document["approved_categories"]) <= 2
