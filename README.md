@@ -1,6 +1,10 @@
 
 # Email Drafting Tool
 
+[![Tests](https://github.com/Kirolosir/Email-Scanner/actions/workflows/tests.yml/badge.svg)](https://github.com/Kirolosir/Email-Scanner/actions/workflows/tests.yml)
+
+[Live application](https://email-scanner.136-116-196-15.nip.io/login)
+
 This is a Python tool for sorting a Gmail inbox and saving reply drafts. It
 never sends mail. The person using the account opens each draft in Gmail and
 decides whether to edit, send, or delete it.
@@ -8,6 +12,36 @@ decides whether to edit, send, or delete it.
 The project combines a small Python web dashboard, Google OAuth, the Gmail API,
 scheduled background work, and Gemini-powered classification and reply
 generation.
+
+![Dashboard overview](docs/images/dashboard-overview.png)
+
+![Inbox settings](docs/images/dashboard-settings.png)
+
+_Screenshots use synthetic account and run data._
+
+## Engineering highlights
+
+- Account-bound Google OAuth with one connected Gmail account at a time.
+- Envelope-encrypted credentials and backups backed by Cloud KMS.
+- Idempotent message and draft journals that make interrupted runs safe to
+  resume.
+- Bounded retry queues for transient Gmail and generation failures.
+- PII-free operational status, structured coverage reports, and usage metrics.
+- A tested no-send boundary: the application can label mail and create drafts,
+  but production code contains no Gmail send operation.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Browser[Owner dashboard] --> Web[Dashboard service]
+    Web --> State[(Private state)]
+    Timer[15-minute scheduler] --> Runner[Bounded runner]
+    Runner --> Gmail[Gmail API]
+    Runner --> Gemini[Gemini API]
+    Runner --> State
+    Runner --> KMS[Cloud KMS encryption]
+```
 
 ## What it does
 
