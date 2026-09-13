@@ -1,27 +1,8 @@
-"""Envelope-encrypted storage for the connected account's OAuth refresh token.
+"""Envelope-encrypted storage for a connected account's OAuth credential.
 
-WHY THIS IS NOT broker_crypto.py. That module seals a token to a public key so
-the broker can encrypt but never decrypt - "a stolen broker disk yields
-ciphertext, not a Gmail token" - and it works because the OPERATOR decrypts on
-their own machine. A scheduler cannot borrow that. It has to open a sleeping
-person's mailbox at 6pm, so it must hold a key that decrypts their token
-unattended.
-
-The irreducible consequence, stated plainly rather than engineered around: a
-compromise of the running host is a compromise of every seat's mailbox. Nothing
-below removes that. What it does is make the database or disk alone worthless,
-which is the realistic threat - a leaked backup, a snapshot, a stolen volume -
-and keep plaintext out of logs and off disk.
-
-ENVELOPE SCHEME. Each token is encrypted under a fresh 256-bit data key; that
-data key is itself encrypted by a key-encrypting key (KEK) the process can use
-but should never persist alongside the data. A KEK provider is an injected
-dependency so a real deployment supplies a managed KMS, while tests and local
-work supply a file-backed key. The wire format is versioned so the scheme can
-be replaced without guessing what old records meant.
-
-No primitive is implemented here. AES-256-GCM from `cryptography`, the same
-library broker_crypto.py already depends on.
+Each record uses a fresh AES-256-GCM data key. A provider wraps that key with
+Cloud KMS in production or a local file key in tests. The connection ID is
+authenticated at both encryption layers.
 """
 from __future__ import annotations
 
@@ -60,13 +41,7 @@ def _unb64(value):
 
 
 class FileKeyProvider:
-    """Key-encrypting key held in a 0600 file beside nothing else.
-
-    For local work and tests. A real deployment should pass a provider backed
-    by a managed KMS instead, so the KEK is never material the host can read at
-    rest - that is the whole difference between "a stolen disk is useless" and
-    "a stolen disk is useless unless they also took the key file next to it".
-    """
+    """File-backed key provider for local work and offline tests."""
 
     def __init__(self, path):
         self.path = Path(path)

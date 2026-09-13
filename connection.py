@@ -1,27 +1,8 @@
-"""Exactly one connected account, handed over deliberately.
+"""Single-account connection state with atomic lifecycle operations.
 
-There is no roster and no tenancy. The deployment is either vacant or holds a
-single connection, and moving between those states is an explicit act. This
-replaces the three-seat roster wholesale: that machinery existed to keep
-several live tokens apart at once, which is not a problem this product has.
-
-OCCUPANCY IS THE RECORD, NOT THE TOKEN. A connection is occupied because
-connection.json exists, never because a token still works. That distinction is
-the whole design:
-
-  * Testing-mode refresh tokens lapse in about seven days, permanently, because
-    Internal is unavailable on a personal-Gmail-based project. Expiry is a
-    weekly event, not an exception.
-  * If expiry vacated the slot, a different account could inherit the previous
-    person's configuration, journal and schedule simply by turning up on a
-    Tuesday. So a lapsed token changes nothing about who holds the connection.
-  * Re-authorising the SAME account is therefore routine and lossless, and
-    connecting a DIFFERENT one is refused until someone disconnects on purpose.
-
-REFUSAL WRITES NOTHING. A refused connect must leave the deployment exactly as
-it found it - no partial record, no cleared journal, no token. Silently
-replacing a connection is the failure this module exists to prevent, and a
-half-written replacement is the same failure with extra steps.
+The connection record owns the slot even if authorization expires. The same
+account may reconnect without losing settings; a different account must wait
+for an explicit disconnect.
 """
 from __future__ import annotations
 

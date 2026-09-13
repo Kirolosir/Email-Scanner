@@ -1,27 +1,8 @@
-"""Timezone-correct, idempotent scheduling for the single connection.
+"""Timezone-aware scheduling and fenced leases for one connection.
 
-WHY ExclusiveRunLock IS NOT ENOUGH HERE. That lock uses fcntl advisory file
-locks, which coordinate processes on one host and nothing at all beyond it. It
-is exactly right for a laptop and silently wrong on a platform that runs two
-instances during a rolling deploy: both would acquire "the" lock on their own
-filesystem and run the same seat's 6pm job concurrently, and part of what
-currently prevents double-drafting IS that lock.
-
-The replacement is a LEASE: a record, in storage both instances share, that
-carries an owner, an expiry, and a monotonically increasing fence token. A
-holder that stalls loses the lease by expiry rather than by being noticed, and
-the fence lets a late waker detect that it was superseded instead of writing as
-though it still held the lock.
-
-The backend is injected. The filesystem backend here is correct for multiple
-processes on ONE host and is what the tests exercise; a multi-instance
-deployment must supply a shared-storage backend with the same semantics, and
-`require_distributed` refuses to start rather than pretending a local lease
-coordinates anything.
-
-CLOCKS ARE INJECTED TOO. Scheduling logic that reads the wall clock directly is
-scheduling logic that can only be tested by waiting, so every decision here
-takes `now` as an argument.
+The filesystem backend coordinates processes on one host. Multi-instance
+deployments must inject a shared backend. Callers supply the current time so
+schedule and lease behavior remains deterministic in tests.
 """
 from __future__ import annotations
 
@@ -236,4 +217,3 @@ def next_run(connection, now):
     return scheduled_datetime(
         connection, local_now.date() + dt.timedelta(days=1)
     )
-

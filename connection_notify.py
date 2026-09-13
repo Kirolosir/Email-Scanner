@@ -1,23 +1,8 @@
-"""Push a PII-free failure notice for the connection to a configured endpoint.
+"""Send a PII-free failure notice to a configured HTTPS webhook.
 
-WHY NOT EMAIL. The obvious way to tell someone their run failed is to email
-them, and this system must never send mail: the no-send boundary is enforced
-by a static audit over every production module, and a notification path is
-exactly the kind of reasonable-sounding exception that would end it. So the
-push channel is an outbound webhook the seat holder configures - their own
-chat tool, a monitoring endpoint - and the mailbox stays read-and-draft only.
-
-WHAT GOES OVER THE WIRE. The same fixed vocabulary local_notifier.py already
-established for macOS notifications: allowlisted integer counts and a closed
-set of error codes, and nothing else. Not the account address, not a subject,
-not an exception message, not a path. A webhook leaves the machine, so it is
-held to a stricter standard than the local status file, not a looser one - the
-seat id is a label the operator chose ("coach"), which is enough to say whose
-run failed without saying who they are.
-
-NOTIFYING MUST NOT BREAK A RUN. Every failure here is swallowed and reported
-as a boolean. This is called from an exception path; a notifier that raises
-would replace the original failure with its own.
+Payloads contain only allowlisted counts and error codes. Notification errors
+return false instead of replacing the original run failure. Notifications use
+a webhook because the application must never send mail.
 """
 from __future__ import annotations
 

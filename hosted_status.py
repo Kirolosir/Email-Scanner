@@ -1,39 +1,7 @@
-"""The hosted deployment's status surface. Read-only, by construction.
+"""Read-only, address-free status endpoint for the hosted deployment.
 
-WHY THIS SERVES NOTHING MUTABLE. The public-shaped machine endpoint has no
-reason to touch account state, so it cannot. The separate human dashboard is
-bound to loopback, reached through an SSH tunnel, requires its own authenticated
-session and explicit confirmations, and owns connection controls. This module
-answers two questions and changes nothing.
-
-WHY JSON AND NOT A PAGE. web_status.py is the human interface and it stays
-where it is - bound to 127.0.0.1, reachable only by the person at the machine.
-This is a different thing: an operator endpoint on a server nobody is sitting
-at. Returning JSON means there is no markup to escape and therefore no way to
-get an injection wrong, and it is what a health check or an alerting rule
-actually wants to read.
-
-WHY IT STILL AUTHENTICATES ON A PRIVATE PORT. The deployment binds this to
-loopback on a single VM and reaches it through an SSH tunnel, so there is no
-public listener at all. The bearer and the forwarded-https check remain
-because the binding is a deployment choice and this module cannot verify it:
-if the service is ever put behind a load balancer, the code must not be the
-part that has to change. Defence that only works while a config file says so
-is not defence.
-
-WHY NO ADDRESS APPEARS. The local page may show the connected address; the
-person reading it already knows it. A response from here can be logged,
-forwarded, or piped into a monitoring system, so it must not disclose who uses
-the system. The opaque connection id says whether a connection exists without
-saying whose it is. Configuration - schedule, timezone, limits - carries no
-such risk and is included, because verifying a deploy without it means
-guessing.
-
-WHY IT CANNOT REACH A TOKEN. This module deliberately imports neither
-connection_tokens nor connection_kms nor anything in the Gmail stack. A
-compromise of this endpoint yields status, not mail: there is no code path
-from here to a decrypted credential, and a guard asserts the imports stay that
-way rather than trusting the intention.
+This module has no imports from the Gmail or credential stacks. It reports
+bounded operational state as JSON and changes nothing.
 """
 from __future__ import annotations
 

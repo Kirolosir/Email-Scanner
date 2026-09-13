@@ -55,13 +55,12 @@ Configuration and bounded run history are encrypted with the deployment key,
 written to rotating backups, decrypted immediately for an integrity check, and
 covered by an offline restore test. The dashboard reports Gmail requests and
 retries, quota units, model calls and tokens, estimated standard paid-tier
-cost, run
-time, average run time, queue depth, and backup health.
+cost, run time, average run time, queue depth, and backup health.
 
 Triage assigns messages to categories configured for that account, then adds
 the matching Gmail labels. Existing labels are left alone. A one-time,
-account-bound activation can enable an unsent generated draft for every message with a
-safe, unambiguous reply address. The current account-wide policy includes
+account-bound activation can enable an unsent generated draft for every message
+with a safe, unambiguous reply address. The current account-wide policy includes
 mailing-list, bulk-precedence, and auto-submitted messages when they still have
 a safe reply address. Spam, trash, sent mail, existing drafts, bounce/no-reply
 targets, self-replies, missing or ambiguous addresses, and malformed reply
@@ -87,7 +86,9 @@ must be high, and the current message must contain matching year evidence.
 Quoted replies, signatures, dates, telephone numbers, and unrelated numbers do
 not count. The same rule applies whether or not a reply draft is created.
 
-Google's `gmail.modify` scope technically permits sending email, but this tool does not send and enforces that boundary through application code and tests, not through the OAuth permission itself.
+Google's `gmail.modify` scope technically permits sending email, but this tool
+does not send. That boundary is enforced through application code and tests,
+not through the OAuth permission itself.
 
 ## Offline tests
 
@@ -95,16 +96,13 @@ Create the virtual environment and install the dependencies described in the
 detailed guide. From the project directory, run:
 
 ```sh
-.venv/bin/python demo_triage_flow.py
-.venv/bin/python demo_daily_triage.py
-.venv/bin/python demo_classify_batch.py
 .venv/bin/python -m pytest -q
 ```
 
-The demos use synthetic messages, fake Gmail objects, and stub classifiers.
-They do not connect to Gmail, Gemini, OAuth, or the hosted authorization
-service. The test suite checks the no-send rule, add-only labels, approval
-binding, recruiting-year evidence, duplicate prevention, rollback behavior,
+The test suite is offline and uses synthetic messages, fake Gmail objects, and
+stub classifiers. It does not connect to Gmail, Gemini, OAuth, or the hosted
+authorization service. The suite checks the no-send rule, add-only labels,
+approval binding, recruiting-year evidence, duplicate prevention, rollback behavior,
 and the hosted authorization code. A passing test run checks the local code;
 it does not grant access to a Gmail account.
 

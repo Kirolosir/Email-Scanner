@@ -1,47 +1,8 @@
-"""Cloud KMS as the key-encrypting key, so the host never holds key material.
+"""Cloud KMS provider for wrapping envelope-encryption data keys.
 
-FileKeyProvider keeps the KEK in a 0600 file beside the data it protects, and
-connection_tokens.py says exactly what that is worth: "a stolen disk is useless
-unless they also took the key file next to it". This provider closes that gap.
-The KEK lives in Cloud KMS and never leaves it. The host holds an IAM
-permission to call encrypt and decrypt, not the key.
-
-What that buys, and what it does not:
-
-  * A stolen disk, snapshot or backup yields ciphertext and nothing else,
-    because the material needed to unwrap it was never on the disk.
-  * A compromise of the RUNNING host still reaches the mailbox, because a
-    process that may call decrypt can decrypt. connection_tokens.py states
-    this about the scheme as a whole and it remains true here. Nothing below
-    pretends otherwise.
-
-The gain is specifically against offline theft of storage, which is the
-realistic threat, and every unwrap becomes a Cloud Audit Log entry, which a
-local key file could never provide.
-
-THE CLIENT IS INJECTED. This module imports no Google library and opens no
-connection at import time, so it stays importable in CI with no credentials
-and its tests stay offline. That is the same shape connection_archive.py uses
-for revocation, for the same reason.
-
-IT CANNOT CREATE A KEY. create() refuses, permanently. Provisioning a key ring
-and a key has IAM consequences and a billing footprint; it belongs to the
-operator at a terminal, not to a web process that happened to boot holding
-credentials. The refusal carries the command to run instead.
-
-CHECKSUMS ARE SENT, NOT MERELY CHECKED. Every request carries a CRC32C of what
-it contains and every response is checked against the checksum it reports.
-This is written out because the first version got it exactly backwards: it read
-response.verified_plaintext_crc32c without ever sending plaintext_crc32c. Cloud
-KMS answers False to that flag when no checksum was supplied - there was
-nothing to verify - so the very first real call failed, and would have failed
-every time, reporting corruption that had not happened.
-
-Nothing in ten mutations caught it, because the test double returned
-verified_plaintext_crc32c=True unconditionally: it modelled the outcome the
-happy path expects rather than the contract the service actually has. The
-double now derives that flag from whether a checksum was present and correct,
-which is the only reason the tests can speak to this at all.
+The KMS key remains managed by Google. Requests and responses use CRC32C
+integrity checks, and the client is injected so offline tests need no network
+or cloud credentials.
 """
 from __future__ import annotations
 
@@ -68,15 +29,7 @@ DEFAULT_TIMEOUT_SECONDS = 20
 
 
 class KmsProviderError(TokenStoreError):
-    """A KMS-specific failure.
-
-    Inherits TokenStoreError so callers that already handle token storage
-    failures need no new except clause, and inherits its contract too: the
-    message never carries plaintext, key material, or the key's resource name.
-    A resource name is not a secret, but it names the project and key ring to
-    anyone reading a log, and there is nothing a caller can do with it that
-    they could not do by reading the deployment's own configuration.
-    """
+    """KMS failure whose message excludes data and key identifiers."""
 
 
 def _require_bytes(value, label):

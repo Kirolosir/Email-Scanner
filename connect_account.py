@@ -1,39 +1,8 @@
-"""Wire a collected credential into the single connection, under KMS.
+"""Store a collected OAuth credential for the hosted connection.
 
-The last gap between `broker_client.py collect` and a working deployment.
-The broker hands back a decrypted token document; connection.py owns who holds
-the connection; connection_tokens.py owns encrypting it. Nothing called all
-three together, so this does, in one deliberate operator act.
-
-NO REAL CALL HAPPENS BY IMPORTING THIS. The KMS client is built by an injected
-factory, and the default factory imports google.cloud.kms *inside itself*, so
-this module imports with no Google library present, no credentials, and no
-network. Tests supply a factory that returns a double. A guard asserts the
-import stays inside the function, because moving it to the top would make the
-module unimportable in CI and, worse, would make "did anything reach Google?"
-a question about import order.
-
-WHO THE ACCOUNT IS CANNOT BE VERIFIED HERE. The broker seals only
-refresh_token, scope and token_type - deliberately, since it has no business
-retaining an address - so the token document does not say whose mailbox it
-opens. The operator asserts that with --account, and this module cannot check
-it. Three consequences, all chosen rather than accepted quietly:
-
-  * the address is required explicitly and is never defaulted or inferred;
-  * if the document DOES carry an address, it must agree, so a future broker
-    that includes one is cross-checked automatically rather than trusted; and
-  * the only real verification is a read-only Gmail profile check, which is a
-    live call and therefore a separate deliberate step, not something this
-    command performs on its own.
-
-Getting the address wrong does not leak anything - the token still opens only
-the mailbox it was issued for - but it files the archive and the occupancy
-record under the wrong identity, so it is worth the ceremony.
-
-THE PLAINTEXT FILE IS DESTROYED ON SUCCESS, NOT ON FAILURE. A failed store
-that also deleted the credential would cost the account owner another round of
-consent for no reason. On failure the file is left and its continued existence
-is reported.
+The account is explicit, the token is encrypted through the configured KMS
+provider, and the plaintext source is removed only after a successful store.
+Cloud clients are imported lazily so tests remain offline.
 """
 from __future__ import annotations
 

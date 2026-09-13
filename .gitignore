@@ -33,10 +33,6 @@ ai-drafting-approval*.json
 !drafting-approval.example.json
 account-config*.json
 !account-config.generated.example.json
-# Drafted wording guidance for an account that is not live yet. Contains no
-# secret, no approval, and no confirmation - it is inert configuration kept
-# in the repo so it can be reviewed before it is ever used.
-!account-config.prepared.json
 taxonomy-confirmation*.json
 
 # Private per-account runtime profiles, approvals, and taxonomy reviews.
