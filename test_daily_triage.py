@@ -294,6 +294,23 @@ def test_interruption_after_draft_recovers_without_duplicate(tmp_path):
     assert log.ids == ["draft-1"]
 
 
+def test_prior_complete_record_without_draft_still_creates_one(tmp_path):
+    service = _ExecutionGmail()
+    state = DailyState(tmp_path / "state.json")
+    state.record_complete("m1", "t1", "", draft_policy_version=4)
+    log = _Log()
+
+    _added, draft_id, errors = execute_daily_plan(
+        service, _execution_plan(), ACCOUNT_LABELS,
+        QuotaThrottle(100_000), log, state, {},
+    )
+
+    assert errors == []
+    assert draft_id == "draft-1"
+    assert len(service.create_calls) == 1
+    assert state.record_for("m1")["draft_id"] == "draft-1"
+
+
 def test_existing_thread_draft_does_not_block_distinct_message_draft(tmp_path):
     service = _ExecutionGmail()
     state = DailyState(tmp_path / "state.json")
@@ -906,7 +923,7 @@ def test_policy_upgrade_revisits_prior_no_draft_completion(tmp_path):
     state = DailyState(tmp_path / "state.json")
     state.data["messages"]["notification"] = {
         "status": "complete", "thread_id": "t1", "draft_id": "",
-        "draft_policy_version": 3,
+        "draft_policy_version": 4,
     }
     message = {
         "id": "notification", "threadId": "t1",

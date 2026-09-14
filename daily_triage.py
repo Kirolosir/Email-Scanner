@@ -92,9 +92,9 @@ DEFAULT_STATUS_PATH = _PROFILE.status_path
 DEFAULT_LOCK_DIR = _PROFILE.lock_dir
 LOCAL_TIMEZONE = ZoneInfo(_PROFILE.timezone)
 logger = logging.getLogger(__name__)
-# Version 4 makes notification-style messages and legacy conversation-shared
-# outcomes eligible for one catch-up pass while preserving distinct drafts.
-CURRENT_DRAFT_POLICY_VERSION = 4
+# Version 5 makes notification-style messages and legacy draftless or
+# conversation-shared outcomes eligible for one catch-up pass.
+CURRENT_DRAFT_POLICY_VERSION = 5
 
 
 def build_initial_query(lookback_months=2):
@@ -611,6 +611,7 @@ def execute_daily_plan(service, plan, account_labels, throttle, draft_log,
     if plan["template"] is not None:
         record = state.record_for(message_id)
         if (record.get("status") in {"draft_created", "complete"}
+                and record.get("draft_id")
                 and not plan.get("replace_missing_owned_draft")):
             draft_id = record.get("draft_id", "")
         else:
