@@ -13,6 +13,7 @@ import time
 
 from dotenv import load_dotenv
 from google import genai
+from google.genai import types
 
 import account_profile as _profile_module
 from account_profile import load_profile as _load_profile
@@ -37,8 +38,14 @@ def _validated_float_env(name, default, minimum=0.0, maximum=60.0):
     return value
 
 
-# Six seconds is the safe default for a roughly ten-requests/minute free tier.
-THROTTLE_SECONDS = _validated_float_env("GEMINI_THROTTLE_SECONDS", 6.0)
+# Start conservatively, then decrease the spacing after successful requests.
+THROTTLE_SECONDS = _validated_float_env("GEMINI_THROTTLE_SECONDS", 1.0)
+MIN_THROTTLE_SECONDS = _validated_float_env(
+    "GEMINI_MIN_THROTTLE_SECONDS", 0.25
+)
+MAX_THROTTLE_SECONDS = _validated_float_env(
+    "GEMINI_MAX_THROTTLE_SECONDS", 30.0, minimum=1.0, maximum=120.0
+)
 MAX_BACKOFF_SECONDS = _validated_float_env(
     "GEMINI_MAX_BACKOFF_SECONDS", 30.0, minimum=1.0, maximum=120.0
 )
@@ -208,6 +215,7 @@ UNTRUSTED_EMAIL_JSON:
 """
 
 _last_call_time = 0.0
+_adaptive_interval = THROTTLE_SECONDS
 _call_count = 0
 _client = None
 _environment_loaded = False
@@ -233,13 +241,33 @@ def get_client():
 
 
 def _throttle():
-    """Block until at least THROTTLE_SECONDS have passed since the last
-    Gemini call, so batch loops stay under the account's rate limit."""
+    """Pace calls using the interval learned from recent provider responses."""
     global _last_call_time
-    wait = THROTTLE_SECONDS - (time.monotonic() - _last_call_time)
+    wait = _adaptive_interval - (time.monotonic() - _last_call_time)
     if wait > 0:
         time.sleep(wait)
     _last_call_time = time.monotonic()
+
+
+def _record_throttle_success():
+    global _adaptive_interval
+    _adaptive_interval = max(MIN_THROTTLE_SECONDS, _adaptive_interval * 0.85)
+
+
+def _record_throttle_pressure(error=None):
+    """Back off quickly on quota pressure and gently on other transients."""
+    global _adaptive_interval
+    factor = 2.0 if _status_code(error) == 429 else 1.35
+    _adaptive_interval = min(
+        MAX_THROTTLE_SECONDS,
+        max(MIN_THROTTLE_SECONDS, _adaptive_interval * factor),
+    )
+
+
+def reset_adaptive_throttle():
+    global _adaptive_interval, _last_call_time
+    _adaptive_interval = THROTTLE_SECONDS
+    _last_call_time = 0.0
 
 
 def get_call_count():
@@ -436,6 +464,7 @@ def generate_text(prompt, max_retries=3, model=None):
                     f"({type(exc).__name__}, status={status or 'unknown'})"
                 ) from exc
             last_error = exc
+            _record_throttle_pressure(exc)
             logger.warning(
                 "Transient Gemini error on attempt %d/%d (%s, status=%s)",
                 attempt, max_retries, type(exc).__name__, status or "unknown",
@@ -446,6 +475,7 @@ def generate_text(prompt, max_retries=3, model=None):
 
         text = get_text(response)
         if text:
+            _record_throttle_success()
             return text
         logger.warning("Empty Gemini response on attempt %d/%d",
                        attempt, max_retries)
@@ -496,6 +526,7 @@ def classify(email, max_retries=3, model=None, profile=None):
                     f"({type(exc).__name__}, status={status or 'unknown'})"
                 ) from exc
             last_error = exc
+            _record_throttle_pressure(exc)
             logger.warning(
                 "Transient Gemini error on attempt %d/%d (%s, status=%s)",
                 attempt, max_retries, type(exc).__name__, status or "unknown",
@@ -506,6 +537,7 @@ def classify(email, max_retries=3, model=None, profile=None):
 
         text = get_text(response)
         if text:
+            _record_throttle_success()
             return parse_result(
                 text,
                 valid_categories=effective_profile.valid_categories,
@@ -536,3 +568,174 @@ def generate_reply(email, classification, profile=None, max_retries=3,
         max_retries=max_retries,
         model=model,
     )
+
+
+TRIAGE_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "category": {"type": "string"},
+        "grad_year": {"type": "string"},
+        "sender_type": {"type": "string"},
+        "recruit_name": {"type": "string"},
+        "school": {"type": "string"},
+        "position": {"type": "string"},
+        "location": {"type": "string"},
+        "confidence": {"type": "string"},
+        "evidence": {"type": "string"},
+        "reason": {"type": "string"},
+        "reply_body": {"type": "string"},
+    },
+    "required": [
+        "category", "grad_year", "sender_type", "recruit_name", "school",
+        "position", "location", "confidence", "evidence", "reason",
+        "reply_body",
+    ],
+    "additionalProperties": False,
+}
+
+
+def build_triage_prompt(email, profile=None):
+    """Build one request that returns both routing data and an editable reply."""
+    effective_profile = profile or _PROFILE
+    classification_rules = build_classification_prompt(email, effective_profile)
+    classification_rules = classification_rules.split(
+        "Respond in exactly this format, nothing else:", 1
+    )[0]
+    reply_rules = build_reply_prompt(
+        email,
+        {"category": "the category selected above", "grad_year": "the year selected above"},
+        effective_profile,
+    )
+    reply_rules = reply_rules.replace(
+        "Write only the reply body. Do not add To, From, CC, BCC, or Subject headers.",
+        "Put only the reply body in reply_body. Do not add To, From, CC, BCC, or Subject headers.",
+    )
+    guidance = "\n".join(
+        f"- {category}: {text}" for category, text in
+        (getattr(effective_profile, "drafting_guidance", {}) or {}).items()
+        if str(text).strip()
+    )
+    return (
+        classification_rules
+        + "\nClassify the message and prepare its reply in the same response.\n"
+        + reply_rules
+        + "\nUse the guidance matching the category you select:\n"
+        + (guidance or "(no category-specific guidance supplied)")
+        + "\nReturn one JSON object matching the supplied response schema."
+    )
+
+
+def parse_triage_result(text, profile=None):
+    """Validate a combined structured response without logging message data."""
+    effective_profile = profile or _PROFILE
+    try:
+        document = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        document = None
+    if not isinstance(document, dict) or set(document) != set(
+        TRIAGE_RESPONSE_SCHEMA["required"]
+    ):
+        raise ValueError("combined response structure was invalid")
+    classification_text = "\n".join(
+        f"{key.upper()}: {document[key]}" for key in (
+            "category", "grad_year", "sender_type", "recruit_name", "school",
+            "position", "location", "confidence", "evidence", "reason",
+        )
+    )
+    result = parse_result(
+        classification_text,
+        valid_categories=effective_profile.valid_categories,
+        supported_years=effective_profile.supported_years,
+    )
+    reply_body = document.get("reply_body")
+    if not isinstance(reply_body, str) or not reply_body.strip():
+        raise ValueError("combined response had no reply body")
+    result["reply_body"] = reply_body.strip()
+    return result
+
+
+def _generation_config():
+    return types.GenerateContentConfig(
+        response_mime_type="application/json",
+        response_json_schema=TRIAGE_RESPONSE_SCHEMA,
+    )
+
+
+def analyze_and_draft(email, profile=None, max_retries=3, model=None):
+    """Classify and draft one message with one structured model request."""
+    effective_profile = profile or _PROFILE
+    prompt = build_triage_prompt(email, effective_profile)
+    model = model or MODEL
+    global _call_count
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        _throttle()
+        _call_count += 1
+        from runtime_metrics import record_model_call, record_model_response
+        record_model_call()
+        try:
+            response = get_client().models.generate_content(
+                model=model, contents=prompt, config=_generation_config(),
+            )
+            record_model_response(response)
+            result = parse_triage_result(get_text(response), effective_profile)
+            _record_throttle_success()
+            return result
+        except Exception as exc:
+            last_error = exc
+            if not (is_transient_error(exc) or isinstance(exc, ValueError)):
+                raise RuntimeError("Permanent Gemini error; not retried") from exc
+            _record_throttle_pressure(exc)
+            if attempt < max_retries:
+                _backoff(attempt)
+    raise RuntimeError("Combined Gemini response failed validation") from last_error
+
+
+def analyze_batch(emails, profile=None, model=None, poll_seconds=10.0,
+                  timeout_seconds=86400.0):
+    """Run large scans through the discounted asynchronous Batch API."""
+    if len(emails) <= 100:
+        raise ValueError("Batch API is reserved for scans above 100 messages")
+    effective_profile = profile or _PROFILE
+    model = model or MODEL
+    requests = [types.InlinedRequest(
+        contents=build_triage_prompt(email, effective_profile),
+        config=_generation_config(), metadata={"index": str(index)},
+    ) for index, email in enumerate(emails)]
+    client = get_client()
+    job = client.batches.create(
+        model=model, src=requests,
+        config=types.CreateBatchJobConfig(display_name="email-scan"),
+    )
+    started = time.monotonic()
+    terminal = {
+        "JOB_STATE_SUCCEEDED", "JOB_STATE_FAILED", "JOB_STATE_CANCELLED",
+        "JOB_STATE_PAUSED",
+    }
+    def _state_value(value):
+        return str(getattr(value, "value", value))
+
+    while _state_value(getattr(job, "state", "")) not in terminal:
+        if time.monotonic() - started >= timeout_seconds:
+            raise TimeoutError("Batch analysis did not finish before its deadline")
+        time.sleep(max(1.0, float(poll_seconds)))
+        job = client.batches.get(name=job.name)
+    if _state_value(job.state) != "JOB_STATE_SUCCEEDED":
+        raise RuntimeError(f"Batch analysis ended in {_state_value(job.state)}")
+    responses = list(getattr(getattr(job, "dest", None), "inlined_responses", ()) or ())
+    if len(responses) != len(emails):
+        raise RuntimeError("Batch analysis returned an incomplete result set")
+    results = []
+    for item in responses:
+        error = getattr(item, "error", None)
+        response = getattr(item, "response", None)
+        if error or response is None:
+            raise RuntimeError("Batch analysis contained a failed request")
+        results.append(parse_triage_result(get_text(response), effective_profile))
+    global _call_count
+    _call_count += len(requests)
+    from runtime_metrics import record_model_call, record_model_response
+    for item in responses:
+        record_model_call()
+        record_model_response(item.response, cost_multiplier=0.5)
+    return results

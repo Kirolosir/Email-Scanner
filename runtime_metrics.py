@@ -28,7 +28,7 @@ def add(key, amount=1):
         metrics[key] += max(0, int(amount or 0))
 
 
-def record_model_response(response):
+def record_model_response(response, cost_multiplier=1.0):
     usage = getattr(response, "usage_metadata", None)
     input_tokens = getattr(usage, "prompt_token_count", 0) or 0
     output_tokens = getattr(usage, "candidates_token_count", 0) or 0
@@ -41,7 +41,10 @@ def record_model_response(response):
             "GEMINI_OUTPUT_USD_PER_MILLION_TOKENS", "3.75") or 0)
     except ValueError:
         input_rate = output_rate = 0
-    micro_usd = round(input_tokens * input_rate + output_tokens * output_rate)
+    micro_usd = round(
+        (input_tokens * input_rate + output_tokens * output_rate)
+        * max(0.0, float(cost_multiplier))
+    )
     add("estimated_cost_microusd", micro_usd)
 
 

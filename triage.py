@@ -39,6 +39,7 @@ from gemini_client import (
     SUPPORTED_GRAD_YEARS,
     VALID_CATEGORIES,
     VALID_CONFIDENCE,
+    analyze_and_draft,
     classify,
     generate_reply,
 )
@@ -549,7 +550,7 @@ def plan_message(email, templates, year_labels, category_labels, no_label,
                  templates_dir=DEFAULT_TEMPLATE_DIR, classifier=None,
                  template_approvals=None, taxonomy_confirmation=None,
                  profile=None, draft_generator=None,
-                 ai_drafting_approvals=None):
+                 ai_drafting_approvals=None, combined_result=None):
     """Decide, without making any API calls, what should happen to one
     message: which labels to add and whether a draft can be built.
 
@@ -569,6 +570,7 @@ def plan_message(email, templates, year_labels, category_labels, no_label,
         and getattr(ai_drafting_approvals, "include_bulk_messages", False)
     )
     classification_error = None
+    combined_analysis = combined_result
     delivery = email.get("delivery_safety") or assess_delivery_headers(
         {"from": email.get("from", ""), "reply-to": email.get("reply_to", "")},
         own_address=email.get("own_address", ""),
@@ -622,11 +624,20 @@ def plan_message(email, templates, year_labels, category_labels, no_label,
     else:
         try:
             classification_called = True
-            classification = (
-                classifier(email)
-                if classifier is not None
-                else classify(email, profile=effective_profile)
-            )
+            if combined_analysis is not None:
+                classification = combined_analysis
+            elif (global_drafting and current_account_wide_drafting_approved
+                  and classifier is None and draft_generator is None):
+                combined_analysis = analyze_and_draft(
+                    email, profile=effective_profile
+                )
+                classification = combined_analysis
+            else:
+                classification = (
+                    classifier(email)
+                    if classifier is not None
+                    else classify(email, profile=effective_profile)
+                )
             if not isinstance(classification, dict):
                 raise ValueError("classifier result was not an object")
         except Exception as exc:
@@ -832,11 +843,28 @@ def plan_message(email, templates, year_labels, category_labels, no_label,
                     ),
                 )
                 draft_generation_called = True
-                template, draft_generation_attempts, draft_generation_error, \
-                    draft_fallback_used = _generate_global_reply(
-                        email, generation_classification, _effective_profile,
-                        draft_generator,
-                    )
+                if (combined_analysis is not None
+                        and isinstance(combined_analysis.get("reply_body"), str)):
+                    try:
+                        max_words = int(
+                            (_effective_profile.ai_drafting or {}).get(
+                                "max_words", 180
+                            )
+                        )
+                        template = _build_generic_body(
+                            combined_analysis["reply_body"], max_words=max_words
+                        )
+                        draft_generation_attempts = 1
+                    except Exception as exc:
+                        draft_generation_error = type(exc).__name__
+                        template = _build_safe_fallback_body(_effective_profile)
+                        draft_fallback_used = True
+                else:
+                    template, draft_generation_attempts, draft_generation_error, \
+                        draft_fallback_used = _generate_global_reply(
+                            email, generation_classification, _effective_profile,
+                            draft_generator,
+                        )
                 if template is None:
                     draft_skip = (
                         "draft generation and safe fallback failed; "

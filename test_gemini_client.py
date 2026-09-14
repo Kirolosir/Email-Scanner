@@ -1,6 +1,7 @@
 """Offline Gemini reliability tests using a fake client only."""
 from types import SimpleNamespace
 from types import MappingProxyType
+import json
 
 import pytest
 
@@ -271,3 +272,81 @@ def test_generate_reply_uses_shared_rate_limited_text_path(monkeypatch):
     assert result == "Draft body"
     assert captured[0][1]["model"] == "offline-model"
     assert "project_request" in captured[0][0]
+
+
+def _combined_document():
+    return {
+        "category": "project_request", "grad_year": "unknown",
+        "sender_type": "other", "recruit_name": "unknown",
+        "school": "unknown", "position": "unknown", "location": "unknown",
+        "confidence": "high", "evidence": "asks about project",
+        "reason": "direct request", "reply_body": "I can review this.\n\nAlex",
+    }
+
+
+def test_analyze_and_draft_uses_one_structured_request(monkeypatch):
+    models = _FakeModels([_response(json.dumps(_combined_document()))])
+    monkeypatch.setattr(
+        gemini_client, "get_client", lambda: SimpleNamespace(models=models)
+    )
+    monkeypatch.setattr(gemini_client, "_throttle", lambda: None)
+
+    result = gemini_client.analyze_and_draft(
+        {"from": "person@example.test", "subject": "Project", "body": "Hi"},
+        profile=_custom_profile(),
+    )
+
+    assert models.calls == 1
+    assert result["category"] == "project_request"
+    assert result["reply_body"] == "I can review this.\n\nAlex"
+
+
+def test_adaptive_throttle_speeds_up_and_backs_off_on_rate_limit(monkeypatch):
+    monkeypatch.setattr(gemini_client, "_adaptive_interval", 4.0)
+    monkeypatch.setattr(gemini_client, "MIN_THROTTLE_SECONDS", 0.25)
+    monkeypatch.setattr(gemini_client, "MAX_THROTTLE_SECONDS", 30.0)
+
+    gemini_client._record_throttle_success()
+    assert gemini_client._adaptive_interval == pytest.approx(3.4)
+    gemini_client._record_throttle_pressure(_ApiFailure(429))
+    assert gemini_client._adaptive_interval == pytest.approx(6.8)
+
+
+def test_batch_api_is_refused_for_small_scans():
+    with pytest.raises(ValueError, match="above 100"):
+        gemini_client.analyze_batch([{}] * 100, profile=_custom_profile())
+
+
+def test_large_scan_uses_one_batch_job(monkeypatch):
+    response = _response(json.dumps(_combined_document()))
+    inlined = [SimpleNamespace(error=None, response=response) for _ in range(101)]
+    job = SimpleNamespace(
+        name="batches/offline", state="JOB_STATE_SUCCEEDED",
+        dest=SimpleNamespace(inlined_responses=inlined),
+    )
+
+    class FakeBatches:
+        def __init__(self):
+            self.created = []
+
+        def create(self, **kwargs):
+            self.created.append(kwargs)
+            return job
+
+        def get(self, **_kwargs):
+            pytest.fail("a completed batch should not be polled")
+
+    batches = FakeBatches()
+    monkeypatch.setattr(
+        gemini_client, "get_client", lambda: SimpleNamespace(batches=batches)
+    )
+
+    results = gemini_client.analyze_batch(
+        [{"from": "person@example.test", "subject": "Project", "body": "Hi"}]
+        * 101,
+        profile=_custom_profile(),
+    )
+
+    assert len(results) == 101
+    assert len(batches.created) == 1
+    assert len(batches.created[0]["src"]) == 101

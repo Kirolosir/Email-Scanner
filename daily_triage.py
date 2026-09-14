@@ -57,7 +57,7 @@ from triage import (
     SAFETY_HEADERS,
 )
 from triage_config import DEFAULT_LABEL_CONFIG, load_triage_label_config
-from gemini_client import THROTTLE_SECONDS
+from gemini_client import THROTTLE_SECONDS, analyze_batch
 from gmail_reader import get_header_values
 from message_safety import (
     DEFAULT_MAX_BODY_CHARS,
@@ -969,8 +969,10 @@ def _run_locked(args, classifier, config, templates, state, status,
             mode == MODE_GENERIC
             for mode in getattr(args.profile, "drafting_modes", {}).values()
         )
-        draft_attempts = 2 if global_drafting else (1 if generic_enabled else 0)
-        maximum_model_calls = candidate_count * (1 + draft_attempts)
+        maximum_model_calls = (
+            candidate_count
+            if global_drafting else candidate_count * (2 if generic_enabled else 1)
+        )
         minimum_seconds = max(0, candidate_count - 1) * THROTTLE_SECONDS
         maximum_spacing = max(0, maximum_model_calls - 1) * THROTTLE_SECONDS
         print("\nEstimate only (metadata reads; zero Gemini calls; zero Gmail writes):")
@@ -979,11 +981,15 @@ def _run_locked(args, classifier, config, templates, state, status,
         print(f"  automated before Gemini: {estimate['automated']}")
         print(f"  invalid metadata:        {estimate['invalid_metadata']}")
         print(f"  Gemini candidates:       {estimate['gemini_candidates']}")
-        print(f"  classification calls:    up to {candidate_count}")
-        if generic_enabled:
+        if global_drafting:
+            print(f"  combined analysis calls: up to {candidate_count}")
+        else:
+            print(f"  classification calls:    up to {candidate_count}")
+        if generic_enabled and not global_drafting:
             print(f"  reply-generation calls: up to {candidate_count}")
+        if generic_enabled:
             print(f"  total model calls:       up to {maximum_model_calls}")
-        print(f"  minimum model spacing:   {minimum_seconds:.0f} seconds")
+        print(f"  initial model spacing:   {minimum_seconds:.0f} seconds")
         if generic_enabled:
             print(f"  maximum planned spacing: {maximum_spacing:.0f} seconds")
         print("  actual time may be longer because of Gmail latency and retries")
@@ -1050,17 +1056,45 @@ def _run_locked(args, classifier, config, templates, state, status,
             counts["no_reply_address"] += 1
         retry_completed_ids.add(message["id"])
 
-    plans = []
-    for index, message in enumerate(candidates, start=1):
-        status.progress(
-            "Analyzing emails and writing replies", counts,
-            current=index - 1, total=len(candidates),
-        )
+    prepared_emails = []
+    for message in candidates:
         email = message_to_email(
             message, max_body_chars=args.max_body_chars,
             own_address=own_address, profile=args.profile,
         )
         email["message_id"] = message["id"]
+        prepared_emails.append(email)
+
+    combined_results = [None] * len(prepared_emails)
+    use_batch = (
+        classifier is None
+        and len(prepared_emails) > 100
+        and bool(getattr(args.profile, "draft_all_replyable_messages", False))
+        and bool(getattr(args.ai_drafting_approvals,
+                         "draft_all_replyable_messages", False))
+    )
+    if use_batch:
+        status.progress(
+            "Preparing large email batch", counts,
+            current=0, total=len(prepared_emails),
+        )
+        try:
+            combined_results = analyze_batch(
+                prepared_emails, profile=args.profile
+            )
+        except Exception as exc:
+            logger.warning(
+                "Large batch analysis failed (%s); continuing with resumable "
+                "individual requests", type(exc).__name__,
+            )
+
+    plans = []
+    for index, (message, email, combined_result) in enumerate(
+            zip(candidates, prepared_emails, combined_results), start=1):
+        status.progress(
+            "Analyzing emails and writing replies", counts,
+            current=index - 1, total=len(candidates),
+        )
         plan = plan_message(
             email, templates, year_labels, category_labels,
             no_label=False, templates_dir=args.templates,
@@ -1071,6 +1105,7 @@ def _run_locked(args, classifier, config, templates, state, status,
             ai_drafting_approvals=getattr(
                 args, "ai_drafting_approvals", None
             ),
+            combined_result=combined_result,
         )
         add_daily_review_policy(plan, config, getattr(args, "profile", None))
         plan["processed_label"] = processed_name

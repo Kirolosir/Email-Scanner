@@ -56,6 +56,7 @@ RETRY_QUEUE_FILE = "retry-queue.json"
 BACKUP_DIR = "backups"
 PENDING_LABEL_SETUP = hosted_settings.PENDING_LABEL_SETUP
 HISTORY_CHUNK_SIZE = 50
+BATCH_HISTORY_CHUNK_SIZE = 200
 
 
 class HostedRunnerError(RuntimeError):
@@ -478,8 +479,12 @@ def run_if_due(env=None, *, now=None, service_builder=build,
                 current=0, total=len(message_ids),
             )
 
-            for offset in range(0, len(message_ids), HISTORY_CHUNK_SIZE):
-                chunk = message_ids[offset:offset + HISTORY_CHUNK_SIZE]
+            chunk_size = (
+                BATCH_HISTORY_CHUNK_SIZE
+                if len(message_ids) > 100 else HISTORY_CHUNK_SIZE
+            )
+            for offset in range(0, len(message_ids), chunk_size):
+                chunk = message_ids[offset:offset + chunk_size]
                 argv = _argv(
                     len(chunk),
                     _history_review_path(active / REVIEW_DIR, now, offset),
