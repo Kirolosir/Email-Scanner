@@ -79,6 +79,7 @@ from review_report import (
     ReviewReportReservation,
     build_review_report,
 )
+from rollback_journal import RollbackJournal
 from triage_limits import (
     plans_within_draft_limit,
     requires_new_draft,
@@ -588,7 +589,8 @@ def _create_reply_draft(service, plan, throttle):
 
 
 def execute_daily_plan(service, plan, account_labels, throttle, draft_log,
-                       state, draft_threads, created_draft_threads=None):
+                       state, draft_threads, created_draft_threads=None,
+                       rollback_journal=None):
     """Execute one plan with restart-safe draft and processed transitions."""
     email = plan["email"]
     message_id = email["message_id"]
@@ -605,6 +607,10 @@ def execute_daily_plan(service, plan, account_labels, throttle, draft_log,
                 account_labels, throttle,
             )
             added.extend(plan["decision"].add)
+            if rollback_journal is not None:
+                rollback_journal.record_labels(
+                    message_id, plan["decision"].add
+                )
     except Exception as exc:
         errors.append(f"labels failed ({type(exc).__name__})")
 
@@ -619,6 +625,8 @@ def execute_daily_plan(service, plan, account_labels, throttle, draft_log,
                 result = _create_reply_draft(service, plan, throttle)
                 draft_id = result["id"]
                 draft_log.record(draft_id)
+                if rollback_journal is not None:
+                    rollback_journal.record_draft(message_id, draft_id)
                 # Persist before any later API call. A restart sees this state
                 # and cannot create a second draft for the source message.
                 state.record_draft(message_id, thread_id, draft_id)
@@ -636,6 +644,10 @@ def execute_daily_plan(service, plan, account_labels, throttle, draft_log,
             account_labels, throttle,
         )
         added.append(plan["processed_label"])
+        if rollback_journal is not None:
+            rollback_journal.record_labels(
+                message_id, [plan["processed_label"]]
+            )
     except Exception as exc:
         return added, draft_id, [f"processed label failed ({type(exc).__name__})"]
 
@@ -756,6 +768,8 @@ def parse_args(argv=None):
         "--review-report", metavar="PATH",
         help="Write a private PII-minimized JSON review report without overwriting",
     )
+    parser.add_argument("--rollback-manifest", metavar="PATH")
+    parser.add_argument("--rollback-group")
     parser.add_argument(
         "--force", action="store_true",
         help="Permit another daily scan today; idempotency checks still apply",
@@ -790,6 +804,10 @@ def parse_args(argv=None):
         )
     if args.estimate_only and args.apply:
         parser.error("--estimate-only cannot be combined with --apply")
+    if bool(args.rollback_manifest) != bool(args.rollback_group):
+        parser.error("--rollback-manifest and --rollback-group must be used together")
+    if args.rollback_manifest and (not args.scheduled or not args.apply):
+        parser.error("rollback recording is reserved for scheduled apply runs")
     try:
         validate_max_body_chars(args.max_body_chars)
     except ValueError as exc:
@@ -864,6 +882,10 @@ def _run_locked(args, classifier, config, templates, state, status,
     deferred_reasons = {}
     retry_failed_ids = set()
     retry_completed_ids = set()
+    rollback_journal = (
+        RollbackJournal(args.rollback_manifest, args.rollback_group)
+        if args.rollback_manifest else None
+    )
 
     def done(code, error_codes=()):
         from runtime_metrics import snapshot
@@ -1220,7 +1242,7 @@ def _run_locked(args, classifier, config, templates, state, status,
             try:
                 labels, _draft_id, plan_errors = execute_daily_plan(
                     service, plan, account_labels, throttle, draft_log,
-                    state, draft_threads,
+                    state, draft_threads, rollback_journal=rollback_journal,
                 )
                 plan["_applied_labels"] = list(labels)
                 counts["labeled"] += len(labels)
@@ -1249,6 +1271,9 @@ def _run_locked(args, classifier, config, templates, state, status,
                 "Creating Gmail labels and drafts", counts,
                 current=index, total=len(plans),
             )
+
+    if rollback_journal is not None:
+        rollback_journal.complete()
 
     if args.mode == "daily" and counts["failures"] == 0 and not deferred:
         state.mark_daily_complete(today)

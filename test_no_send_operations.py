@@ -62,6 +62,7 @@ ALLOWED_WRITE_SITES = {
     ("triage.py", "execute_plan", "users().drafts().create"),
     ("daily_triage.py", "_create_reply_draft", "users().drafts().create"),
     ("gmail_labeler.py", "apply_labels", "users().messages().modify"),
+    ("hosted_runner.py", "_undo_group", "users().messages().modify"),
     ("setup_labels.py", "apply_label_setup", "users().labels().create"),
 }
 

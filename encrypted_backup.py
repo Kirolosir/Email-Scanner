@@ -36,7 +36,9 @@ def _unb64(value):
 def _archive_bytes(active):
     active = Path(active)
     chosen = [active / name for name in sorted(ROOT_FILES)]
-    for directory, pattern in (("review", "*.json"), ("draft-logs", "*")):
+    for directory, pattern in (
+        ("review", "*.json"), ("draft-logs", "*"), ("rollback", "*"),
+    ):
         try:
             chosen.extend(sorted(
                 (path for path in (active / directory).glob(pattern)

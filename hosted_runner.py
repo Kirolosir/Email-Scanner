@@ -31,8 +31,10 @@ import campaign
 import daily_triage
 from connect_account import build_provider
 from gmail_auth import SCOPES
-from gmail_common import QuotaThrottle, list_message_ids_by_query, normalize_address
-from gmail_labeler import fetch_account_labels
+from gmail_common import (
+    QuotaThrottle, list_message_ids_by_query, normalize_address,
+)
+from gmail_labeler import UNITS_MESSAGES_MODIFY, fetch_account_labels
 from gmail_retry import gmail_execute
 from hosted_status import verify_durable_state_root
 import hosted_run_request
@@ -42,6 +44,7 @@ import setup_labels
 from encrypted_backup import create_verified_backup
 from retry_queue import RetryQueue
 from triage_config import load_triage_label_config
+from rollback_journal import group_journals
 
 
 CONFIG_FILE = "account.json"
@@ -54,6 +57,7 @@ REVIEW_DIR = "review"
 DRAFT_LOG_DIR = "draft-logs"
 RETRY_QUEUE_FILE = "retry-queue.json"
 BACKUP_DIR = "backups"
+ROLLBACK_DIR = "rollback"
 PENDING_LABEL_SETUP = hosted_settings.PENDING_LABEL_SETUP
 HISTORY_CHUNK_SIZE = 50
 BATCH_HISTORY_CHUNK_SIZE = 200
@@ -253,6 +257,78 @@ def _history_review_path(directory, now, offset):
     return directory / f"history-{stamp}-{offset:05d}.json"
 
 
+def _rollback_manifest_path(active, group_id, offset=0):
+    return Path(active) / ROLLBACK_DIR / f"{group_id}-{offset:05d}.json"
+
+
+def _undo_group(service, active, group_id, status_path):
+    """Undo exactly recorded writes, preserving progress after every change."""
+    journals = group_journals(active, group_id)
+    labels = fetch_account_labels(service)
+    throttle = QuotaThrottle()
+    state = daily_triage.DailyState(active / STATE_FILE).load()
+    counts = {key: 0 for key in RunStatus.COUNT_KEYS}
+    status = RunStatus(status_path)
+    status.start("hosted:rollback")
+    entries = [entry for journal in journals for entry in journal.document["entries"]]
+    status.progress("Undoing previous run", counts, current=0, total=len(entries))
+    restore_log = campaign.DraftLog(
+        str(Path(active) / ROLLBACK_DIR / f"restore-{group_id}.log"),
+        [f"rollback group {group_id}", "message ids moved to Gmail Trash"],
+    )
+    failures = 0
+    completed = 0
+    with restore_log:
+        for journal in journals:
+            for entry in journal.document["entries"]:
+                draft_done = entry["draft_undone"] or not entry["draft_id"]
+                labels_done = entry["labels_undone"] or not entry["labels"]
+                if not draft_done:
+                    trashed, missing, errors = campaign.trash_drafts(
+                        service, [entry["draft_id"]], throttle, restore_log
+                    )
+                    if not errors and trashed + missing == 1:
+                        journal.mark_progress(entry["message_id"], draft=True)
+                        draft_done = True
+                        counts["drafted"] += trashed
+                    else:
+                        failures += 1
+                if not labels_done:
+                    label_ids = [labels[name] for name in entry["labels"] if name in labels]
+                    try:
+                        if label_ids:
+                            throttle.consume(UNITS_MESSAGES_MODIFY)
+                            gmail_execute(service.users().messages().modify(
+                                userId="me", id=entry["message_id"],
+                                body={"removeLabelIds": label_ids},
+                            ))
+                        journal.mark_progress(entry["message_id"], labels=True)
+                        labels_done = True
+                        counts["labeled"] += len(label_ids)
+                    except Exception:  # noqa: BLE001 - status remains message-free
+                        failures += 1
+                if draft_done and labels_done:
+                    record = state.record_for(entry["message_id"])
+                    if (not entry["draft_id"]
+                            or record.get("draft_id", "") == entry["draft_id"]):
+                        state.data["messages"].pop(entry["message_id"], None)
+                    completed += 1
+                status.progress(
+                    "Undoing previous run", counts,
+                    current=completed, total=len(entries),
+                )
+    state.data["last_daily_date"] = None
+    state.save()
+    if failures == 0 and completed == len(entries):
+        for journal in journals:
+            journal.mark_undone()
+    counts["failures"] = failures
+    counts["skipped"] = max(0, len(entries) - completed)
+    status.finish(failures == 0, counts,
+                  ["rollback_incomplete"] if failures else [])
+    return 1 if failures else 0
+
+
 def _latest_counts(status_path):
     try:
         with Path(status_path).open(encoding="utf-8") as handle:
@@ -352,6 +428,17 @@ def run_if_due(env=None, *, now=None, service_builder=build,
             return 2
         gmail_service = service_builder("gmail", "v1", credentials=credentials)
 
+        if run_request and run_request.get("scope") == "rollback":
+            try:
+                code = _undo_group(
+                    gmail_service, active, run_request["rollback_group"], status_path
+                )
+            except Exception as exc:  # noqa: BLE001 - status remains message-free
+                _record_blocked(status_path, "rollback_failed")
+                print(f"Previous-run undo stopped safely ({type(exc).__name__}).")
+                return 1
+            return code
+
         if prepared_labels is not None:
             try:
                 _apply_pending_label_plan(gmail_service, prepared_labels)
@@ -369,7 +456,9 @@ def run_if_due(env=None, *, now=None, service_builder=build,
             else None
         )
 
-        def _argv(scan_limit, review_path, *, history=False):
+        rollback_group = str(int(now.timestamp()))
+
+        def _argv(scan_limit, review_path, *, history=False, offset=0):
             write_limit, draft_limit = _complete_batch_limits(scan_limit)
             values = [
                 "daily",
@@ -381,6 +470,10 @@ def run_if_due(env=None, *, now=None, service_builder=build,
                 "--status-path", str(status_path),
                 "--lock-dir", str(active / LOCK_DIR),
                 "--review-report", str(review_path),
+                "--rollback-manifest", str(_rollback_manifest_path(
+                    active, rollback_group, offset
+                )),
+                "--rollback-group", rollback_group,
                 "--max-scan", str(scan_limit),
                 "--limit", str(write_limit),
                 "--max-drafts", str(draft_limit),
@@ -488,7 +581,7 @@ def run_if_due(env=None, *, now=None, service_builder=build,
                 argv = _argv(
                     len(chunk),
                     _history_review_path(active / REVIEW_DIR, now, offset),
-                    history=True,
+                    history=True, offset=offset,
                 )
                 code = daily_triage.main(
                     argv, gmail_service=gmail_service,

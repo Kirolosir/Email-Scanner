@@ -25,6 +25,8 @@ _Screenshots use synthetic account and run data._
 - Envelope-encrypted credentials and backups backed by Cloud KMS.
 - Idempotent message and draft journals that make interrupted runs safe to
   resume.
+- Account-bound rollback journals that undo only the latest run's recorded
+  drafts and label additions.
 - Bounded retry queues for transient Gmail and generation failures.
 - PII-free operational status, structured coverage reports, and usage metrics.
 - A tested no-send boundary: the application can label mail and create drafts,
@@ -68,13 +70,16 @@ The hosted dashboard turns those internal caps into one message batch size and
 reserves enough writes and drafts to finish every eligible message in the
 batch. **Scan new mail** checks the recent overlap window. **Scan previous
 emails** accepts a number from 1 to 5,000 and checks that many of the newest
-eligible messages without an age cutoff. Large history jobs are applied in
-restart-safe groups of 50, so completed work is saved continuously and never
-duplicated.
+eligible messages without an age cutoff. Scans above 100 messages use the
+provider's batch service in restart-safe groups of up to 200, while smaller
+scans keep the immediate request path.
 
 The dashboard shows live analysis and drafting progress, keeps failed runs
 visible until they are resolved, and provides a review queue with direct links
-to Gmail drafts. A coach profile stores the owner's role, program, signature,
+to Gmail drafts. Its guarded undo action previews the latest run, requires a
+typed confirmation, moves only that run's new drafts to Trash, removes only its
+recorded label additions, and makes those messages eligible to scan again. A
+coach profile stores the owner's role, program, signature,
 and voice guidance. For recruiting messages, the classifier also extracts the
 stated recruit name, graduation year, position, school or club, and location.
 The dashboard marks these details as model-extracted so the coach verifies them
@@ -135,9 +140,9 @@ detailed guide. From the project directory, run:
 
 The test suite is offline and uses synthetic messages, fake Gmail objects, and
 stub classifiers. It does not connect to Gmail, Gemini, OAuth, or the hosted
-authorization service. The suite checks the no-send rule, add-only labels,
-approval binding, recruiting-year evidence, duplicate prevention, rollback behavior,
-and the hosted authorization code. A passing test run checks the local code;
+authorization service. The suite checks the no-send rule, add-only normal
+labeling, exact rollback removal, approval binding, recruiting-year evidence,
+duplicate prevention, and the hosted authorization code. A passing test run checks the local code;
 it does not grant access to a Gmail account.
 
 Full setup, safety architecture, and rollout details: see [DETAILS.md](DETAILS.md).

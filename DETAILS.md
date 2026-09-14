@@ -65,7 +65,8 @@ Google scope.
 10. Failed items enter the retry queue, then configuration and bounded run
     history are encrypted and backed up.
 
-History scans accept 1 to 5,000 messages and process them in groups of 50.
+History scans accept 1 to 5,000 messages. Selections above 100 use the batch
+service in groups of up to 200; smaller selections use groups of 50.
 Retryable failures are deferred while later groups continue. The 15-minute
 timer checks for due retries without contacting Gmail when the queue is empty.
 
@@ -161,6 +162,13 @@ retry state, and bounded review and draft logs. Each archive uses a fresh data
 key wrapped by Cloud KMS. Restore code refuses a non-empty destination and
 unsafe paths. `test_reliability_runtime.py` covers encryption, verification,
 and a full offline restore.
+
+Each hosted apply run also writes a private rollback journal immediately after
+every successful label or draft change. The dashboard can queue an undo only
+for the latest recorded run and only after typed confirmation. The runner moves
+that run's new drafts to Trash, removes only its recorded label additions, and
+clears the matching completion records so the messages can be scanned again.
+Rollback progress is saved after each change, making retries idempotent.
 
 ## Release checks
 

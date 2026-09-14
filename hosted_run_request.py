@@ -15,10 +15,11 @@ from pathlib import Path
 import connection
 from message_safety import opaque_id
 from private_runtime import atomic_write_json
+from rollback_journal import GROUP_ID, latest_summary
 
 
 REQUEST_FILE = "run-now-request.json"
-REQUEST_VERSION = 2
+REQUEST_VERSION = 3
 MAX_REQUEST_AGE = dt.timedelta(hours=1)
 MAX_CLOCK_SKEW = dt.timedelta(minutes=5)
 MAX_HISTORY_MESSAGES = 5000
@@ -87,10 +88,43 @@ def request_run(root, *, now=None, history_count=None):
                 "requested_at": requested_at.isoformat(timespec="seconds"),
                 "scope": "history" if history_count is not None else "recent",
                 "message_count": history_count,
+                "rollback_group": None,
             })
             return int(requested_at.timestamp())
     except connection.ConnectionBusy as exc:
         raise RunAlreadyActive("a mailbox run is already in progress") from exc
+
+
+def request_undo(root, *, group_id, confirmation, now=None):
+    """Queue rollback of the latest recorded run after typed confirmation."""
+    if confirmation != "UNDO":
+        raise RunRequestError("type UNDO to confirm the rollback")
+    if not GROUP_ID.fullmatch(str(group_id)):
+        raise RunRequestError("the rollback group is invalid")
+    root = Path(root)
+    requested_at = _utc_now(now)
+    try:
+        with connection.lifecycle_lock(root, blocking=False):
+            occupant = connection.current(root)
+            if occupant is None:
+                raise RunRequestError("link a Google account before undoing")
+            active = Path(occupant.directory)
+            if request_path(active).is_file():
+                raise RunAlreadyActive("a mailbox operation is already queued")
+            summary = latest_summary(active)
+            if summary is None or not hmac.compare_digest(
+                    summary["group_id"], str(group_id)):
+                raise RunRequestError("only the latest recorded run can be undone")
+            atomic_write_json(request_path(active), {
+                "version": REQUEST_VERSION,
+                "account_hash": _account_hash(occupant.account),
+                "requested_at": requested_at.isoformat(timespec="seconds"),
+                "scope": "rollback", "message_count": None,
+                "rollback_group": str(group_id),
+            })
+            return int(requested_at.timestamp())
+    except connection.ConnectionBusy as exc:
+        raise RunAlreadyActive("a mailbox operation is already in progress") from exc
 
 
 def load_request(active, occupant, *, now=None):
@@ -108,16 +142,23 @@ def load_request(active, occupant, *, now=None):
         raise RunRequestError("the immediate-run request must be an object")
     if set(document) != {
         "version", "account_hash", "requested_at", "scope", "message_count",
+        "rollback_group",
     }:
         raise RunRequestError("the immediate-run request has unsupported fields")
     if document.get("version") != REQUEST_VERSION:
         raise RunRequestError("the immediate-run request version is unsupported")
     scope = document.get("scope")
-    if scope not in {"recent", "history"}:
+    if scope not in {"recent", "history", "rollback"}:
         raise RunRequestError("the immediate-run request scope is unsupported")
     message_count = _history_count(document.get("message_count"))
     if (scope == "history") != (message_count is not None):
         raise RunRequestError("the immediate-run request scope is inconsistent")
+    rollback_group = document.get("rollback_group")
+    if scope == "rollback":
+        if not GROUP_ID.fullmatch(str(rollback_group)):
+            raise RunRequestError("the rollback request group is invalid")
+    elif rollback_group is not None:
+        raise RunRequestError("the immediate-run request rollback group is inconsistent")
     account_hash = document.get("account_hash")
     if not isinstance(account_hash, str) or not hmac.compare_digest(
             account_hash, _account_hash(occupant.account)):

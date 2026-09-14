@@ -41,9 +41,11 @@ def test_request_is_private_account_bound_and_consumed_once(tmp_path):
     document = json.loads(path.read_text(encoding="utf-8"))
     assert set(document) == {
         "version", "account_hash", "requested_at", "scope", "message_count",
+        "rollback_group",
     }
     assert document["scope"] == "recent"
     assert document["message_count"] is None
+    assert document["rollback_group"] is None
     assert "@" not in path.read_text(encoding="utf-8")
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert requests.consume_request(occupant.directory, occupant, now=NOW)
@@ -110,3 +112,29 @@ def test_disabled_connection_cannot_request_a_run(tmp_path):
     with pytest.raises(requests.RunRequestError, match="not enabled"):
         requests.request_run(tmp_path, now=NOW)
     assert not requests.request_path(occupant.directory).exists()
+
+
+def test_undo_request_requires_typed_confirmation_and_latest_group(tmp_path):
+    occupant = _ready_connection(tmp_path)
+    rollback = occupant.directory / "rollback"
+    rollback.mkdir()
+    (rollback / "1788969600-00000.json").write_text(json.dumps({
+        "version": 1, "group_id": "1788969600",
+        "created_at": NOW.isoformat(timespec="seconds"),
+        "completed_at": NOW.isoformat(timespec="seconds"), "undone_at": None,
+        "entries": [{
+            "message_id": "m1", "draft_id": "d1", "labels": ["Triage/Other"],
+            "draft_undone": False, "labels_undone": False,
+        }],
+    }), encoding="utf-8")
+
+    with pytest.raises(requests.RunRequestError, match="type UNDO"):
+        requests.request_undo(
+            tmp_path, group_id="1788969600", confirmation="undo", now=NOW
+        )
+    requests.request_undo(
+        tmp_path, group_id="1788969600", confirmation="UNDO", now=NOW
+    )
+    document = requests.load_request(occupant.directory, occupant, now=NOW)
+    assert document["scope"] == "rollback"
+    assert document["rollback_group"] == "1788969600"

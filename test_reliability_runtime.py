@@ -33,6 +33,11 @@ def test_encrypted_backup_round_trip_and_restore(tmp_path):
     (review / "daily.json").write_text(
         json.dumps({"counts": {"drafted": 2}}), encoding="utf-8"
     )
+    rollback = active / "rollback"
+    rollback.mkdir()
+    (rollback / "1788969600-00000.json").write_text(
+        json.dumps({"safe": "rollback"}), encoding="utf-8"
+    )
     provider = FileKeyProvider(tmp_path / "key").create()
     backup = create_verified_backup(
         active, tmp_path / "backups", "seat-1", provider,
@@ -47,3 +52,6 @@ def test_encrypted_backup_round_trip_and_restore(tmp_path):
     assert json.loads((restored / "review" / "daily.json").read_text())[
         "counts"
     ]["drafted"] == 2
+    assert json.loads(
+        (restored / "rollback" / "1788969600-00000.json").read_text()
+    ) == {"safe": "rollback"}

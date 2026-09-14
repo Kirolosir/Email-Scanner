@@ -54,6 +54,7 @@ PIPELINE_MODULES = [
     "private_runtime.py",
     "local_notifier.py",
     "review_report.py",
+    "rollback_journal.py",
     "setup_labels.py",
     "taxonomy.py",
     "triage.py",

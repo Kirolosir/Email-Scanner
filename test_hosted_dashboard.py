@@ -15,13 +15,15 @@ from hosted_status import HostedConfig
 BEARER = "b" * 48
 
 
-def _app(tmp_path, control=None, run_requester=None, clock=None):
+def _app(tmp_path, control=None, run_requester=None, clock=None,
+         undo_requester=None):
     config = HostedConfig(
         tmp_path, BEARER, require_forwarded_https=False,
         require_mountpoint=False, verify_root=False,
     )
     return HostedDashboardApp(
-        config, control=control, run_requester=run_requester, clock=clock
+        config, control=control, run_requester=run_requester, clock=clock,
+        undo_requester=undo_requester,
     )
 
 
@@ -573,6 +575,45 @@ def test_run_page_ignores_impossible_request_timestamp(tmp_path):
     )
     assert response["status"].startswith("200")
     assert "Refresh" not in response["headers"]
+
+
+def test_undo_button_previews_and_queues_latest_recorded_run(tmp_path):
+    seat = connection.connect(tmp_path, "owner@example.test")
+    rollback = seat.directory / "rollback"
+    rollback.mkdir()
+    (rollback / "1788969600-00000.json").write_text(json.dumps({
+        "version": 1, "group_id": "1788969600",
+        "created_at": "2026-09-09T16:00:00+00:00",
+        "completed_at": "2026-09-09T16:01:00+00:00", "undone_at": None,
+        "entries": [{
+            "message_id": "m1", "draft_id": "d1",
+            "labels": ["Triage/Other", "Triage/Processed"],
+            "draft_undone": False, "labels_undone": False,
+        }],
+    }), encoding="utf-8")
+    calls = []
+
+    def request_undo(root, *, group_id, confirmation, now):
+        calls.append((root, group_id, confirmation, now))
+        return 1788969600
+
+    app = _app(tmp_path, undo_requester=request_undo)
+    cookie = _login(app)
+    dashboard = _call(app, cookie=cookie)
+    assert "Undo drafts and labels" in dashboard["body"]
+    preview = _call(app, "/undo", cookie=cookie)
+    assert "Type UNDO to continue" in preview["body"]
+    response = _call(
+        app, "/undo", "POST",
+        urlencode({
+            "csrf": app._csrf_value(), "group_id": "1788969600",
+            "confirmation": "UNDO",
+        }), cookie,
+    )
+    assert response["headers"]["Location"].startswith(
+        "/?run=requested&undo=requested"
+    )
+    assert calls[0][1:3] == ("1788969600", "UNDO")
 
 
 def test_dashboard_explains_when_google_must_be_reconnected(tmp_path):

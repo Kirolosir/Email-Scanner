@@ -85,6 +85,69 @@ def test_vacant_runner_contacts_nothing(tmp_path, monkeypatch):
     assert runner.run_if_due(env, service_builder=explode) == 0
 
 
+def test_undo_group_removes_only_recorded_labels_and_draft(tmp_path, monkeypatch):
+    active = tmp_path / "active"
+    active.mkdir()
+    rollback = active / runner.ROLLBACK_DIR
+    rollback.mkdir()
+    journal = __import__("rollback_journal").RollbackJournal(
+        rollback / "1788969600-00000.json", "1788969600"
+    )
+    journal.record_labels("m1", ["Triage/Other", "Triage/Processed"])
+    journal.record_draft("m1", "d1")
+    journal.complete()
+    (active / runner.STATE_FILE).write_text(json.dumps({
+        "version": 1, "last_daily_date": "2026-09-09",
+        "messages": {"m1": {
+            "status": "complete", "thread_id": "t1", "draft_id": "d1",
+            "draft_policy_version": 5,
+        }},
+    }), encoding="utf-8")
+    monkeypatch.setattr(runner, "fetch_account_labels", lambda _service: {
+        "Triage/Other": "L1", "Triage/Processed": "L2", "Manual": "L3",
+    })
+    operations = []
+
+    class Service:
+        def users(self):
+            return self
+
+        def drafts(self):
+            return self
+
+        def messages(self):
+            return self
+
+        def get(self, **kwargs):
+            return ("get", kwargs)
+
+        def trash(self, **kwargs):
+            return ("trash", kwargs)
+
+        def modify(self, **kwargs):
+            return ("modify", kwargs)
+
+    def execute(request):
+        operations.append(request)
+        if request[0] == "get":
+            return {"message": {"id": "draft-message-1"}}
+        return {}
+
+    monkeypatch.setattr(runner, "gmail_execute", execute)
+    monkeypatch.setattr(runner.campaign, "gmail_execute", execute)
+
+    assert runner._undo_group(
+        Service(), active, "1788969600", active / runner.STATUS_FILE
+    ) == 0
+    modify = next(value for name, value in operations if name == "modify")
+    assert modify["id"] == "m1"
+    assert modify["body"] == {"removeLabelIds": ["L1", "L2"]}
+    assert "L3" not in modify["body"]["removeLabelIds"]
+    state = json.loads((active / runner.STATE_FILE).read_text(encoding="utf-8"))
+    assert state["messages"] == {}
+    assert state["last_daily_date"] is None
+
+
 def test_incomplete_setup_is_recorded_before_token_or_gmail(tmp_path,
                                                              monkeypatch):
     root, _client, env = _environment(tmp_path, monkeypatch)

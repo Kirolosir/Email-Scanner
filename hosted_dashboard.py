@@ -22,6 +22,7 @@ import connection_schedule
 import hosted_run_request
 import hosted_settings
 from hosted_status import HostedConfig, status_document
+from rollback_journal import latest_summary
 
 
 SESSION_COOKIE = "email_scanner_session"
@@ -356,6 +357,8 @@ FAILURE_MESSAGES = {
     "account_setup_incomplete": "Finish the coach profile and label settings.",
     "label_setup_failed": "Gmail labels could not be prepared. Save settings again.",
     "label_setup_invalid": "The saved label plan needs to be refreshed.",
+    "rollback_incomplete": "Some previous-run changes still need to be undone.",
+    "rollback_failed": "The previous run could not be undone safely.",
 }
 
 
@@ -446,11 +449,13 @@ def _cookie_map(environ):
 
 
 class HostedDashboardApp:
-    def __init__(self, config, clock=None, control=None, run_requester=None):
+    def __init__(self, config, clock=None, control=None, run_requester=None,
+                 undo_requester=None):
         self.config = config
         self.clock = clock or (lambda: dt.datetime.now(dt.timezone.utc))
         self.control = control
         self.run_requester = run_requester or hosted_run_request.request_run
+        self.undo_requester = undo_requester or hosted_run_request.request_undo
 
     def _session_value(self):
         return hmac.new(
@@ -683,6 +688,43 @@ class HostedDashboardApp:
                 f"/?run=requested&after={requested_epoch}",
             )
 
+        if path == "/undo" and method in {"GET", "HEAD"}:
+            try:
+                occupant = connection.current(self.config.state_root)
+                summary = latest_summary(occupant.directory) if occupant else None
+            except connection.ConnectionConfigError:
+                summary = None
+            if summary is None:
+                return self._redirect(start_response, "/")
+            return self._respond(
+                start_response, "200 OK", self._undo_page(summary), head=head
+            )
+
+        if path == "/undo" and method == "POST":
+            form = self._form(environ)
+            if form is None or not self._csrf_ok(form):
+                return self._respond(
+                    start_response, "403 Forbidden",
+                    self._page("Request refused", "<h1>Request refused.</h1>"),
+                )
+            try:
+                requested_epoch = self.undo_requester(
+                    self.config.state_root,
+                    group_id=str(form.get("group_id", "")),
+                    confirmation=str(form.get("confirmation", "")),
+                    now=self.clock(),
+                )
+            except hosted_run_request.RunAlreadyActive:
+                return self._redirect(start_response, "/?undo=busy")
+            except (hosted_run_request.RunRequestError,
+                    connection.ConnectionError,
+                    connection.ConnectionConfigError, OSError):
+                return self._redirect(start_response, "/?undo=failed")
+            return self._redirect(
+                start_response,
+                f"/?run=requested&undo=requested&after={requested_epoch}",
+            )
+
         if path == "/logout" and method == "POST":
             form = self._form(environ)
             if form is None or not self._csrf_ok(form):
@@ -756,6 +798,22 @@ class HostedDashboardApp:
             run_notice, refresh = _run_feedback(
                 feedback_occupant, route_now, run_state, requested_epoch
             )
+            undo_state = (query.get("undo") or [""])[-1]
+            if undo_state == "requested" and run_state == "requested":
+                run_notice = (
+                    '<p class="notice progress"><strong>Undo queued.</strong> '
+                    'Drafts and labels will be rolled back in the background.</p>'
+                )
+            elif undo_state == "busy":
+                run_notice = (
+                    '<p class="notice bad">A mailbox operation is already '
+                    'running. Wait for it to finish before undoing.</p>'
+                )
+            elif undo_state == "failed":
+                run_notice = (
+                    '<p class="notice bad">The undo request was refused. '
+                    'Nothing was changed.</p>'
+                )
             headers = []
             if refresh and requested_epoch is not None:
                 headers.append((
@@ -946,6 +1004,7 @@ class HostedDashboardApp:
             run_details = {}
             review_rows = []
             coach_profile = {}
+            rollback_summary = None
         else:
             account = occupant.account
             next_run = connection_schedule.next_run(occupant, now).strftime(
@@ -956,6 +1015,7 @@ class HostedDashboardApp:
             run_details = _safe_run_details(occupant.directory)
             review_rows = _safe_review_queue(occupant.directory)
             coach_profile = _safe_coach_profile(occupant.directory)
+            rollback_summary = latest_summary(occupant.directory)
 
         expiry = public.get("expiry") or {}
         last = public.get("last_run") or {}
@@ -1093,6 +1153,16 @@ class HostedDashboardApp:
                 required><button type="submit">Scan previous emails</button></div>
             </form>
           </section>""" if occupant is not None else ""
+        rollback_card = f"""
+          <section class="panel undo-run">
+            <div><p class="eyebrow">Previous run</p>
+              <h2>Undo drafts and labels</h2>
+              <p>Undo {_escape(rollback_summary.get('drafts'))} created drafts
+              and {_escape(rollback_summary.get('labels'))} label changes across
+              {_escape(rollback_summary.get('messages'))} emails. You will review
+              the impact and confirm before anything changes.</p></div>
+            <a class="secondary danger-link" href="/undo">Review undo</a>
+          </section>""" if rollback_summary is not None else ""
 
         return self._page("Dashboard", f"""
           <header class="topbar">
@@ -1139,6 +1209,7 @@ class HostedDashboardApp:
             </section>
 
             {history_form}
+            {rollback_card}
 
             <section class="content-grid">
               <article class="panel results">
@@ -1183,6 +1254,34 @@ class HostedDashboardApp:
                 <a class="secondary" href="https://mail.google.com/mail/u/0/#drafts"
                   target="_blank" rel="noopener noreferrer">Open all drafts</a></div>
               <div class="draft-list">{review_queue}</div>
+            </section>
+          </main>
+        """)
+
+    def _undo_page(self, summary):
+        return self._page("Undo previous run", f"""
+          <header class="topbar">
+            <a class="brand" href="/"><span class="mark small">ES</span>
+              <span>Email Scanner</span></a>
+            <a class="ghost-link" href="/">Cancel</a>
+          </header>
+          <main class="workspace settings-shell">
+            <section class="panel danger-zone undo-confirm">
+              <div><p class="eyebrow">Confirm rollback</p>
+                <h1>Undo the previous run?</h1>
+                <p>This will remove {_escape(summary.get('labels'))} labels added
+                by that run and move {_escape(summary.get('drafts'))} drafts to
+                Gmail Trash. If you edited one of those drafts, your edits will
+                move to Trash with it. No email will be sent.</p></div>
+              <form method="post" action="/undo">
+                <input type="hidden" name="csrf" value="{self._csrf_value()}">
+                <input type="hidden" name="group_id"
+                  value="{_escape(summary.get('group_id'), '')}">
+                <label for="confirmation">Type UNDO to continue</label>
+                <input id="confirmation" name="confirmation"
+                  autocomplete="off" required>
+                <button class="danger" type="submit">Undo previous run</button>
+              </form>
             </section>
           </main>
         """)
@@ -1464,6 +1563,8 @@ height:14px;accent-color:var(--mint-dark)}}.run-progress>p{{font-size:.85rem;mar
 .danger-zone{{margin-top:26px;border-color:#f0cbc5;box-shadow:none;display:grid;grid-template-columns:.8fr 1.2fr;gap:38px}}
 .danger-zone p{{color:var(--muted)}}.danger-zone label{{margin:0 0 8px}}.disconnect-row{{display:flex;gap:10px;align-items:center}}
 .danger{{background:#a33b2e;white-space:nowrap}}
+.danger-link{{background:#a33b2e}}.undo-run{{display:flex;align-items:center;
+justify-content:space-between;gap:24px;margin-bottom:16px}}.undo-confirm h1{{font-size:2.4rem}}
 .coach-card{{display:flex;align-items:center;justify-content:space-between;gap:24px;
 margin-bottom:16px}}.coach-card p{{margin-bottom:0}}.review-queue{{margin-bottom:16px}}
 .draft-list{{display:grid;gap:12px}}.draft-card{{padding:18px;border:1px solid #dce8e5;
