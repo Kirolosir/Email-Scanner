@@ -245,7 +245,10 @@ class _ExecutionGmail:
 
     def create(self, userId, body):
         self.create_calls.append(body)
-        return _Call({"id": "draft-1", "message": {"threadId": "t1"}})
+        return _Call({
+            "id": f"draft-{len(self.create_calls)}",
+            "message": {"threadId": "t1"},
+        })
 
 
 class _Log:
@@ -291,7 +294,7 @@ def test_interruption_after_draft_recovers_without_duplicate(tmp_path):
     assert log.ids == ["draft-1"]
 
 
-def test_existing_thread_draft_is_not_adopted_or_created(tmp_path):
+def test_existing_thread_draft_does_not_block_distinct_message_draft(tmp_path):
     service = _ExecutionGmail()
     state = DailyState(tmp_path / "state.json")
     log = _Log()
@@ -299,14 +302,14 @@ def test_existing_thread_draft_is_not_adopted_or_created(tmp_path):
         service, _execution_plan(), ACCOUNT_LABELS,
         QuotaThrottle(100_000), log, state, {"t1": "existing-draft"},
     )
-    assert errors == ["existing_manual_draft"]
-    assert draft_id == ""
-    assert service.create_calls == []
-    assert log.ids == [], "a pre-existing/manual draft must never enter rollback log"
-    assert state.record_for("m1") == {}, "manual draft must not become program-owned"
+    assert errors == []
+    assert draft_id == "draft-1"
+    assert len(service.create_calls) == 1
+    assert log.ids == ["draft-1"]
+    assert state.record_for("m1")["draft_id"] == "draft-1"
 
 
-def test_messages_in_one_conversation_share_the_new_run_owned_draft(tmp_path):
+def test_messages_in_one_conversation_receive_distinct_drafts(tmp_path):
     service = _ExecutionGmail()
     state = DailyState(tmp_path / "state.json")
     log = _Log()
@@ -322,15 +325,16 @@ def test_messages_in_one_conversation_share_the_new_run_owned_draft(tmp_path):
             state, draft_threads, created_threads,
         )
         assert errors == []
-        assert draft_id == "draft-1"
+        assert draft_id in {"draft-1", "draft-2"}
 
-    assert len(service.create_calls) == 1
-    assert log.ids == ["draft-1"]
+    assert len(service.create_calls) == 2
+    assert log.ids == ["draft-1", "draft-2"]
     assert state.record_for("m1")["status"] == "complete"
     assert state.record_for("m2")["status"] == "complete"
+    assert state.record_for("m1")["draft_id"] != state.record_for("m2")["draft_id"]
 
 
-def test_manual_draft_reconciliation_marks_needs_review_without_rollback_owner(tmp_path):
+def test_manual_thread_draft_does_not_suppress_planned_message_draft(tmp_path):
     plan = _execution_plan()
     plan.update({
         "template_key": "recruit_intro_2027",
@@ -340,9 +344,9 @@ def test_manual_draft_reconciliation_marks_needs_review_without_rollback_owner(t
     })
     state = DailyState(tmp_path / "state.json")
     reconcile_existing_drafts([plan], state, {"t1": "manual-draft"}, CONFIG)
-    assert plan["template"] is None
-    assert plan["existing_manual_draft"] is True
-    assert "Needs Review" in plan["decision"].add
+    assert plan["template"] == "approved reply"
+    assert plan["draft_already_owned"] is False
+    assert plan.get("existing_manual_draft") is not True
     assert state.record_for("m1") == {}
 
 
@@ -913,6 +917,36 @@ def test_policy_upgrade_revisits_prior_no_draft_completion(tmp_path):
         message, "Processed", state, account_wide_drafting=True,
         draft_threads={},
     ) is False
+
+
+def test_conversation_level_legacy_draft_revisits_every_extra_message(tmp_path):
+    state = DailyState(tmp_path / "state.json")
+    for message_id in ("m1", "m2", "m3"):
+        state.data["messages"][message_id] = {
+            "status": "complete", "thread_id": "t1", "draft_id": "d1",
+            "draft_policy_version": 3,
+        }
+
+    results = [
+        already_processed_for_draft_policy(
+            {"id": message_id, "threadId": "t1", "_label_names": ["Processed"]},
+            "Processed", state, account_wide_drafting=True,
+            draft_threads={"t1": "d1"},
+        )
+        for message_id in ("m1", "m2", "m3")
+    ]
+    assert results == [True, False, False]
+
+    plans = []
+    for message_id in ("m1", "m2", "m3"):
+        plan = _execution_plan()
+        plan["email"] = _email(message_id=message_id, thread_id="t1")
+        plans.append(plan)
+    reconcile_existing_drafts(plans, state, {"t1": "d1"}, CONFIG)
+    assert plans[0]["draft_already_owned"] is True
+    assert [plan.get("replace_missing_owned_draft", False) for plan in plans] == [
+        False, True, True,
+    ]
 
 
 def test_recorded_draft_is_complete_across_draft_policy_upgrade(tmp_path):

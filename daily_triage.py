@@ -152,6 +152,7 @@ class DailyState:
 
     def __init__(self, path=DEFAULT_STATE_PATH):
         self.path = Path(path)
+        self._draft_owner_cache = None
         self.data = {
             "version": self.VERSION,
             "last_daily_date": None,
@@ -170,6 +171,7 @@ class DailyState:
                 f"daily state is invalid ({type(exc).__name__}); refusing to reset it"
             ) from exc
         self.data = candidate
+        self._draft_owner_cache = None
         if restrict_permissions:
             self._restrict_existing_permissions()
         return self
@@ -239,6 +241,22 @@ class DailyState:
     def record_for(self, message_id):
         return self.data["messages"].get(message_id, {})
 
+    def draft_is_shared_with_another_message(self, message_id, draft_id):
+        """Return whether an older run assigned one draft to several emails."""
+        if self._draft_owner_cache is None:
+            owners = {}
+            for owner, record in self.data["messages"].items():
+                owned_id = record.get("draft_id")
+                if not owned_id:
+                    continue
+                primary, count = owners.get(owned_id, (owner, 0))
+                owners[owned_id] = (min(primary, owner), count + 1)
+            self._draft_owner_cache = owners
+        primary, count = self._draft_owner_cache.get(
+            draft_id, (message_id, 0)
+        )
+        return count > 1 and message_id != primary
+
     def record_draft(self, message_id, thread_id, draft_id):
         self.data["messages"][message_id] = {
             "status": "draft_created",
@@ -246,6 +264,7 @@ class DailyState:
             "draft_id": draft_id,
             "draft_policy_version": CURRENT_DRAFT_POLICY_VERSION,
         }
+        self._draft_owner_cache = None
         self.save()
 
     def record_complete(self, message_id, thread_id, draft_id="",
@@ -258,6 +277,7 @@ class DailyState:
         if draft_policy_version:
             record["draft_policy_version"] = int(draft_policy_version)
         self.data["messages"][message_id] = record
+        self._draft_owner_cache = None
         self.save()
 
     def mark_daily_complete(self, local_date):
@@ -357,9 +377,14 @@ def already_processed_for_draft_policy(
     if not completed or not account_wide_drafting:
         return completed
     if record.get("draft_id"):
+        if state.draft_is_shared_with_another_message(
+                message["id"], record["draft_id"]):
+            return False
         if draft_threads is None:
             return True
-        return draft_threads.get(message.get("threadId", "")) == record["draft_id"]
+        return _draft_id_exists(
+            draft_threads, message.get("threadId", ""), record["draft_id"]
+        )
     return (
         record.get("draft_policy_version", 0)
         >= CURRENT_DRAFT_POLICY_VERSION
@@ -462,53 +487,68 @@ def add_daily_review_policy(plan, config, profile=None):
     return plan
 
 
+def _draft_id_exists(draft_threads, thread_id, draft_id):
+    all_ids = getattr(draft_threads, "draft_ids", None)
+    if all_ids is not None:
+        return draft_id in all_ids
+    return draft_threads.get(thread_id, "") == draft_id
+
+
+def _remember_draft(draft_threads, thread_id, draft_id):
+    if hasattr(draft_threads, "add_draft"):
+        draft_threads.add_draft(thread_id, draft_id)
+    else:
+        draft_threads[thread_id] = draft_id
+
+
 def reconcile_existing_drafts(plans, state, draft_threads, config):
-    """Block external/manual or missing program-owned drafts before writes."""
-    review_name = config.system["needs_review"]
+    """Restore missing owned drafts and require one distinct draft per email."""
     for plan in plans:
         email = plan["email"]
         record = state.record_for(email["message_id"])
-        existing_id = draft_threads.get(email["thread_id"], "")
         recorded_id = record.get("draft_id", "")
         recorded_status = record.get("status")
+        shared_record = bool(
+            recorded_id and state.draft_is_shared_with_another_message(
+                email["message_id"], recorded_id
+            )
+        )
         plan["draft_already_owned"] = bool(
             recorded_status in {"draft_created", "complete"}
             and recorded_id
-            and recorded_id == existing_id
+            and _draft_id_exists(draft_threads, email["thread_id"], recorded_id)
+            and not shared_record
         )
-        external = bool(existing_id and not (
-            recorded_status in {"draft_created", "complete"}
-            and recorded_id == existing_id
-        ))
         missing_owned = bool(
             recorded_status in {"draft_created", "complete"}
-            and recorded_id and not existing_id
+            and recorded_id
+            and not _draft_id_exists(
+                draft_threads, email["thread_id"], recorded_id
+            )
         )
-        if missing_owned:
+        if missing_owned or shared_record:
             # The source message is still replyable, but its program-owned
-            # draft was deleted. Recreate it instead of trusting stale state.
+            # draft was deleted or was shared by older conversation-level
+            # behavior. Create a distinct replacement for this message.
             plan["replace_missing_owned_draft"] = True
-            continue
-        if not external:
-            continue
-        plan["template"] = None
-        plan["template_key"] = None
-        plan["existing_manual_draft"] = external
-        plan["missing_owned_draft"] = missing_owned
-        plan["draft_skip"] = (
-            "existing manual/external draft requires review; not drafting"
-        )
-        if review_name not in email.get("label_names", []):
-            if review_name not in plan["decision"].add:
-                plan["decision"].add.append(review_name)
-        plan["needs_review"] = True
-        plan.setdefault("review_reasons", []).append(plan["draft_skip"])
     return plans
 
 
+class DraftIndex(dict):
+    """Compact thread lookup plus every draft id, without reading bodies."""
+
+    def __init__(self):
+        super().__init__()
+        self.draft_ids = set()
+
+    def add_draft(self, thread_id, draft_id):
+        self.setdefault(thread_id, draft_id)
+        self.draft_ids.add(draft_id)
+
+
 def list_existing_draft_threads(service, throttle):
-    """Return {thread_id: draft_id}, paginating without reading draft bodies."""
-    threads = {}
+    """Index draft threads and ids, paginating without reading draft bodies."""
+    threads = DraftIndex()
     page_token = None
     while True:
         throttle.consume(UNITS_DRAFTS_LIST)
@@ -525,7 +565,7 @@ def list_existing_draft_threads(service, throttle):
                 ))
                 thread_id = detail.get("message", {}).get("threadId")
             if thread_id:
-                threads.setdefault(thread_id, draft["id"])
+                threads.add_draft(thread_id, draft["id"])
         page_token = response.get("nextPageToken")
         if not page_token:
             break
@@ -573,17 +613,6 @@ def execute_daily_plan(service, plan, account_labels, throttle, draft_log,
         if (record.get("status") in {"draft_created", "complete"}
                 and not plan.get("replace_missing_owned_draft")):
             draft_id = record.get("draft_id", "")
-        elif (thread_id in draft_threads and created_draft_threads is not None
-              and thread_id in created_draft_threads):
-            # Multiple selected messages can belong to one Gmail conversation.
-            # The newest message creates the one useful reply draft; the rest
-            # share it and are still labeled/marked complete instead of being
-            # mistaken for a manual-draft race.
-            draft_id = draft_threads[thread_id]
-        elif thread_id in draft_threads:
-            # A thread draft not present in our journal belongs to a person or
-            # another tool. It is never adopted or placed in our rollback log.
-            return added, "", ["existing_manual_draft"]
         else:
             try:
                 result = _create_reply_draft(service, plan, throttle)
@@ -592,9 +621,7 @@ def execute_daily_plan(service, plan, account_labels, throttle, draft_log,
                 # Persist before any later API call. A restart sees this state
                 # and cannot create a second draft for the source message.
                 state.record_draft(message_id, thread_id, draft_id)
-                draft_threads[thread_id] = draft_id
-                if created_draft_threads is not None:
-                    created_draft_threads.add(thread_id)
+                _remember_draft(draft_threads, thread_id, draft_id)
                 plan["new_draft_created"] = True
             except Exception as exc:
                 errors.append(f"draft failed ({type(exc).__name__})")
@@ -1014,9 +1041,9 @@ def _run_locked(args, classifier, config, templates, state, status,
         if message["id"] in candidate_ids:
             continue
         record = state.record_for(message["id"])
-        if (record.get("draft_id")
-                and draft_threads.get(message.get("threadId", ""))
-                == record.get("draft_id")):
+        if (record.get("draft_id") and _draft_id_exists(
+                draft_threads, message.get("threadId", ""),
+                record.get("draft_id"))):
             counts["drafts_existing"] += 1
         else:
             counts["no_reply_address"] += 1
@@ -1148,7 +1175,6 @@ def _run_locked(args, classifier, config, templates, state, status,
         "contains program-created draft ids only; no messages were sent",
     ]
     error_codes = []
-    created_draft_threads = set()
     with DraftLog(log_path, header) as draft_log:
         status.progress(
             "Creating Gmail labels and drafts", counts,
@@ -1158,7 +1184,7 @@ def _run_locked(args, classifier, config, templates, state, status,
             try:
                 labels, _draft_id, plan_errors = execute_daily_plan(
                     service, plan, account_labels, throttle, draft_log,
-                    state, draft_threads, created_draft_threads,
+                    state, draft_threads,
                 )
                 plan["_applied_labels"] = list(labels)
                 counts["labeled"] += len(labels)
