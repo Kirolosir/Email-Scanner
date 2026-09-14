@@ -898,6 +898,23 @@ def test_account_wide_policy_revisits_old_label_only_completion_once(tmp_path):
     ) is True
 
 
+def test_policy_upgrade_revisits_prior_no_draft_completion(tmp_path):
+    state = DailyState(tmp_path / "state.json")
+    state.data["messages"]["notification"] = {
+        "status": "complete", "thread_id": "t1", "draft_id": "",
+        "draft_policy_version": 2,
+    }
+    message = {
+        "id": "notification", "threadId": "t1",
+        "_label_names": ["Processed"],
+    }
+
+    assert already_processed_for_draft_policy(
+        message, "Processed", state, account_wide_drafting=True,
+        draft_threads={},
+    ) is False
+
+
 def test_recorded_draft_is_complete_across_draft_policy_upgrade(tmp_path):
     state = DailyState(tmp_path / "state.json")
     state.data["messages"]["drafted"] = {

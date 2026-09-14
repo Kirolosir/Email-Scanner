@@ -137,14 +137,15 @@ def assess_delivery_headers(headers, own_address=""):
     if reply_address and is_automated_address(reply_address):
         automated_codes.append("automated_reply_target")
 
-    # Bulk/list headers describe how a message was distributed; they do not
-    # make a valid reply address unsafe. Keep those messages distinguishable
-    # so an explicitly approved account-wide policy can draft them. A real
-    # bounce endpoint or an automated final reply target remains terminal.
+    # Bulk/list and notification-style addresses describe how a message was
+    # distributed; they do not make a syntactically valid reply address
+    # unusable. Keep those messages distinguishable so an explicitly approved
+    # account-wide policy can draft them. Only a real delivery-system bounce
+    # endpoint remains terminal.
     target = reply_address or sender
     hard_automated = bool(
         is_bounce_address(sender)
-        or is_automated_address(target)
+        or is_bounce_address(target)
     )
     if hard_automated:
         return {
@@ -159,8 +160,6 @@ def assess_delivery_headers(headers, own_address=""):
         ambiguity.append(f"from_{sender_error}")
     if reply_raw and reply_error:
         ambiguity.append(f"reply_to_{reply_error}")
-    if target and is_automated_address(target):
-        ambiguity.append("unsafe_reply_target")
     owner = parseaddr(own_address or "")[1].strip().casefold()
     if owner and target == owner:
         ambiguity.append("reply_target_is_account_owner")

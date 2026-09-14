@@ -254,8 +254,8 @@ def test_unsafe_recipient_never_drafts_or_invents_address(tmp_path, delivery):
 
 
 @pytest.mark.parametrize("headers", [
-    {"from": "no-reply@example.test"},
     {"from": "mailer-daemon@example.test"},
+    {"from": "bounce-123@example.test"},
 ])
 def test_nonreplyable_automated_mail_never_drafts_even_with_a_supplied_address(
         tmp_path, headers):
@@ -298,6 +298,8 @@ def test_nonreplyable_automated_mail_never_drafts_even_with_a_supplied_address(
     {"from": "ASOS <news@e.asos.test>", "list-unsubscribe": "<mailto:u@e.test>"},
     {"from": "rewards@dominos.test", "precedence": "bulk"},
     {"from": "notifications@example.test", "auto-submitted": "auto-generated"},
+    {"from": "no-reply@example.test"},
+    {"from": "person@example.test", "reply-to": "noreply@example.test"},
 ])
 def test_current_global_policy_drafts_bulk_mail_with_a_safe_reply_address(
         tmp_path, headers):

@@ -115,7 +115,6 @@ def test_attachment_text_is_never_extracted():
 
 
 @pytest.mark.parametrize("headers,code", [
-    ({"from": "no-reply@example.test"}, "automated_sender"),
     ({"from": "MAILER-DAEMON@example.test"}, "automated_sender"),
     ({"from": "postmaster@example.test"}, "automated_sender"),
     # Bounce return paths, including the VERP forms real bounces use.
@@ -123,12 +122,23 @@ def test_attachment_text_is_never_extracted():
     ({"from": "bounces@example.test"}, "automated_sender"),
     ({"from": "bounce-123-abc@example.test"}, "automated_sender"),
     ({"from": "bounces+token@example.test"}, "automated_sender"),
-    ({"from": "person@example.test", "reply-to": "noreply@example.test"},
-     "automated_reply_target"),
 ])
 def test_automated_headers_are_detected(headers, code):
     result = assess_delivery_headers(headers)
     assert result["status"] == "automated"
+    assert code in result["reason_codes"]
+
+
+@pytest.mark.parametrize("headers,target,code", [
+    ({"from": "no-reply@example.test"}, "no-reply@example.test",
+     "automated_sender"),
+    ({"from": "person@example.test", "reply-to": "noreply@example.test"},
+     "noreply@example.test", "automated_reply_target"),
+])
+def test_notification_addresses_remain_replyable(headers, target, code):
+    result = assess_delivery_headers(headers)
+    assert result["status"] == "bulk"
+    assert result["reply_address"] == target
     assert code in result["reason_codes"]
 
 
@@ -180,9 +190,9 @@ def test_safe_reply_to_and_unsafe_multiple_reply_to():
     assert message_to_email(repeated)["delivery_safety"]["status"] == "ambiguous"
 
 
-def test_automated_and_unsafe_reply_messages_never_call_classifier():
+def test_bounce_and_unsafe_reply_messages_never_call_classifier():
     for headers in (
-        {"From": "no-reply@example.test"},
+        {"From": "mailer-daemon@example.test"},
         {"Reply-To": "one@example.test, two@example.test"},
     ):
         email = message_to_email(_message("Class of 2027", headers=headers))
@@ -277,7 +287,7 @@ def test_bounce_senders_never_draft_or_receive_a_year_label():
 
     for sender in ("bounce@example.test", "bounces@example.test",
                    "bounce-9-x@example.test", "MAILER-DAEMON@example.test",
-                   "no-reply@example.test", "postmaster@example.test"):
+                   "postmaster@example.test"):
         result = plan(sender)
         assert result["suppression_code"] == "automated_message", sender
         assert result["classification_called"] is False, (
