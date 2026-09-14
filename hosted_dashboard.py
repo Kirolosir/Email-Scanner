@@ -241,8 +241,9 @@ def _run_feedback(occupant, now, run_state="", requested_epoch=None):
         )
     if run_state == "not-ready":
         return (
-            '<p class="notice bad">The run could not start. Continue with '
-            'Google and save your labels and schedule first.</p>', False,
+            '<p class="notice bad">The number is valid, but this inbox is not '
+            'ready to scan yet. <a href="/settings">Finish inbox settings</a> '
+            'first, then run the history scan again.</p>', False,
         )
     if run_state == "failed":
         return (
@@ -666,9 +667,11 @@ class HostedDashboardApp:
                     start_response,
                     f"/?run=already-running&after={active_epoch}",
                 )
-            except (ValueError, hosted_run_request.RunRequestError):
+            except ValueError:
                 if path == "/run-history":
                     return self._redirect(start_response, "/?run=invalid-count")
+                return self._redirect(start_response, "/?run=not-ready")
+            except hosted_run_request.RunRequestError:
                 return self._redirect(start_response, "/?run=not-ready")
             except (connection.ConnectionError,
                     connection.ConnectionConfigError, OSError):

@@ -415,6 +415,20 @@ def test_history_scan_validates_count_and_queues_the_selected_batch(tmp_path):
     assert calls[0][2] == 75
 
 
+def test_valid_history_count_reports_incomplete_account_setup(tmp_path):
+    connection.connect(tmp_path, "owner@example.test")
+    app = _app(tmp_path)
+    cookie = _login(app)
+
+    response = _call(
+        app, "/run-history", "POST",
+        urlencode({"csrf": app._csrf_value(), "message_count": "10"}),
+        cookie,
+    )
+
+    assert response["headers"]["Location"] == "/?run=not-ready"
+
+
 def test_repeat_run_click_reports_existing_work_without_queueing(tmp_path):
     seat = connection.connect(tmp_path, "owner@example.test")
     now = dt.datetime(2026, 9, 9, 16, 0, tzinfo=dt.timezone.utc)
