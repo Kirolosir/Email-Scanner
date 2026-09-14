@@ -92,9 +92,9 @@ DEFAULT_STATUS_PATH = _PROFILE.status_path
 DEFAULT_LOCK_DIR = _PROFILE.lock_dir
 LOCAL_TIMEZONE = ZoneInfo(_PROFILE.timezone)
 logger = logging.getLogger(__name__)
-# Version 3 makes previously suppressed notification-style messages eligible
-# for a one-time catch-up pass while preserving completed records with drafts.
-CURRENT_DRAFT_POLICY_VERSION = 3
+# Version 4 makes notification-style messages and legacy conversation-shared
+# outcomes eligible for one catch-up pass while preserving distinct drafts.
+CURRENT_DRAFT_POLICY_VERSION = 4
 
 
 def build_initial_query(lookback_months=2):

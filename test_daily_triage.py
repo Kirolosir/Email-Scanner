@@ -906,7 +906,7 @@ def test_policy_upgrade_revisits_prior_no_draft_completion(tmp_path):
     state = DailyState(tmp_path / "state.json")
     state.data["messages"]["notification"] = {
         "status": "complete", "thread_id": "t1", "draft_id": "",
-        "draft_policy_version": 2,
+        "draft_policy_version": 3,
     }
     message = {
         "id": "notification", "threadId": "t1",
