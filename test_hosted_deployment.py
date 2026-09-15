@@ -98,6 +98,7 @@ def test_the_mountpoint_check_defaults_to_on():
 
 def test_the_filesystem_is_read_only_apart_from_the_state_disk():
     assert _one("ProtectSystem") == "strict"
+    assert "--no-control-socket" in UNIT
     assert _directive("ReadWritePaths") == [_state_root()], (
         "more than one writable path; the state disk should be the only one"
     )
