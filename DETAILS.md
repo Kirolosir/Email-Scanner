@@ -65,12 +65,16 @@ Google scope.
 10. Failed items enter the retry queue, then configuration and bounded run
     history are encrypted and backed up.
 
-History scans accept 1 to 5,000 messages. Selections above 100 use the batch
-service in groups of up to 200; smaller selections use groups of 50 and analyze
-up to four messages concurrently. Category and completion labels share one
-Gmail update after a draft is safely recorded. Undo journals retain every
-change in the run without an item-count cutoff.
-Retryable failures are deferred while later groups continue. The 15-minute
+History scans accept 1 to 5,000 messages. Selections above 100 use up to three
+concurrent batch jobs in 200-message groups. A durable background job completes
+up to 1,000 messages per pass, releases the account between passes, and resumes
+on the one-minute worker so recent-mail requests keep priority. Smaller
+selections analyze up to four messages concurrently. Gmail writes use four
+quota-paced workers, and message reads use the same bounded pool. Writes are
+serialized per conversation thread. Category and
+completion labels share one Gmail update after a draft is safely recorded.
+Undo journals retain every change in the run without an item-count cutoff.
+Retryable failures are deferred while later groups continue. The one-minute
 timer checks for due retries without contacting Gmail when the queue is empty.
 
 ## Local setup

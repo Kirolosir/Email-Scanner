@@ -94,3 +94,30 @@ def test_rollback_summary_includes_every_item_in_a_large_run(tmp_path):
         "group_id": "1788969600", "created_at": None,
         "messages": 150, "drafts": 150, "labels": 300,
     }
+
+
+def test_latest_completed_group_wins_when_backfill_finishes_after_recent_run(
+        tmp_path):
+    rollback = tmp_path / "rollback"
+    rollback.mkdir()
+    base = {
+        "version": 1, "undone_at": None,
+        "entries": [{
+            "message_id": "m1", "draft_id": "d1", "labels": [],
+            "draft_undone": False, "labels_undone": False,
+        }],
+    }
+    older = dict(base, group_id="1788969600",
+                 created_at="2026-09-09T16:00:00+00:00",
+                 completed_at="2026-09-09T18:00:00+00:00")
+    recent = dict(base, group_id="1788973200",
+                  created_at="2026-09-09T17:00:00+00:00",
+                  completed_at="2026-09-09T17:05:00+00:00")
+    (rollback / "1788969600-00000.json").write_text(
+        json.dumps(older), encoding="utf-8"
+    )
+    (rollback / "1788973200-00000.json").write_text(
+        json.dumps(recent), encoding="utf-8"
+    )
+
+    assert latest_summary(tmp_path)["group_id"] == "1788969600"

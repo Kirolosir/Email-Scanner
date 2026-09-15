@@ -19,6 +19,7 @@ from rollback_journal import GROUP_ID, latest_summary
 
 
 REQUEST_FILE = "run-now-request.json"
+BACKFILL_FILE = "backfill-job.json"
 REQUEST_VERSION = 3
 MAX_REQUEST_AGE = dt.timedelta(hours=1)
 MAX_CLOCK_SKEW = dt.timedelta(minutes=5)
@@ -80,6 +81,8 @@ def request_run(root, *, now=None, history_count=None):
             active = Path(occupant.directory)
             if request_path(active).is_file():
                 raise RunAlreadyActive("a mailbox run is already queued")
+            if history_count is not None and (active / BACKFILL_FILE).is_file():
+                raise RunAlreadyActive("a history backfill is already active")
             if any(not (active / name).is_file() for name in REQUIRED_SETUP_FILES):
                 raise RunRequestError("save labels and schedule before running")
             atomic_write_json(request_path(active), {
@@ -111,6 +114,10 @@ def request_undo(root, *, group_id, confirmation, now=None):
             active = Path(occupant.directory)
             if request_path(active).is_file():
                 raise RunAlreadyActive("a mailbox operation is already queued")
+            if (active / BACKFILL_FILE).is_file():
+                raise RunAlreadyActive(
+                    "finish the background backfill before undoing"
+                )
             summary = latest_summary(active)
             if summary is None or not hmac.compare_digest(
                     summary["group_id"], str(group_id)):

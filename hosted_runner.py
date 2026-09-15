@@ -5,7 +5,7 @@ token in memory, combines it with the separately stored OAuth client, builds a
 Gmail service, and injects that service into daily_triage. No plaintext token
 file is ever created.
 
-The timer may invoke this every fifteen minutes. connection_schedule decides
+The timer may invoke this every minute. connection_schedule decides
 whether the account is actually due, and daily_triage's own journal remains a
 second same-day/idempotency gate. A connected account without reviewed labels
 and approvals is blocked before any Gmail request.
@@ -16,6 +16,7 @@ import datetime as dt
 import json
 import os
 import sys
+import inspect
 from pathlib import Path
 
 from google.auth.exceptions import RefreshError
@@ -39,12 +40,12 @@ from gmail_retry import gmail_execute
 from hosted_status import verify_durable_state_root
 import hosted_run_request
 import hosted_settings
-from private_runtime import RunStatus, ensure_private_directory
+from private_runtime import RunStatus, ensure_private_directory, atomic_write_json
 import setup_labels
 from encrypted_backup import create_verified_backup
 from retry_queue import RetryQueue
 from triage_config import load_triage_label_config
-from rollback_journal import group_journals
+from rollback_journal import GMAIL_ID, GROUP_ID, group_journals
 
 
 CONFIG_FILE = "account.json"
@@ -58,9 +59,58 @@ DRAFT_LOG_DIR = "draft-logs"
 RETRY_QUEUE_FILE = "retry-queue.json"
 BACKUP_DIR = "backups"
 ROLLBACK_DIR = "rollback"
+BACKFILL_FILE = hosted_run_request.BACKFILL_FILE
 PENDING_LABEL_SETUP = hosted_settings.PENDING_LABEL_SETUP
 HISTORY_CHUNK_SIZE = 50
-BATCH_HISTORY_CHUNK_SIZE = 200
+BATCH_HISTORY_CHUNK_SIZE = 1000
+MAX_GMAIL_WRITE_WORKERS = 4
+
+
+def _backfill_path(active):
+    return Path(active) / BACKFILL_FILE
+
+
+def _load_backfill(active):
+    path = _backfill_path(active)
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HostedRunnerError("the background backfill is unreadable") from exc
+    required = {
+        "version", "group_id", "created_at", "message_ids", "next_offset",
+        "counts",
+    }
+    if not isinstance(document, dict) or set(document) != required:
+        raise HostedRunnerError("the background backfill structure is invalid")
+    ids = document.get("message_ids")
+    offset = document.get("next_offset")
+    if (document.get("version") != 1
+            or not GROUP_ID.fullmatch(str(document.get("group_id", "")))
+            or not isinstance(document.get("created_at"), str)
+            or not isinstance(ids, list)
+            or not all(GMAIL_ID.fullmatch(str(item)) for item in ids)
+            or isinstance(offset, bool) or not isinstance(offset, int)
+            or not 0 <= offset <= len(ids)
+            or not isinstance(document.get("counts"), dict)
+            or any(key not in RunStatus.COUNT_KEYS
+                   for key in document["counts"])
+            or any(isinstance(value, bool) or not isinstance(value, int)
+                   or value < 0 for value in document["counts"].values())):
+        raise HostedRunnerError("the background backfill values are invalid")
+    return document
+
+
+def _save_backfill(active, document):
+    atomic_write_json(_backfill_path(active), document)
+
+
+def _finish_backfill(active):
+    try:
+        os.unlink(_backfill_path(active))
+    except FileNotFoundError:
+        pass
 
 
 class HostedRunnerError(RuntimeError):
@@ -408,8 +458,18 @@ def run_if_due(env=None, *, now=None, service_builder=build,
         )
         retry_ids = retry_queue.due(now, occupant.max_scan)
         retry_requested = bool(retry_ids and not due and not force_requested)
+        try:
+            backfill = _load_backfill(active)
+        except HostedRunnerError as exc:
+            _record_blocked(status_path, "history_backfill_invalid")
+            print(f"Background backfill stopped safely ({type(exc).__name__}).")
+            return 2
+        if backfill is not None and not occupant.enabled:
+            _record_blocked(status_path, "account_disabled")
+            print("The connected account is disabled; the backfill is paused.")
+            return 2
         if (not due and not force_requested and prepared_labels is None
-                and not retry_requested):
+                and not retry_requested and backfill is None):
             print(f"No run due: {reason}.")
             return 0
 
@@ -427,6 +487,17 @@ def run_if_due(env=None, *, now=None, service_builder=build,
             print("Google authorization needs to be renewed; no Gmail contact occurred.")
             return 2
         gmail_service = service_builder("gmail", "v1", credentials=credentials)
+        gmail_write_services = [gmail_service]
+        for _ in range(MAX_GMAIL_WRITE_WORKERS - 1):
+            gmail_write_services.append(
+                service_builder("gmail", "v1", credentials=credentials)
+            )
+
+        def _run_daily(argv, **kwargs):
+            if "gmail_write_services" in inspect.signature(
+                    daily_triage.main).parameters:
+                kwargs["gmail_write_services"] = gmail_write_services
+            return daily_triage.main(argv, **kwargs)
 
         if run_request and run_request.get("scope") == "rollback":
             try:
@@ -455,8 +526,15 @@ def run_if_due(env=None, *, now=None, service_builder=build,
             if run_request and run_request.get("scope") == "history"
             else None
         )
+        should_resume_backfill = (
+            backfill is not None and history_count is None
+            and not due and not force_requested and not retry_requested
+        )
 
-        rollback_group = str(int(now.timestamp()))
+        rollback_group = (
+            backfill["group_id"] if should_resume_backfill
+            else str(int(now.timestamp()))
+        )
 
         def _argv(scan_limit, review_path, *, history=False, offset=0):
             write_limit, draft_limit = _complete_batch_limits(scan_limit)
@@ -481,7 +559,7 @@ def run_if_due(env=None, *, now=None, service_builder=build,
             ]
             if history:
                 values.append("--history-scan")
-            if force_requested or retry_requested:
+            if force_requested or retry_requested or history:
                 values.append("--force")
             return values
 
@@ -519,105 +597,126 @@ def run_if_due(env=None, *, now=None, service_builder=build,
         old_log_dir = campaign.DRAFT_LOG_DIR
         campaign.DRAFT_LOG_DIR = str(active / DRAFT_LOG_DIR)
         try:
-            if history_count is None:
+            resume_backfill = should_resume_backfill
+            if history_count is None and not resume_backfill:
                 scan_limit = len(retry_ids) if retry_requested else occupant.max_scan
                 argv = _argv(
                     scan_limit,
                     _review_path(active / REVIEW_DIR, now),
                 )
                 if retry_requested:
-                    code = daily_triage.main(
+                    code = _run_daily(
                         argv, gmail_service=gmail_service,
                         message_ids_override=retry_ids,
                     )
                 else:
-                    code = daily_triage.main(argv, gmail_service=gmail_service)
+                    code = _run_daily(
+                        argv, gmail_service=gmail_service,
+                    )
                 return _update_reliability(code)
 
             overall_status = RunStatus(status_path)
-            overall_status.start("daily:history-batch")
-            overall_status.progress(
-                "Finding previous emails", current=0, total=history_count
-            )
-            try:
-                actual_account = normalize_address(
-                    gmail_execute(
-                        gmail_service.users().getProfile(userId="me")
-                    ).get("emailAddress", "")
+            if backfill is None:
+                overall_status.start("daily:history-backfill")
+                overall_status.progress(
+                    "Finding previous emails", current=0, total=history_count
                 )
-                if not connection.same_account(actual_account, occupant.account):
-                    raise HostedRunnerError(
-                        "authenticated Gmail account does not match the connection"
+                try:
+                    actual_account = normalize_address(
+                        gmail_execute(
+                            gmail_service.users().getProfile(userId="me")
+                        ).get("emailAddress", "")
                     )
-                message_ids = list_message_ids_by_query(
-                    gmail_service, daily_triage.build_history_query(),
-                    QuotaThrottle(), max_scan=history_count, progress=False,
-                )
-            except Exception as exc:  # noqa: BLE001 - status stays PII-free
-                overall_status.finish(
-                    False, {"failures": 1}, ["history_preflight_failed"]
-                )
-                print(f"History scan stopped safely ({type(exc).__name__}).")
-                return 1
+                    if not connection.same_account(
+                            actual_account, occupant.account):
+                        raise HostedRunnerError(
+                            "authenticated Gmail account does not match the connection"
+                        )
+                    message_ids = list_message_ids_by_query(
+                        gmail_service, daily_triage.build_history_query(),
+                        QuotaThrottle(), max_scan=history_count, progress=False,
+                    )
+                except Exception as exc:  # noqa: BLE001 - status stays PII-free
+                    overall_status.finish(
+                        False, {"failures": 1}, ["history_preflight_failed"]
+                    )
+                    print(f"History scan stopped safely ({type(exc).__name__}).")
+                    return 1
+                aggregate = {key: 0 for key in RunStatus.COUNT_KEYS}
+                if not message_ids:
+                    overall_status.finish(True, aggregate)
+                    print("No eligible historical messages were found.")
+                    return _update_reliability(0, apply_result=False)
+                backfill = {
+                    "version": 1, "group_id": rollback_group,
+                    "created_at": now.astimezone(dt.timezone.utc).isoformat(
+                        timespec="seconds"
+                    ),
+                    "message_ids": message_ids, "next_offset": 0,
+                    "counts": aggregate,
+                }
+                _save_backfill(active, backfill)
 
-            aggregate = {key: 0 for key in RunStatus.COUNT_KEYS}
-            if not message_ids:
-                overall_status.finish(True, aggregate)
-                print("No eligible historical messages were found.")
-                return _update_reliability(0, apply_result=False)
-
-            overall_status = RunStatus(status_path)
-            overall_status.progress(
-                "Processing previous emails", aggregate,
-                current=0, total=len(message_ids),
-            )
-
+            message_ids = backfill["message_ids"]
+            aggregate = {key: int(backfill["counts"].get(key, 0))
+                         for key in RunStatus.COUNT_KEYS}
+            offset = backfill["next_offset"]
             chunk_size = (
                 BATCH_HISTORY_CHUNK_SIZE
                 if len(message_ids) > 100 else HISTORY_CHUNK_SIZE
             )
-            for offset in range(0, len(message_ids), chunk_size):
-                chunk = message_ids[offset:offset + chunk_size]
-                argv = _argv(
-                    len(chunk),
-                    _history_review_path(active / REVIEW_DIR, now, offset),
-                    history=True, offset=offset,
+            chunk = message_ids[offset:offset + chunk_size]
+            total_groups = (len(message_ids) + chunk_size - 1) // chunk_size
+            group_number = (offset // chunk_size) + 1
+            overall_status.start("daily:history-backfill")
+            overall_status.progress(
+                f"Background backfill group {group_number} of {total_groups}",
+                aggregate, current=offset, total=len(message_ids),
+            )
+            argv = _argv(
+                len(chunk), _history_review_path(
+                    active / REVIEW_DIR, now, offset
+                ), history=True, offset=offset,
+            )
+            code = _run_daily(
+                argv, gmail_service=gmail_service,
+                message_ids_override=chunk,
+            )
+            result = getattr(daily_triage.main, "last_result", {}) or {}
+            retry_queue.update(
+                result.get("failed_ids", ()),
+                result.get("completed_ids", ()), now=now,
+            )
+            _add_counts(aggregate, _latest_counts(status_path))
+            queued_failures = bool(result.get("failed_ids"))
+            if code != 0 and not queued_failures:
+                RunStatus(status_path).finish(
+                    False, aggregate, ["history_chunk_failed"]
                 )
-                code = daily_triage.main(
-                    argv, gmail_service=gmail_service,
-                    message_ids_override=chunk,
-                )
-                result = getattr(daily_triage.main, "last_result", {}) or {}
-                retry_queue.update(
-                    result.get("failed_ids", ()),
-                    result.get("completed_ids", ()), now=now,
-                )
-                _add_counts(aggregate, _latest_counts(status_path))
-                queued_failures = bool(result.get("failed_ids"))
-                if code != 0 and not queued_failures:
-                    status = RunStatus(status_path)
-                    status.finish(
-                        False, aggregate, ["history_chunk_failed"]
-                    )
-                    print(
-                        f"History scan paused after {offset + len(chunk)} "
-                        "selected messages; completed work was saved."
-                    )
-                    return code
-                status = RunStatus(status_path)
-                completed = offset + len(chunk)
-                if completed < len(message_ids):
-                    status.start("daily:history-batch")
-                    status.progress(
-                        "Processing previous emails", aggregate,
-                        current=completed, total=len(message_ids),
-                    )
-                else:
-                    status.finish(True, aggregate)
                 print(
-                    f"History progress: {completed} of "
+                    f"History scan paused after {offset} selected messages; "
+                    "completed work was saved."
+                )
+                return code
+            completed = offset + len(chunk)
+            if completed < len(message_ids):
+                backfill["next_offset"] = completed
+                backfill["counts"] = aggregate
+                _save_backfill(active, backfill)
+                status = RunStatus(status_path)
+                status.start("daily:history-backfill")
+                status.progress(
+                    f"Background backfill group {group_number} of {total_groups} complete",
+                    aggregate, current=completed, total=len(message_ids),
+                )
+                print(
+                    f"Background history progress: {completed} of "
                     f"{len(message_ids)} selected messages checked."
                 )
+                return 0
+            _finish_backfill(active)
+            RunStatus(status_path).finish(True, aggregate)
+            print(f"Background history scan completed {len(message_ids)} messages.")
             return _update_reliability(0, apply_result=False)
         finally:
             campaign.DRAFT_LOG_DIR = old_log_dir

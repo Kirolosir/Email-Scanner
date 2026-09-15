@@ -13,6 +13,11 @@ import logging
 import os
 import sys
 import tempfile
+import threading
+import queue
+import contextvars
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -57,7 +62,7 @@ from triage import (
     SAFETY_HEADERS,
 )
 from triage_config import DEFAULT_LABEL_CONFIG, load_triage_label_config
-from gemini_client import THROTTLE_SECONDS, analyze_batch, analyze_many
+from gemini_client import THROTTLE_SECONDS, analyze_batch_groups, analyze_many
 from gmail_reader import get_header_values
 from message_safety import (
     DEFAULT_MAX_BODY_CHARS,
@@ -590,7 +595,7 @@ def _create_reply_draft(service, plan, throttle):
 
 def execute_daily_plan(service, plan, account_labels, throttle, draft_log,
                        state, draft_threads, created_draft_threads=None,
-                       rollback_journal=None):
+                       rollback_journal=None, persistence_lock=None):
     """Execute one plan with restart-safe draft and processed transitions."""
     email = plan["email"]
     message_id = email["message_id"]
@@ -599,9 +604,11 @@ def execute_daily_plan(service, plan, account_labels, throttle, draft_log,
     added = []
     draft_id = ""
     plan["new_draft_created"] = False
+    locked = persistence_lock or nullcontext()
 
     if plan["template"] is not None:
-        record = state.record_for(message_id)
+        with locked:
+            record = dict(state.record_for(message_id))
         if (record.get("status") in {"draft_created", "complete"}
                 and record.get("draft_id")
                 and not plan.get("replace_missing_owned_draft")):
@@ -610,14 +617,15 @@ def execute_daily_plan(service, plan, account_labels, throttle, draft_log,
             try:
                 result = _create_reply_draft(service, plan, throttle)
                 draft_id = result["id"]
-                draft_log.record(draft_id)
-                if rollback_journal is not None:
-                    rollback_journal.record_draft(message_id, draft_id)
-                # Persist before any later API call. A restart sees this state
-                # and cannot create a second draft for the source message.
-                state.record_draft(message_id, thread_id, draft_id)
-                _remember_draft(draft_threads, thread_id, draft_id)
-                plan["new_draft_created"] = True
+                with locked:
+                    draft_log.record(draft_id)
+                    if rollback_journal is not None:
+                        rollback_journal.record_draft(message_id, draft_id)
+                    # Persist before any later API call. A restart sees this
+                    # state and cannot create a second draft for the message.
+                    state.record_draft(message_id, thread_id, draft_id)
+                    _remember_draft(draft_threads, thread_id, draft_id)
+                    plan["new_draft_created"] = True
             except Exception as exc:
                 errors.append(f"draft failed ({type(exc).__name__})")
 
@@ -633,22 +641,24 @@ def execute_daily_plan(service, plan, account_labels, throttle, draft_log,
                 service, message_id, labels_to_add,
                 account_labels, throttle,
             )
-            added.extend(labels_to_add)
-            if rollback_journal is not None:
-                rollback_journal.record_labels(message_id, labels_to_add)
+            with locked:
+                added.extend(labels_to_add)
+                if rollback_journal is not None:
+                    rollback_journal.record_labels(message_id, labels_to_add)
     except Exception as exc:
         errors.append(f"labels failed ({type(exc).__name__})")
 
     if errors:
         return added, draft_id, errors
 
-    state.record_complete(
-        message_id, thread_id, draft_id,
-        draft_policy_version=(
-            CURRENT_DRAFT_POLICY_VERSION
-            if plan.get("current_account_wide_drafting_approved") else 0
-        ),
-    )
+    with locked:
+        state.record_complete(
+            message_id, thread_id, draft_id,
+            draft_policy_version=(
+                CURRENT_DRAFT_POLICY_VERSION
+                if plan.get("current_account_wide_drafting_approved") else 0
+            ),
+        )
     return added, draft_id, []
 
 
@@ -860,7 +870,8 @@ def _estimate_metadata(messages, account_labels, config, state, own_address,
 
 
 def _run_locked(args, classifier, config, templates, state, status,
-                gmail_service=None, message_ids_override=None):
+                gmail_service=None, message_ids_override=None,
+                gmail_write_services=None):
     counts = {
         "scanned": 0, "classified": 0, "labeled": 0, "drafted": 0,
         "needs_review": 0, "skipped": 0, "failures": 0,
@@ -1044,6 +1055,7 @@ def _run_locked(args, classifier, config, templates, state, status,
     messages, failures = fetch_messages(
         service, message_ids, throttle,
         limit=candidate_limit, is_candidate=_would_consume_budget,
+        services=gmail_write_services,
     )
     for message_id, failure in failures:
         retry_failed_ids.add(message_id)
@@ -1104,7 +1116,13 @@ def _run_locked(args, classifier, config, templates, state, status,
             current=0, total=len(generation_emails),
         )
         try:
-            analyzed = analyze_batch(generation_emails, profile=args.profile)
+            analyzed = analyze_batch_groups(
+                generation_emails, profile=args.profile,
+                progress_callback=lambda current, total: status.progress(
+                    "Analyzing background groups", counts,
+                    current=current, total=total,
+                ),
+            )
             for index, result in zip(generation_indices, analyzed):
                 combined_results[index] = result
         except Exception as exc:
@@ -1249,39 +1267,75 @@ def _run_locked(args, classifier, config, templates, state, status,
             "Creating Gmail labels and drafts", counts,
             current=0, total=len(plans),
         )
-        for index, plan in enumerate(plans, start=1):
+        write_services = list(gmail_write_services or [service])
+        service_pool = queue.Queue()
+        for write_service in write_services:
+            service_pool.put(write_service)
+        persistence_lock = threading.RLock()
+        thread_locks = {}
+        for plan in plans:
+            thread_id = plan["email"].get("thread_id", "")
+            thread_locks.setdefault(thread_id, threading.Lock())
+
+        def _execute(index, plan):
+            write_service = service_pool.get()
             try:
-                labels, _draft_id, plan_errors = execute_daily_plan(
-                    service, plan, account_labels, throttle, draft_log,
-                    state, draft_threads, rollback_journal=rollback_journal,
+                with thread_locks[plan["email"].get("thread_id", "")]:
+                    result = execute_daily_plan(
+                        write_service, plan, account_labels, throttle, draft_log,
+                        state, draft_threads, rollback_journal=rollback_journal,
+                        persistence_lock=persistence_lock,
+                    )
+                return index, plan, result
+            finally:
+                service_pool.put(write_service)
+
+        completed_writes = 0
+        with ThreadPoolExecutor(max_workers=len(write_services)) as executor:
+            parent_context = contextvars.copy_context()
+            futures = {
+                executor.submit(
+                    parent_context.copy().run, _execute, index, plan
+                ): plan
+                for index, plan in enumerate(plans, start=1)
+            }
+            for future in as_completed(futures):
+                plan = futures[future]
+                try:
+                    _index, plan, result = future.result()
+                    labels, _draft_id, plan_errors = result
+                    plan["_applied_labels"] = list(labels)
+                    counts["labeled"] += len(labels)
+                except Exception as exc:
+                    _draft_id = ""
+                    plan_errors = [f"unexpected failure ({type(exc).__name__})"]
+                for error in plan_errors:
+                    counts["failures"] += 1
+                    code = _safe_error_code(error)
+                    error_codes.append(code)
+                    plan.setdefault("_execution_error_codes", []).append(code)
+                    display_id = (
+                        opaque_id(plan["email"]["message_id"])
+                        if args.scheduled else plan["email"]["message_id"]
+                    )
+                    print(
+                        f"  ERROR {display_id}: {code} "
+                        f"({error.rsplit('(', 1)[-1].rstrip(')')})"
+                    )
+                    retry_failed_ids.add(plan["email"]["message_id"])
+                if not plan_errors:
+                    retry_completed_ids.add(plan["email"]["message_id"])
+                if (plan.get("new_draft_created")
+                        and plan.get("replace_missing_owned_draft")):
+                    counts["drafts_rebuilt"] += 1
+                elif _draft_id and not plan.get("new_draft_created"):
+                    counts["drafts_existing"] += 1
+                counts["drafted"] = draft_log.count
+                completed_writes += 1
+                status.progress(
+                    "Creating Gmail labels and drafts", counts,
+                    current=completed_writes, total=len(plans),
                 )
-                plan["_applied_labels"] = list(labels)
-                counts["labeled"] += len(labels)
-            except Exception as exc:
-                plan_errors = [f"unexpected failure ({type(exc).__name__})"]
-            for error in plan_errors:
-                counts["failures"] += 1
-                code = _safe_error_code(error)
-                error_codes.append(code)
-                plan.setdefault("_execution_error_codes", []).append(code)
-                display_id = (
-                    opaque_id(plan["email"]["message_id"])
-                    if args.scheduled else plan["email"]["message_id"]
-                )
-                print(f"  ERROR {display_id}: {code} ({error.rsplit('(', 1)[-1].rstrip(')')})")
-                retry_failed_ids.add(plan["email"]["message_id"])
-            if not plan_errors:
-                retry_completed_ids.add(plan["email"]["message_id"])
-            if (plan.get("new_draft_created")
-                    and plan.get("replace_missing_owned_draft")):
-                counts["drafts_rebuilt"] += 1
-            elif _draft_id and not plan.get("new_draft_created"):
-                counts["drafts_existing"] += 1
-            counts["drafted"] = draft_log.count
-            status.progress(
-                "Creating Gmail labels and drafts", counts,
-                current=index, total=len(plans),
-            )
 
     if rollback_journal is not None:
         rollback_journal.complete()
@@ -1295,7 +1349,7 @@ def _run_locked(args, classifier, config, templates, state, status,
 
 
 def _main_with_args(args, classifier=None, gmail_service=None,
-                    message_ids_override=None):
+                    message_ids_override=None, gmail_write_services=None):
     from runtime_metrics import reset
     reset()
     logging.basicConfig(
@@ -1344,6 +1398,7 @@ def _main_with_args(args, classifier=None, gmail_service=None,
                     args, classifier, config, templates, state, status,
                     gmail_service=gmail_service,
                     message_ids_override=message_ids_override,
+                    gmail_write_services=gmail_write_services,
                 )
             except Exception as exc:
                 print(f"Daily triage stopped safely ({type(exc).__name__}).")
@@ -1399,7 +1454,7 @@ def _finalize_review_report(args, reporter, code):
 
 
 def main(argv=None, classifier=None, gmail_service=None,
-         message_ids_override=None):
+         message_ids_override=None, gmail_write_services=None):
     args = parse_args(argv)
     reporter = None
     if args.review_report:
@@ -1422,6 +1477,7 @@ def main(argv=None, classifier=None, gmail_service=None,
             code = _main_with_args(
                 args, classifier=classifier, gmail_service=gmail_service,
                 message_ids_override=message_ids_override,
+                gmail_write_services=gmail_write_services,
             )
     except Exception as exc:
         print(f"Daily triage stopped safely ({type(exc).__name__}).")

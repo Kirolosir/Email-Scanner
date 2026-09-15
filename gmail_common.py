@@ -7,6 +7,7 @@ caller decides what to do with it.
 """
 import base64
 import time
+import threading
 from email.message import EmailMessage
 from email.utils import parseaddr
 
@@ -42,18 +43,20 @@ class QuotaThrottle:
         if units_per_second <= 0:
             raise ValueError("units_per_second must be positive")
         self._next_available = time.monotonic()
+        self._lock = threading.Lock()
 
     def consume(self, units):
         if units < 0:
             raise ValueError("quota units cannot be negative")
         from runtime_metrics import add
         add("gmail_quota_units", units)
-        now = time.monotonic()
-        scheduled = max(now, self._next_available)
-        wait = scheduled - now
-        if wait > 0:
-            time.sleep(wait)
-        self._next_available = scheduled + (units / self.units_per_second)
+        with self._lock:
+            now = time.monotonic()
+            scheduled = max(now, self._next_available)
+            wait = scheduled - now
+            if wait > 0:
+                time.sleep(wait)
+            self._next_available = scheduled + (units / self.units_per_second)
 
 
 def normalize_address(from_header):

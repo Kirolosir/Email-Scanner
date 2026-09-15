@@ -251,7 +251,7 @@ def test_due_runner_injects_gmail_service_and_all_safety_limits(
     )
 
     assert code == 0
-    assert built == [("gmail", "v1", "refresh-value")]
+    assert built == [("gmail", "v1", "refresh-value")] * 4
     assert len(calls) == 1 and calls[0][1] is marker_service
     argv = calls[0][0]
     assert all(flag in argv for flag in (
@@ -351,7 +351,13 @@ def test_history_request_overrides_batch_and_uses_all_history_query(
     )
 
     assert runner.run_if_due(env, now=now, service_builder=service_builder) == 0
+    assert (seat.directory / runner.BACKFILL_FILE).is_file()
+    assert runner.run_if_due(
+        env, now=now + dt.timedelta(minutes=1),
+        service_builder=service_builder,
+    ) == 0
     assert [len(call[2]) for call in calls] == [50, 25]
+    assert not (seat.directory / runner.BACKFILL_FILE).exists()
     assert [call[2] for call in calls] == [message_ids[:50], message_ids[50:]]
     queued = json.loads(
         (seat.directory / runner.RETRY_QUEUE_FILE).read_text(encoding="utf-8")
@@ -543,7 +549,7 @@ def test_successful_pending_setup_uses_reviewed_plan_then_clears_marker(
 
 def test_the_timer_checks_often_but_the_runner_owns_due_decisions():
     timer = Path("hosted-triage.timer.example").read_text(encoding="utf-8")
-    assert "OnCalendar=*:0/15" in timer
+    assert "OnCalendar=*:0/1" in timer
     assert "Persistent=true" in timer
 
 

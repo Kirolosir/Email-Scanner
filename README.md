@@ -38,7 +38,7 @@ _Screenshots use synthetic account and run data._
 flowchart LR
     Browser[Owner dashboard] --> Web[Dashboard service]
     Web --> State[(Private state)]
-    Timer[15-minute scheduler] --> Runner[Bounded runner]
+    Timer[One-minute job check] --> Runner[Bounded runner]
     Runner --> Gmail[Gmail API]
     Runner --> Gemini[Gemini API]
     Runner --> State
@@ -71,8 +71,11 @@ reserves enough writes and drafts to finish every eligible message in the
 batch. **Scan new mail** checks the recent overlap window. **Scan previous
 emails** accepts a number from 1 to 5,000 and checks that many of the newest
 eligible messages without an age cutoff. Scans above 100 messages use the
-provider's batch service in restart-safe groups of up to 200, while smaller
-scans analyze up to four messages concurrently. Successful messages combine
+provider's batch service in concurrent groups of up to 200. The resumable
+background worker completes up to 1,000 messages per pass and releases the
+inbox between passes so recent-mail scans stay responsive. Smaller scans
+read, analyze, and write with up to four quota-paced workers. Successful
+messages combine
 their category and completion labels into one Gmail update.
 
 The dashboard shows live analysis and drafting progress, keeps failed runs
@@ -90,7 +93,7 @@ against the original email before sending.
 Each completed run also publishes a content-free reliability summary. It
 separates created, preserved, and rebuilt drafts from messages without a safe
 reply address and from retrieval or generation failures. Temporary failures
-enter a private, bounded retry queue; the existing 15-minute scheduler resumes
+enter a private, bounded retry queue; the one-minute worker resumes
 only the due messages, so a large history job does not need to start over.
 Configuration and bounded run history are encrypted with the deployment key,
 written to rotating backups, decrypted immediately for an integrity check, and

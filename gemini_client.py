@@ -55,6 +55,10 @@ MAX_BACKOFF_SECONDS = _validated_float_env(
 MAX_PARALLEL_REQUESTS = int(_validated_float_env(
     "GEMINI_MAX_PARALLEL_REQUESTS", 4, minimum=1, maximum=16
 ))
+MAX_PARALLEL_BATCHES = int(_validated_float_env(
+    "GEMINI_MAX_PARALLEL_BATCHES", 3, minimum=1, maximum=8
+))
+BATCH_GROUP_SIZE = 200
 
 # Sourced from the account profile so no category name is a literal here.
 VALID_CATEGORIES = set(_PROFILE.valid_categories)
@@ -743,9 +747,9 @@ def analyze_many(emails, profile=None, max_workers=None):
 
 
 def analyze_batch(emails, profile=None, model=None, poll_seconds=10.0,
-                  timeout_seconds=86400.0):
+                  timeout_seconds=86400.0, allow_small=False):
     """Run large scans through the discounted asynchronous Batch API."""
-    if len(emails) <= 100:
+    if len(emails) <= 100 and not allow_small:
         raise ValueError("Batch API is reserved for scans above 100 messages")
     effective_profile = profile or _PROFILE
     model = model or MODEL
@@ -789,3 +793,42 @@ def analyze_batch(emails, profile=None, model=None, poll_seconds=10.0,
         record_model_call()
         record_model_response(item.response, cost_multiplier=0.5)
     return results
+
+
+def analyze_batch_groups(emails, profile=None, max_workers=None,
+                         progress_callback=None):
+    """Analyze a large backfill through bounded concurrent batch jobs."""
+    if len(emails) <= 100:
+        raise ValueError("concurrent batch groups are reserved for large scans")
+    groups = [
+        emails[offset:offset + BATCH_GROUP_SIZE]
+        for offset in range(0, len(emails), BATCH_GROUP_SIZE)
+    ]
+    if len(groups) == 1:
+        result = analyze_batch(groups[0], profile=profile)
+        if progress_callback is not None:
+            progress_callback(len(emails), len(emails))
+        return result
+    results = [None] * len(groups)
+    workers = min(len(groups), max_workers or MAX_PARALLEL_BATCHES)
+    parent_context = contextvars.copy_context()
+
+    def _run_group(group):
+        return analyze_batch(group, profile=profile, allow_small=True)
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(
+                parent_context.copy().run, _run_group, group
+            ): index
+            for index, group in enumerate(groups)
+        }
+        for future in as_completed(futures):
+            results[futures[future]] = future.result()
+            if progress_callback is not None:
+                completed = sum(
+                    len(groups[index]) for index, result in enumerate(results)
+                    if result is not None
+                )
+                progress_callback(completed, len(emails))
+    return [item for group in results for item in group]

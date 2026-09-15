@@ -2,7 +2,7 @@
 Description=Check whether Email-Scanner triage is due
 
 [Timer]
-OnCalendar=*:0/15
+OnCalendar=*:0/1
 Persistent=true
 RandomizedDelaySec=60
 Unit=hosted-triage.service

@@ -160,7 +160,16 @@ def latest_summary(active, _allow_bootstrap=True):
         if _allow_bootstrap and _bootstrap_latest_report(active):
             return latest_summary(active, _allow_bootstrap=False)
         return None
-    group_id = max(groups)
+    # A background backfill can finish after a newer, short recent-mail run.
+    # Completion time, rather than the numeric start id, identifies the last
+    # operation the owner saw finish.
+    group_id = max(
+        groups,
+        key=lambda value: max(
+            document.get("completed_at") or document["created_at"]
+            for document in groups[value]
+        ),
+    )
     entries = [entry for document in groups[group_id]
                for entry in document["entries"]]
     return {

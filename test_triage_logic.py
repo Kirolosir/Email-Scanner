@@ -307,6 +307,20 @@ def test_fetch_without_a_limit_still_fetches_everything():
     assert len(service.fetched) == 25
 
 
+def test_large_fetch_can_use_multiple_services_and_preserves_order():
+    ids = [f"m{i}" for i in range(25)]
+    services = [_CountingGmail(ids), _CountingGmail(ids)]
+
+    messages, failures = fetch_messages(
+        services[0], ids, QuotaThrottle(units_per_second=10**6),
+        services=services,
+    )
+
+    assert failures == []
+    assert [message["id"] for message in messages] == ids
+    assert sum(len(service.fetched) for service in services) == len(ids)
+
+
 def test_skipped_messages_do_not_consume_the_fetch_budget():
     """Already-processed messages must not count toward the limit, or a run
     could stop before finding any real work."""

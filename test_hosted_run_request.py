@@ -78,6 +78,24 @@ def test_repeat_click_is_refused_instead_of_queueing_a_duplicate(tmp_path):
     assert document["requested_at"] == NOW.isoformat(timespec="seconds")
 
 
+def test_active_backfill_refuses_another_history_job_but_allows_recent(tmp_path):
+    occupant = _ready_connection(tmp_path)
+    (occupant.directory / requests.BACKFILL_FILE).write_text(
+        "{}", encoding="utf-8"
+    )
+
+    with pytest.raises(requests.RunAlreadyActive, match="backfill"):
+        requests.request_run(tmp_path, now=NOW, history_count=1000)
+    with pytest.raises(requests.RunAlreadyActive, match="backfill"):
+        requests.request_undo(
+            tmp_path, group_id="1788969600", confirmation="UNDO", now=NOW
+        )
+    requests.request_run(tmp_path, now=NOW)
+    assert requests.load_request(
+        occupant.directory, occupant, now=NOW
+    )["scope"] == "recent"
+
+
 def test_running_lifecycle_operation_is_reported_without_waiting(tmp_path):
     _ready_connection(tmp_path)
     with connection.lifecycle_lock(tmp_path):

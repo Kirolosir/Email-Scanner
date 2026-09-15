@@ -24,13 +24,16 @@ Options:
     --no-label        Classify and draft, but apply no labels at all.
 """
 import argparse
+import contextvars
 import datetime
 import hashlib
 import json
 import logging
 import os
+import queue
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from googleapiclient.errors import HttpError
 
@@ -1033,7 +1036,7 @@ def execute_plan(service, plan, account_labels, throttle, draft_log):
 
 
 def fetch_messages(service, message_ids, throttle, limit=None,
-                   is_candidate=None):
+                   is_candidate=None, services=None):
     """Fetch full messages, attaching resolved label names for the
     labeler's 'already labeled?' checks.
 
@@ -1047,6 +1050,41 @@ def fetch_messages(service, message_ids, throttle, limit=None,
     so messages skipped as already-processed do not consume the budget. When
     it is omitted every fetched message counts.
     """
+    service_list = list(services or [service])
+    if (len(service_list) > 1 and message_ids
+            and (limit is None or limit >= len(message_ids))):
+        pool = queue.Queue()
+        for item in service_list:
+            pool.put(item)
+
+        def _fetch(message_id):
+            worker_service = pool.get()
+            try:
+                throttle.consume(UNITS_MESSAGES_GET)
+                return gmail_execute(worker_service.users().messages().get(
+                    userId="me", id=message_id, format="full"
+                ))
+            finally:
+                pool.put(worker_service)
+
+        ordered = [None] * len(message_ids)
+        failures = []
+        parent_context = contextvars.copy_context()
+        with ThreadPoolExecutor(max_workers=len(service_list)) as executor:
+            futures = {
+                executor.submit(
+                    parent_context.copy().run, _fetch, message_id
+                ): (index, message_id)
+                for index, message_id in enumerate(message_ids)
+            }
+            for future in as_completed(futures):
+                index, message_id = futures[future]
+                try:
+                    ordered[index] = future.result()
+                except Exception as exc:
+                    failures.append((message_id, describe_failure(exc)))
+        return [message for message in ordered if message is not None], failures
+
     messages = []
     failures = []
     selected = 0

@@ -354,6 +354,7 @@ FAILURE_MESSAGES = {
     "required_labels_missing": "Save the label settings again, then retry.",
     "message_fetch_failed": "Some Gmail messages could not be read. Retry the run.",
     "history_chunk_failed": "The history scan paused. Completed work was saved.",
+    "history_backfill_invalid": "The saved background scan needs attention.",
     "account_setup_incomplete": "Finish the coach profile and label settings.",
     "label_setup_failed": "Gmail labels could not be prepared. Save settings again.",
     "label_setup_invalid": "The saved label plan needs to be refreshed.",
@@ -370,12 +371,18 @@ def _render_run_progress(details):
     percent = round((current / total) * 100) if total else 0
     stage = _escape(details.get("stage"), "Working")
     amount = f"{current} of {total}" if total else "Preparing"
+    estimate = ""
+    started = _timestamp(details.get("started_at"))
+    if started and current > 0 and total > current:
+        elapsed = max(1, (dt.datetime.now(dt.timezone.utc) - started).total_seconds())
+        remaining_minutes = max(1, round((elapsed / current) * (total - current) / 60))
+        estimate = f" · about {remaining_minutes} min remaining"
     return f"""
       <section class="panel run-progress" aria-live="polite">
         <div class="section-head"><div><p class="eyebrow">Live run</p>
           <h2>{stage}</h2></div><strong>{html.escape(amount)}</strong></div>
         <progress max="{max(1, total)}" value="{min(current, max(1, total))}">{percent}%</progress>
-        <p>{percent}% complete · updates every {RUN_REFRESH_SECONDS} seconds.</p>
+        <p>{percent}% complete{estimate} · updates every {RUN_REFRESH_SECONDS} seconds.</p>
       </section>"""
 
 
@@ -1136,13 +1143,14 @@ class HostedDashboardApp:
         history_form = f"""
           <section class="panel history-run">
             <div><p class="eyebrow">Inbox catch-up</p>
-              <h2>Scan previous emails</h2>
-              <p>Choose how many of the newest eligible messages to check.
+              <h2>Start background backfill</h2>
+              <p>Scan previous emails in the background. Choose how many of
+              the newest eligible messages to check.
               Every message with a usable reply address ends with one unsent
               draft. Existing drafts are kept, and deleted program drafts are
               rebuilt instead of being silently skipped.
-              Larger batches take longer because every reply is written
-              individually; 5,000 messages can run for many hours.</p></div>
+              Large backfills run in resumable groups while new-mail scans keep
+              priority between groups. You can close this page and return later.</p></div>
             <form method="post" action="/run-history">
               <input type="hidden" name="csrf" value="{self._csrf_value()}">
               <label for="message_count">Previous messages</label>
@@ -1150,7 +1158,7 @@ class HostedDashboardApp:
                 name="message_count" type="number" min="1"
                 max="{hosted_run_request.MAX_HISTORY_MESSAGES}"
                 value="{min(50, hosted_run_request.MAX_HISTORY_MESSAGES)}"
-                required><button type="submit">Scan previous emails</button></div>
+                required><button type="submit">Start backfill</button></div>
             </form>
           </section>""" if occupant is not None else ""
         rollback_card = f"""
