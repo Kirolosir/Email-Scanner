@@ -1497,99 +1497,277 @@ class HostedDashboardApp:
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{html.escape(title)} · Email Scanner</title>
 <style>
-:root{{--ink:#102a2a;--muted:#58706e;--line:#d9e5e2;--paper:#f4f8f7;
---card:#fff;--mint:#16a085;--mint-dark:#0d6f61;--blue:#255f85;
---shadow:0 18px 48px rgba(20,63,59,.08)}}
-*{{box-sizing:border-box}}body{{margin:0;background:var(--paper);color:var(--ink);
-font:16px/1.5 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}}
-button,input,textarea{{font:inherit}}a{{color:inherit}}.topbar{{height:72px;display:flex;
-align-items:center;justify-content:space-between;padding:0 max(24px,calc((100vw - 1180px)/2));
-background:rgba(255,255,255,.92);border-bottom:1px solid var(--line)}}
-.brand{{display:flex;align-items:center;gap:12px;text-decoration:none;font-weight:750}}
-.mark{{display:grid;place-items:center;width:52px;height:52px;border-radius:16px;
-background:linear-gradient(145deg,var(--mint),var(--blue));color:white;font-weight:850;
-letter-spacing:-.04em;box-shadow:var(--shadow)}}.mark.small{{width:38px;height:38px;border-radius:12px}}
-.workspace{{max-width:1180px;margin:auto;padding:44px 24px 72px}}.account-hero{{display:flex;
-justify-content:space-between;gap:28px;align-items:flex-start;margin-bottom:30px}}
-h1,h2,p{{margin-top:0}}h1{{font-size:clamp(2rem,5vw,3.5rem);line-height:1.05;
-letter-spacing:-.045em;margin-bottom:14px}}h2{{font-size:1.3rem;line-height:1.25;
-letter-spacing:-.02em;margin-bottom:8px}}.eyebrow{{font-size:.78rem;letter-spacing:.14em;
-text-transform:uppercase;font-weight:800;color:var(--mint-dark);margin-bottom:10px}}
-.lede{{font-size:1.05rem;color:var(--muted);max-width:650px}}.status{{display:inline-flex;
-align-items:center;gap:9px;border:1px solid var(--line);background:white;border-radius:999px;
-padding:9px 14px;font-weight:750;white-space:nowrap}}.status i{{width:9px;height:9px;
-border-radius:50%;background:#d48a18}}.status.good i{{background:#18a66d;box-shadow:0 0 0 5px #e2f7ee}}
+/* Email Scanner — Apple-style UI refresh
+   Drop-in replacement for the <style> block in hosted_dashboard.py :: _page().
+   Every existing class name is preserved; no markup or behavior changes needed.
+   The "ES" lettermark is replaced by a CSS-drawn envelope glyph (.mark). */
+
+:root{{
+  --bg:#f5f5f7; --paper:#f5f5f7; --card:#fff; --surface2:#fbfbfd; --fill:#f2f2f7;
+  --ink:#1d1d1f; --muted:#6e6e73; --ink3:#8e8e93;
+  --line:rgba(0,0,0,.09); --line2:rgba(0,0,0,.05);
+  --blue:#0071e3; --blue-press:#0058b8; --blue-soft:rgba(0,113,227,.10);
+  --mint:#0071e3; --mint-dark:#0071e3;           /* legacy aliases → system blue */
+  --green:#2eb350; --green-soft:rgba(52,199,89,.14);
+  --red:#d70015; --red-soft:rgba(255,59,48,.10); --amber:#b25000;
+  --shadow:0 1px 2px rgba(0,0,0,.05),0 10px 30px rgba(0,0,0,.06);
+  --shadow-sm:0 1px 2px rgba(0,0,0,.06);
+  --bar:rgba(250,250,252,.72);
+  --ease-spring:cubic-bezier(.34,1.56,.64,1);
+}}
+@media (prefers-color-scheme:dark){{
+  :root{{
+    --bg:#000; --paper:#000; --card:#1c1c1e; --surface2:#242426; --fill:#2c2c2e;
+    --ink:#f5f5f7; --muted:#a1a1a6; --ink3:#8e8e93;
+    --line:rgba(255,255,255,.13); --line2:rgba(255,255,255,.07);
+    --blue:#0a84ff; --blue-press:#409cff; --blue-soft:rgba(10,132,255,.18);
+    --mint:#0a84ff; --mint-dark:#0a84ff;
+    --green:#30d158; --green-soft:rgba(48,209,88,.18);
+    --red:#ff453a; --red-soft:rgba(255,69,58,.16); --amber:#ff9f0a;
+    --shadow:0 1px 2px rgba(0,0,0,.5),0 12px 36px rgba(0,0,0,.55);
+    --shadow-sm:0 1px 2px rgba(0,0,0,.5);
+    --bar:rgba(28,28,30,.72);
+  }}
+}}
+
+*{{box-sizing:border-box}}
+html{{-webkit-text-size-adjust:100%}}
+body{{
+  margin:0; background:var(--paper); color:var(--ink);
+  font:16px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text","SF Pro Display","Helvetica Neue",system-ui,sans-serif;
+  letter-spacing:-.011em; -webkit-font-smoothing:antialiased;
+}}
+button,input,textarea,select{{font:inherit}}
+a{{color:var(--blue);text-decoration:none}}
+a:hover{{color:var(--blue-press)}}
+:focus-visible{{outline:3px solid var(--blue-soft);outline-offset:2px;border-radius:10px}}
+::selection{{background:var(--blue-soft)}}
+
+/* ---------- header ---------- */
+.topbar{{
+  height:60px;display:flex;align-items:center;justify-content:space-between;gap:20px;
+  padding:0 max(24px,calc((100vw - 1180px)/2));
+  background:var(--bar);backdrop-filter:saturate(180%) blur(20px);
+  -webkit-backdrop-filter:saturate(180%) blur(20px);
+  border-bottom:1px solid var(--line);position:sticky;top:0;z-index:50;
+}}
+.brand{{display:flex;align-items:center;gap:10px;font-size:15px;font-weight:600;color:var(--ink)}}
+.brand:hover{{color:var(--ink)}}
+.top-actions,.section-actions{{display:flex;align-items:center;gap:6px;flex-wrap:wrap}}
+
+/* envelope lettermark — text is hidden, glyph is a background SVG */
+.mark{{
+  display:grid;place-items:center;width:30px;height:30px;border-radius:9px;
+  background:var(--blue);color:transparent;font-size:0;flex:none;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='2.75' y='5.25' width='18.5' height='13.5' rx='2.75'/%3E%3Cpath d='M4 7.5 12 13.25 20 7.5'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:center;background-size:56%;
+}}
+.mark.small{{width:30px;height:30px;border-radius:9px}}
+.login-card .mark{{width:56px;height:56px;border-radius:16px;margin-bottom:26px;box-shadow:0 8px 20px var(--blue-soft)}}
+
+/* ---------- layout ---------- */
+.workspace{{max-width:1180px;margin:auto;padding:44px 24px 80px}}
+.settings-shell{{max-width:980px}}
+h1,h2,p{{margin-top:0}}
+h1{{font-size:clamp(2rem,4.4vw,3.25rem);line-height:1.05;letter-spacing:-.035em;font-weight:700;margin-bottom:12px}}
+h2{{font-size:1.31rem;line-height:1.25;letter-spacing:-.02em;font-weight:650;margin-bottom:8px}}
+.eyebrow{{font-size:.81rem;font-weight:600;letter-spacing:0;text-transform:none;color:var(--muted);margin-bottom:8px}}
+.lede{{font-size:1.06rem;color:var(--muted);max-width:650px;text-wrap:pretty}}
+.empty{{color:var(--muted)}}
+
+.account-hero{{display:flex;justify-content:space-between;gap:28px;align-items:flex-start;flex-wrap:wrap;margin-bottom:36px}}
+.account-hero>div:first-child{{flex:1 1 420px;min-width:0}}
+.account-hero.compact h1{{font-size:clamp(1.9rem,3.6vw,2.75rem)}}
 .hero-actions{{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end}}
-.history-run{{display:grid;grid-template-columns:1.2fr .8fr;gap:32px;
-align-items:center;margin-bottom:16px}}.history-run form label{{margin:0 0 8px}}
-.history-controls{{display:flex;gap:10px;align-items:center}}.history-controls input{{max-width:130px}}
-.history-controls button{{white-space:nowrap}}
-.overview-grid{{display:grid;grid-template-columns:1.15fr 1fr 1fr;gap:16px;margin-bottom:16px}}
-.content-grid{{display:grid;grid-template-columns:1.15fr .85fr;gap:16px;margin-bottom:16px}}
-.panel{{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:24px;
-box-shadow:var(--shadow)}}.panel p:last-child{{margin-bottom:0;color:var(--muted)}}
-.section-head{{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:20px}}
-.section-actions,.top-actions{{display:flex;align-items:center;gap:10px}}.section-actions .secondary{{font-size:.8rem;padding:7px 10px}}
-.metrics{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}}.metric{{padding:14px;
-background:#f3f8f7;border:1px solid #e4eeeb;border-radius:14px}}.metric span{{display:block;
-font-size:.78rem;color:var(--muted);text-transform:capitalize}}.metric strong{{display:block;
-font-size:1.75rem;line-height:1.1;margin-top:5px}}.labels ul{{list-style:none;padding:0;margin:0}}
-.labels li{{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:13px 0;
-border-top:1px solid #edf2f1}}.labels li:first-child{{border-top:0}}.labels li div span{{display:block;
-font-size:.8rem;color:var(--muted)}}.tag,.count-badge{{font-size:.75rem;font-weight:750;
-background:#e5f5f1;color:var(--mint-dark);border-radius:999px;padding:5px 9px;white-space:nowrap}}
-.count-badge{{font-size:.9rem}}.safety{{display:flex;align-items:center;justify-content:space-between;gap:24px}}
-.secondary,button{{border:0;border-radius:12px;padding:11px 16px;font-weight:750;cursor:pointer}}
-.secondary{{background:var(--ink);color:white;text-decoration:none;white-space:nowrap}}button{{background:var(--mint-dark);color:white}}
-button:disabled{{opacity:.45;cursor:not-allowed}}
-.ghost{{background:transparent;color:var(--muted);border:1px solid var(--line)}}.ghost-link{{color:var(--muted);text-decoration:none;font-weight:700}}.empty{{color:var(--muted)}}
-.login-shell{{min-height:100vh;display:grid;place-items:center;padding:24px;background:radial-gradient(circle at 20% 10%,#dff7f0,transparent 38%),var(--paper)}}
-.login-card{{width:min(460px,100%);padding:42px;background:white;border:1px solid var(--line);
-border-radius:24px;box-shadow:var(--shadow)}}.login-card .mark{{margin-bottom:26px}}
-.login-card h1{{font-size:2.35rem}}label{{display:block;font-weight:750;margin:24px 0 8px}}
-input:not([type=hidden]):not([type=checkbox]),textarea{{width:100%;padding:13px 14px;border:1px solid #b9cdca;border-radius:12px;
-outline:none;background:white;color:var(--ink)}}textarea{{resize:vertical}}input:focus,textarea:focus{{border-color:var(--mint);box-shadow:0 0 0 4px #dff7f0}}
-.login-card button{{width:100%;margin-top:14px}}.google-button{{display:flex;align-items:center;width:100%;
-justify-content:center;gap:11px;background:#fff;color:#223;border:1px solid #aebfbd;
-border-radius:12px;padding:12px 16px;margin-top:14px;text-decoration:none;font-weight:750;
-box-shadow:0 4px 14px rgba(20,63,59,.08)}}.google-button span{{display:grid;place-items:center;
-width:24px;height:24px;border-radius:50%;background:#fff;color:#1769e0;font-weight:850}}
-.browser-note{{margin:16px 0 0;color:var(--muted);font-size:.88rem;text-align:center}}
-.notice{{padding:11px 13px;border-radius:10px}}.notice.bad{{background:#fff0ed;color:#9b3024}}
-.notice.good{{background:#e2f7ee;color:#116645}}.notice.progress{{background:#eaf3f8;color:#24556f}}
-.failure-alert{{display:flex;align-items:center;justify-content:space-between;gap:24px;
-padding:20px 22px;margin-bottom:22px;background:#fff0ed;border:1px solid #efc1b8;
-border-radius:18px;color:#7d281f}}.failure-alert .eyebrow{{color:#9b3024}}
-.failure-alert h2,.failure-alert p{{margin-bottom:4px}}.run-progress{{margin-bottom:16px}}
-.run-progress .section-head{{align-items:center;margin-bottom:12px}}.run-progress progress{{width:100%;
-height:14px;accent-color:var(--mint-dark)}}.run-progress>p{{font-size:.85rem;margin-top:8px}}
-.settings-shell{{max-width:980px}}.account-hero.compact h1{{font-size:clamp(2rem,4vw,3rem)}}
-.settings-form{{display:grid;gap:16px}}.form-section{{display:grid;grid-template-columns:.75fr 1.25fr;gap:38px}}
-.form-copy p{{color:var(--muted)}}.form-section label{{margin:0 0 8px}}.form-section label:not(:first-child){{margin-top:18px}}
-.field-grid{{display:grid;grid-template-columns:1fr 1fr;gap:18px}}.field-note{{font-size:.8rem;color:var(--muted);margin:7px 0 0}}
-.confirmation{{display:grid;gap:22px}}.check-row{{display:flex;gap:13px;align-items:flex-start;margin:0}}
-.check-row input{{margin-top:5px;accent-color:var(--mint-dark)}}.check-row span{{color:var(--muted)}}.check-row strong{{color:var(--ink)}}
-.save-row{{display:flex;align-items:center;justify-content:flex-end;gap:18px}}.save-row a{{color:var(--muted)}}
-.danger-zone{{margin-top:26px;border-color:#f0cbc5;box-shadow:none;display:grid;grid-template-columns:.8fr 1.2fr;gap:38px}}
-.danger-zone p{{color:var(--muted)}}.danger-zone label{{margin:0 0 8px}}.disconnect-row{{display:flex;gap:10px;align-items:center}}
-.danger{{background:#a33b2e;white-space:nowrap}}
-.danger-link{{background:#a33b2e}}.undo-run{{display:flex;align-items:center;
-justify-content:space-between;gap:24px;margin-bottom:16px}}.undo-confirm h1{{font-size:2.4rem}}
-.coach-card{{display:flex;align-items:center;justify-content:space-between;gap:24px;
-margin-bottom:16px}}.coach-card p{{margin-bottom:0}}.review-queue{{margin-bottom:16px}}
-.draft-list{{display:grid;gap:12px}}.draft-card{{padding:18px;border:1px solid #dce8e5;
-border-radius:16px;background:#f9fbfb}}.draft-card-head{{display:flex;align-items:center;
-justify-content:space-between;gap:16px}}.draft-card-head>div{{display:flex;align-items:center;
-gap:9px;flex-wrap:wrap}}.confidence{{font-size:.8rem;color:var(--muted)}}
-.recruit-fields{{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;
-margin-top:16px}}.recruit-fields span{{padding:10px 11px;background:white;border:1px solid #e2ecea;
-border-radius:12px;overflow-wrap:anywhere}}.recruit-fields small{{display:block;color:var(--muted);
-font-size:.72rem;margin-bottom:3px}}.verify-note{{font-size:.78rem;margin:12px 0 0!important}}
+
+.overview-grid,.content-grid{{display:grid;gap:16px;margin-bottom:16px}}
+.overview-grid{{grid-template-columns:repeat(auto-fit,minmax(270px,1fr))}}
+.content-grid{{grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}}
+
+/* ---------- panels ---------- */
+.panel{{
+  background:var(--card);border:1px solid var(--line);border-radius:20px;padding:26px;
+  box-shadow:var(--shadow);transition:transform .25s cubic-bezier(.34,1.3,.64,1),box-shadow .25s ease;
+}}
+.overview-grid .panel:hover{{transform:translateY(-2px)}}
+.panel p:last-child{{margin-bottom:0;color:var(--muted)}}
+.section-head{{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:20px}}
+.section-head>div:first-child{{flex:1 1 auto;min-width:0}}
+.section-actions .secondary{{font-size:.875rem;padding:9px 14px}}
+
+/* ---------- metrics ---------- */
+.metrics{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}}
+.metric{{padding:16px;background:var(--fill);border:0;border-radius:14px}}
+.metric span{{display:block;font-size:.81rem;color:var(--muted);text-transform:capitalize}}
+.metric strong{{display:block;font-size:1.87rem;line-height:1.1;margin-top:4px;font-weight:650;letter-spacing:-.03em;font-variant-numeric:tabular-nums}}
+
+/* ---------- labels list ---------- */
+.labels ul{{list-style:none;padding:0;margin:0}}
+.labels li{{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:14px 0;border-top:1px solid var(--line2)}}
+.labels li:first-child{{border-top:0}}
+.labels li div span{{display:block;font-size:.81rem;color:var(--muted)}}
+.tag,.count-badge{{font-size:.75rem;font-weight:600;background:var(--fill);color:var(--muted);border-radius:980px;padding:5px 10px;white-space:nowrap}}
+.count-badge{{font-size:.83rem;background:var(--blue-soft);color:var(--blue)}}
+
+/* ---------- status pill ---------- */
+.status{{
+  display:inline-flex;align-items:center;gap:8px;border:1px solid var(--line);
+  background:var(--card);border-radius:980px;padding:9px 15px;font-size:.875rem;
+  font-weight:600;white-space:nowrap;box-shadow:var(--shadow-sm);
+}}
+.status i{{width:8px;height:8px;border-radius:50%;background:var(--amber)}}
+.status.good i{{background:var(--green);box-shadow:0 0 0 4px var(--green-soft)}}
+
+/* ---------- buttons: springy press feedback ---------- */
+.secondary,button{{
+  border:0;border-radius:980px;padding:11px 18px;font-size:.94rem;font-weight:600;cursor:pointer;
+  transition:transform .18s var(--ease-spring),background .2s ease,filter .2s ease;
+}}
+button{{background:var(--blue);color:#fff}}
+button:hover{{background:var(--blue-press)}}
+.secondary{{background:var(--fill);color:var(--ink);text-decoration:none;white-space:nowrap;display:inline-block}}
+.secondary:hover{{color:var(--ink);filter:brightness(.96)}}
+.secondary:active,button:active{{transform:scale(.95)}}
+button:disabled{{opacity:.42;cursor:not-allowed;transform:none}}
+.ghost{{background:var(--card);color:var(--ink);border:1px solid var(--line)}}
+.ghost:hover{{background:var(--fill)}}
+.ghost-link{{color:var(--muted);font-weight:500;padding:7px 12px;border-radius:980px}}
+.ghost-link:hover{{background:var(--fill);color:var(--ink)}}
+.danger,.danger-link{{background:var(--red);color:#fff;white-space:nowrap}}
+.danger:hover,.danger-link:hover{{background:var(--red);color:#fff;filter:brightness(.92)}}
+.section-actions .danger-link,.undo-run .danger-link{{background:var(--red-soft);color:var(--red)}}
+.section-actions .danger-link:hover,.undo-run .danger-link:hover{{color:var(--red);filter:brightness(.97)}}
+
+/* ---------- forms ---------- */
+label{{display:block;font-size:.875rem;font-weight:600;margin:24px 0 8px}}
+input:not([type=hidden]):not([type=checkbox]),textarea{{
+  width:100%;padding:12px 14px;border:1px solid var(--line);border-radius:12px;outline:none;
+  background:var(--fill);color:var(--ink);
+  transition:box-shadow .2s ease,border-color .2s ease,background .2s ease;
+}}
+textarea{{border-radius:14px;resize:vertical;line-height:1.55}}
+input:focus,textarea:focus{{border-color:var(--blue);box-shadow:0 0 0 4px var(--blue-soft);background:var(--card)}}
+.field-note{{font-size:.81rem;color:var(--ink3);margin:7px 0 0}}
+.field-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:18px}}
+.settings-form{{display:grid;gap:16px}}
+.form-section{{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:36px}}
+.form-copy p{{color:var(--muted)}}
+.form-copy .eyebrow{{color:var(--blue)}}
+.form-section label{{margin:0 0 8px}}
+.form-section label:not(:first-child){{margin-top:18px}}
 .coach-fields label{{margin-top:18px!important}}
-@media(max-width:850px){{.overview-grid,.content-grid{{grid-template-columns:1fr}}.account-hero,
-.safety,.coach-card,.failure-alert{{flex-direction:column;align-items:flex-start}}.metrics{{grid-template-columns:repeat(2,1fr)}}.form-section,.danger-zone,.history-run{{grid-template-columns:1fr;gap:18px}}.recruit-fields{{grid-template-columns:repeat(2,1fr)}}}}
-@media(max-width:480px){{.workspace{{padding:30px 16px 56px}}.topbar{{padding:0 16px}}
-.panel{{padding:20px}}.metrics,.field-grid,.recruit-fields{{grid-template-columns:1fr}}h1{{font-size:2rem}}.brand>span:last-child,.ghost-link{{display:none}}.section-actions,.draft-card-head{{align-items:flex-start;flex-direction:column}}.disconnect-row{{align-items:stretch;flex-direction:column}}}}
+.confirmation{{display:grid;gap:22px}}
+.check-row{{display:flex;gap:14px;align-items:flex-start;margin:0;cursor:pointer}}
+.check-row input{{width:20px;height:20px;margin-top:2px;accent-color:var(--blue);cursor:pointer;flex:none}}
+.check-row span{{color:var(--muted)}}
+.check-row strong{{color:var(--ink);font-weight:600}}
+.save-row{{display:flex;align-items:center;justify-content:flex-end;gap:18px}}
+.save-row a{{color:var(--muted);font-weight:500}}
+.save-row a:hover{{color:var(--ink)}}
+
+/* ---------- history / undo / coach / safety rows ---------- */
+.history-run{{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:32px;align-items:center;margin-bottom:16px}}
+.history-run form label{{margin:0 0 8px}}
+.history-controls{{display:flex;gap:10px;align-items:center}}
+.history-controls input{{max-width:130px}}
+.history-controls button{{white-space:nowrap}}
+.undo-run,.coach-card,.safety{{display:flex;align-items:center;justify-content:space-between;gap:24px;flex-wrap:wrap;margin-bottom:16px}}
+.undo-run>div:first-child,.coach-card>div:first-child{{flex:1 1 380px;min-width:0}}
+.coach-card p{{margin-bottom:0}}
+.undo-confirm h1{{font-size:2.2rem}}
+
+/* ---------- danger zone ---------- */
+.danger-zone{{
+  margin-top:26px;border-color:var(--red-soft);box-shadow:none;
+  display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:36px;
+}}
+.danger-zone .eyebrow{{color:var(--red)}}
+.danger-zone p{{color:var(--muted)}}
+.danger-zone label{{margin:0 0 8px}}
+.disconnect-row{{display:flex;gap:10px;align-items:center}}
+.danger-zone input:focus{{border-color:var(--red);box-shadow:0 0 0 4px var(--red-soft)}}
+
+/* ---------- notices ---------- */
+.notice{{padding:13px 16px;border-radius:14px;font-weight:500;margin-bottom:16px}}
+.notice.bad{{background:var(--red-soft);color:var(--red)}}
+.notice.good{{background:var(--green-soft);color:var(--green)}}
+.notice.progress{{background:var(--blue-soft);color:var(--blue)}}
+.failure-alert{{
+  display:flex;align-items:center;justify-content:space-between;gap:24px;flex-wrap:wrap;
+  padding:20px 22px;margin-bottom:22px;background:var(--red-soft);
+  border:1px solid var(--red-soft);border-radius:18px;color:var(--ink);
+}}
+.failure-alert>div:first-child{{flex:1 1 380px;min-width:0}}
+.failure-alert .eyebrow{{color:var(--red);font-weight:700}}
+.failure-alert h2{{margin-bottom:4px;color:var(--ink)}}
+.failure-alert p{{margin-bottom:0;color:var(--muted)}}
+
+/* ---------- run progress ---------- */
+.run-progress{{margin-bottom:16px}}
+.run-progress .section-head{{align-items:center;margin-bottom:14px}}
+.run-progress progress{{
+  width:100%;height:10px;border:0;border-radius:980px;overflow:hidden;
+  background:var(--fill);accent-color:var(--blue);appearance:none;-webkit-appearance:none;
+}}
+.run-progress progress::-webkit-progress-bar{{background:var(--fill);border-radius:980px}}
+.run-progress progress::-webkit-progress-value{{background:var(--blue);border-radius:980px;transition:width .6s cubic-bezier(.4,0,.2,1)}}
+.run-progress progress::-moz-progress-bar{{background:var(--blue);border-radius:980px}}
+.run-progress>p{{font-size:.875rem;margin-top:10px}}
+
+/* ---------- review queue ---------- */
+.review-queue{{margin-bottom:16px}}
+.draft-list{{display:grid;gap:12px}}
+.draft-card{{padding:20px;border:1px solid var(--line);border-radius:16px;background:var(--surface2)}}
+.draft-card-head{{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}}
+.draft-card-head>div{{display:flex;align-items:center;gap:10px;flex-wrap:wrap}}
+.draft-card .tag{{background:var(--blue-soft);color:var(--blue)}}
+.confidence{{font-size:.83rem;color:var(--muted)}}
+.recruit-fields{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:16px}}
+.recruit-fields span{{padding:11px 12px;background:var(--card);border:1px solid var(--line);border-radius:12px;font-size:.875rem;overflow-wrap:anywhere}}
+.recruit-fields small{{display:block;color:var(--muted);font-size:.75rem;margin-bottom:3px}}
+.verify-note{{font-size:.81rem;color:var(--ink3);margin:12px 0 0!important}}
+
+/* ---------- login / signout cards ---------- */
+.login-shell{{
+  min-height:100vh;display:grid;place-items:center;padding:24px;
+  background:radial-gradient(90% 90% at 20% 0%,var(--blue-soft),transparent 60%),var(--paper);
+}}
+.login-card{{
+  width:min(460px,100%);padding:40px 36px;background:var(--card);
+  border:1px solid var(--line);border-radius:22px;box-shadow:var(--shadow);
+}}
+.login-card h1{{font-size:2.15rem}}
+.login-card button{{width:100%;margin-top:16px;border-radius:14px;padding:13px 20px;font-size:1rem}}
+.google-button{{
+  display:flex;align-items:center;justify-content:center;gap:10px;width:100%;
+  background:var(--blue);color:#fff;border:0;border-radius:14px;padding:13px 18px;
+  margin-top:16px;font-size:1rem;font-weight:600;
+  transition:transform .18s var(--ease-spring),background .2s ease;
+}}
+.google-button:hover{{background:var(--blue-press);color:#fff}}
+.google-button:active{{transform:scale(.97)}}
+.google-button span{{display:grid;place-items:center;width:22px;height:22px;border-radius:50%;background:#fff;color:#1769e0;font-size:.81rem;font-weight:800}}
+.browser-note{{margin:18px 0 0;color:var(--ink3);font-size:.83rem;line-height:1.45;text-align:center}}
+
+/* ---------- responsive ---------- */
+@media (max-width:850px){{
+  .account-hero,.safety,.coach-card,.undo-run,.failure-alert{{flex-direction:column;align-items:flex-start}}
+  .hero-actions{{justify-content:flex-start}}
+  .metrics{{grid-template-columns:repeat(2,1fr)}}
+}}
+@media (max-width:480px){{
+  .workspace{{padding:30px 16px 60px}}
+  .topbar{{padding:0 16px}}
+  .panel{{padding:20px}}
+  .metrics,.recruit-fields{{grid-template-columns:1fr}}
+  h1{{font-size:2rem}}
+  .brand>span:last-child{{display:none}}
+  .draft-card-head{{align-items:flex-start;flex-direction:column}}
+  .disconnect-row{{align-items:stretch;flex-direction:column}}
+}}
+@media (prefers-reduced-motion:reduce){{
+  *{{transition:none!important;animation:none!important}}
+}}
 </style></head><body>{content}</body></html>"""
 
 
