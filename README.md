@@ -72,13 +72,15 @@ batch. **Scan new mail** checks the recent overlap window. **Scan previous
 emails** accepts a number from 1 to 5,000 and checks that many of the newest
 eligible messages without an age cutoff. Scans above 100 messages use the
 provider's batch service in restart-safe groups of up to 200, while smaller
-scans keep the immediate request path.
+scans analyze up to four messages concurrently. Successful messages combine
+their category and completion labels into one Gmail update.
 
 The dashboard shows live analysis and drafting progress, keeps failed runs
 visible until they are resolved, and provides a review queue with direct links
 to Gmail drafts. Its guarded undo action previews the latest run, requires a
 typed confirmation, moves only that run's new drafts to Trash, removes only its
-recorded label additions, and makes those messages eligible to scan again. A
+recorded label additions, and makes those messages eligible to scan again. The
+undo covers the complete run without a draft or label count limit. A
 coach profile stores the owner's role, program, signature,
 and voice guidance. For recruiting messages, the classifier also extracts the
 stated recruit name, graduation year, position, school or club, and location.

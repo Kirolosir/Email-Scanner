@@ -238,7 +238,7 @@ class _ExecutionGmail:
     def modify(self, userId, id, body):
         self.modify_calls.append(body)
         if (self.fail_processed_once
-                and body.get("addLabelIds") == ["DONE"]):
+                and "DONE" in body.get("addLabelIds", [])):
             self.fail_processed_once = False
             return _Call(error=ConnectionError("offline interruption"))
         return _Call({"id": id})
@@ -278,10 +278,12 @@ def test_interruption_after_draft_recovers_without_duplicate(tmp_path):
         service, _execution_plan(), ACCOUNT_LABELS, throttle, log, state, {}
     )
     assert draft_id == "draft-1"
-    assert errors and "processed label failed" in errors[0]
+    assert errors and "labels failed" in errors[0]
     assert state.record_for("m1")["status"] == "draft_created"
     assert len(service.create_calls) == 1
     assert log.ids == ["draft-1"]
+    assert len(service.modify_calls) == 1
+    assert set(service.modify_calls[0]["addLabelIds"]) == {"C1", "Y27", "DONE"}
 
     restarted = DailyState(tmp_path / "state" / "daily.json").load()
     _added, draft_id, errors = execute_daily_plan(
@@ -292,6 +294,7 @@ def test_interruption_after_draft_recovers_without_duplicate(tmp_path):
     assert restarted.record_for("m1")["status"] == "complete"
     assert len(service.create_calls) == 1
     assert log.ids == ["draft-1"]
+    assert len(service.modify_calls) == 2
 
 
 def test_prior_complete_record_without_draft_still_creates_one(tmp_path):

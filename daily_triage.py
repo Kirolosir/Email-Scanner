@@ -57,7 +57,7 @@ from triage import (
     SAFETY_HEADERS,
 )
 from triage_config import DEFAULT_LABEL_CONFIG, load_triage_label_config
-from gemini_client import THROTTLE_SECONDS, analyze_batch
+from gemini_client import THROTTLE_SECONDS, analyze_batch, analyze_many
 from gmail_reader import get_header_values
 from message_safety import (
     DEFAULT_MAX_BODY_CHARS,
@@ -600,20 +600,6 @@ def execute_daily_plan(service, plan, account_labels, throttle, draft_log,
     draft_id = ""
     plan["new_draft_created"] = False
 
-    try:
-        if plan["decision"].add:
-            apply_labels(
-                service, message_id, plan["decision"].add,
-                account_labels, throttle,
-            )
-            added.extend(plan["decision"].add)
-            if rollback_journal is not None:
-                rollback_journal.record_labels(
-                    message_id, plan["decision"].add
-                )
-    except Exception as exc:
-        errors.append(f"labels failed ({type(exc).__name__})")
-
     if plan["template"] is not None:
         record = state.record_for(message_id)
         if (record.get("status") in {"draft_created", "complete"}
@@ -635,21 +621,26 @@ def execute_daily_plan(service, plan, account_labels, throttle, draft_log,
             except Exception as exc:
                 errors.append(f"draft failed ({type(exc).__name__})")
 
-    if errors:
-        return added, draft_id, errors
+    # Keep failed drafts eligible for a later retry. Classification labels are
+    # still useful, but Processed is only added after draft success.
+    labels_to_add = list(plan["decision"].add)
+    if not errors:
+        labels_to_add.append(plan["processed_label"])
 
     try:
-        apply_labels(
-            service, message_id, [plan["processed_label"]],
-            account_labels, throttle,
-        )
-        added.append(plan["processed_label"])
-        if rollback_journal is not None:
-            rollback_journal.record_labels(
-                message_id, [plan["processed_label"]]
+        if labels_to_add:
+            apply_labels(
+                service, message_id, labels_to_add,
+                account_labels, throttle,
             )
+            added.extend(labels_to_add)
+            if rollback_journal is not None:
+                rollback_journal.record_labels(message_id, labels_to_add)
     except Exception as exc:
-        return added, draft_id, [f"processed label failed ({type(exc).__name__})"]
+        errors.append(f"labels failed ({type(exc).__name__})")
+
+    if errors:
+        return added, draft_id, errors
 
     state.record_complete(
         message_id, thread_id, draft_id,
@@ -1088,27 +1079,47 @@ def _run_locked(args, classifier, config, templates, state, status,
         prepared_emails.append(email)
 
     combined_results = [None] * len(prepared_emails)
-    use_batch = (
+    account_wide_generation = (
         classifier is None
-        and len(prepared_emails) > 100
         and bool(getattr(args.profile, "draft_all_replyable_messages", False))
         and bool(getattr(args.ai_drafting_approvals,
                          "draft_all_replyable_messages", False))
     )
-    if use_batch:
+    include_bulk_generation = bool(getattr(
+        args.ai_drafting_approvals, "include_bulk_messages", False
+    ))
+    generation_indices = [
+        index for index, email in enumerate(prepared_emails)
+        if ((email.get("delivery_safety") or {}).get("status") == "normal"
+            or (include_bulk_generation and
+                (email.get("delivery_safety") or {}).get("status") == "bulk"))
+        and (email.get("body_cleaning") or {}).get("meaningful", False)
+        and email.get("reply_address") and email.get("thread_id")
+        and email.get("rfc_message_id")
+    ] if account_wide_generation else []
+    generation_emails = [prepared_emails[index] for index in generation_indices]
+    if len(generation_emails) > 100:
         status.progress(
             "Preparing large email batch", counts,
-            current=0, total=len(prepared_emails),
+            current=0, total=len(generation_emails),
         )
         try:
-            combined_results = analyze_batch(
-                prepared_emails, profile=args.profile
-            )
+            analyzed = analyze_batch(generation_emails, profile=args.profile)
+            for index, result in zip(generation_indices, analyzed):
+                combined_results[index] = result
         except Exception as exc:
             logger.warning(
                 "Large batch analysis failed (%s); continuing with resumable "
                 "individual requests", type(exc).__name__,
             )
+    elif generation_emails:
+        status.progress(
+            "Analyzing emails concurrently", counts,
+            current=0, total=len(generation_emails),
+        )
+        analyzed = analyze_many(generation_emails, profile=args.profile)
+        for index, result in zip(generation_indices, analyzed):
+            combined_results[index] = result
 
     plans = []
     for index, (message, email, combined_result) in enumerate(

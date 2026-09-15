@@ -76,3 +76,21 @@ def test_completed_undo_does_not_rebuild_or_recurse_from_old_report(tmp_path):
     journal.mark_undone()
 
     assert latest_summary(tmp_path) is None
+
+
+def test_rollback_summary_includes_every_item_in_a_large_run(tmp_path):
+    journal = RollbackJournal(
+        tmp_path / "rollback" / "1788969600-00000.json", "1788969600"
+    )
+    for index in range(150):
+        message_id = f"m{index}"
+        journal.record_labels(
+            message_id, ["Triage/Processed", "Triage/Recruit"]
+        )
+        journal.record_draft(message_id, f"d{index}")
+    journal.complete()
+
+    assert latest_summary(tmp_path) | {"created_at": None} == {
+        "group_id": "1788969600", "created_at": None,
+        "messages": 150, "drafts": 150, "labels": 300,
+    }

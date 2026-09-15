@@ -10,6 +10,9 @@ import os
 import random
 import re
 import time
+import threading
+import contextvars
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from dotenv import load_dotenv
 from google import genai
@@ -49,6 +52,9 @@ MAX_THROTTLE_SECONDS = _validated_float_env(
 MAX_BACKOFF_SECONDS = _validated_float_env(
     "GEMINI_MAX_BACKOFF_SECONDS", 30.0, minimum=1.0, maximum=120.0
 )
+MAX_PARALLEL_REQUESTS = int(_validated_float_env(
+    "GEMINI_MAX_PARALLEL_REQUESTS", 4, minimum=1, maximum=16
+))
 
 # Sourced from the account profile so no category name is a literal here.
 VALID_CATEGORIES = set(_PROFILE.valid_categories)
@@ -219,67 +225,85 @@ _adaptive_interval = THROTTLE_SECONDS
 _call_count = 0
 _client = None
 _environment_loaded = False
+_throttle_lock = threading.Lock()
+_client_lock = threading.Lock()
+_call_count_lock = threading.Lock()
 
 
 def get_client():
     """Create the Gemini client only when a live classification is requested."""
     global _client, _environment_loaded
     if _client is None:
-        # Loading .env is deliberately delayed until the caller explicitly
-        # starts a live Gemini classification. Imports, --help, demos, and
-        # offline tests never read the secret file.
-        if not _environment_loaded:
-            load_dotenv()
-            _environment_loaded = True
-        api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-        if not api_key:
-            raise RuntimeError(
-                "GEMINI_API_KEY is not configured; live Gemini is unavailable"
-            )
-        _client = genai.Client(api_key=api_key)
+        with _client_lock:
+            if _client is not None:
+                return _client
+            # Loading .env is deliberately delayed until a live request.
+            if not _environment_loaded:
+                load_dotenv()
+                _environment_loaded = True
+            api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+            if not api_key:
+                raise RuntimeError(
+                    "GEMINI_API_KEY is not configured; live Gemini is unavailable"
+                )
+            _client = genai.Client(api_key=api_key)
     return _client
 
 
 def _throttle():
     """Pace calls using the interval learned from recent provider responses."""
     global _last_call_time
-    wait = _adaptive_interval - (time.monotonic() - _last_call_time)
-    if wait > 0:
-        time.sleep(wait)
-    _last_call_time = time.monotonic()
+    with _throttle_lock:
+        wait = _adaptive_interval - (time.monotonic() - _last_call_time)
+        if wait > 0:
+            time.sleep(wait)
+        _last_call_time = time.monotonic()
 
 
 def _record_throttle_success():
     global _adaptive_interval
-    _adaptive_interval = max(MIN_THROTTLE_SECONDS, _adaptive_interval * 0.85)
+    with _throttle_lock:
+        _adaptive_interval = max(
+            MIN_THROTTLE_SECONDS, _adaptive_interval * 0.85
+        )
 
 
 def _record_throttle_pressure(error=None):
     """Back off quickly on quota pressure and gently on other transients."""
     global _adaptive_interval
     factor = 2.0 if _status_code(error) == 429 else 1.35
-    _adaptive_interval = min(
-        MAX_THROTTLE_SECONDS,
-        max(MIN_THROTTLE_SECONDS, _adaptive_interval * factor),
-    )
+    with _throttle_lock:
+        _adaptive_interval = min(
+            MAX_THROTTLE_SECONDS,
+            max(MIN_THROTTLE_SECONDS, _adaptive_interval * factor),
+        )
 
 
 def reset_adaptive_throttle():
     global _adaptive_interval, _last_call_time
-    _adaptive_interval = THROTTLE_SECONDS
-    _last_call_time = 0.0
+    with _throttle_lock:
+        _adaptive_interval = THROTTLE_SECONDS
+        _last_call_time = 0.0
 
 
 def get_call_count():
     """Total Gemini API calls made (including retries) since the last
     reset_call_count(), so a batch run can report what it actually cost."""
-    return _call_count
+    with _call_count_lock:
+        return _call_count
 
 
 def reset_call_count():
     """Zero the call counter, e.g. before timing a batch run."""
     global _call_count
-    _call_count = 0
+    with _call_count_lock:
+        _call_count = 0
+
+
+def _record_call_count(amount=1):
+    global _call_count
+    with _call_count_lock:
+        _call_count += amount
 
 
 def get_text(response):
@@ -443,11 +467,10 @@ def generate_text(prompt, max_retries=3, model=None):
         raise ValueError("prompt must be a non-empty string")
     model = model or MODEL
 
-    global _call_count
     last_error = None
     for attempt in range(1, max_retries + 1):
         _throttle()
-        _call_count += 1
+        _record_call_count()
         from runtime_metrics import record_model_call
         record_model_call()
         try:
@@ -504,11 +527,10 @@ def classify(email, max_retries=3, model=None, profile=None):
     effective_profile = profile or _PROFILE
     prompt = build_classification_prompt(email, effective_profile)
 
-    global _call_count
     last_error = None
     for attempt in range(1, max_retries + 1):
         _throttle()
-        _call_count += 1
+        _record_call_count()
         from runtime_metrics import record_model_call
         record_model_call()
         try:
@@ -666,11 +688,10 @@ def analyze_and_draft(email, profile=None, max_retries=3, model=None):
     effective_profile = profile or _PROFILE
     prompt = build_triage_prompt(email, effective_profile)
     model = model or MODEL
-    global _call_count
     last_error = None
     for attempt in range(1, max_retries + 1):
         _throttle()
-        _call_count += 1
+        _record_call_count()
         from runtime_metrics import record_model_call, record_model_response
         record_model_call()
         try:
@@ -689,6 +710,36 @@ def analyze_and_draft(email, profile=None, max_retries=3, model=None):
             if attempt < max_retries:
                 _backoff(attempt)
     raise RuntimeError("Combined Gemini response failed validation") from last_error
+
+
+def analyze_many(emails, profile=None, max_workers=None):
+    """Analyze a normal-sized scan concurrently while preserving result order."""
+    if not emails:
+        return []
+    if len(emails) > 100:
+        raise ValueError("normal concurrent analysis is limited to 100 messages")
+    workers = min(len(emails), max_workers or MAX_PARALLEL_REQUESTS)
+    if workers == 1:
+        return [analyze_and_draft(emails[0], profile=profile)]
+    results = [None] * len(emails)
+    parent_context = contextvars.copy_context()
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(
+                parent_context.copy().run, analyze_and_draft, email, profile
+            ): index
+            for index, email in enumerate(emails)
+        }
+        for future in as_completed(futures):
+            index = futures[future]
+            try:
+                results[index] = future.result()
+            except Exception as exc:
+                logger.warning(
+                    "Concurrent analysis failed at item %d (%s); it will use "
+                    "the resumable fallback", index, type(exc).__name__,
+                )
+    return results
 
 
 def analyze_batch(emails, profile=None, model=None, poll_seconds=10.0,
@@ -732,8 +783,7 @@ def analyze_batch(emails, profile=None, model=None, poll_seconds=10.0,
         if error or response is None:
             raise RuntimeError("Batch analysis contained a failed request")
         results.append(parse_triage_result(get_text(response), effective_profile))
-    global _call_count
-    _call_count += len(requests)
+    _record_call_count(len(requests))
     from runtime_metrics import record_model_call, record_model_response
     for item in responses:
         record_model_call()

@@ -601,6 +601,7 @@ def test_undo_button_previews_and_queues_latest_recorded_run(tmp_path):
     cookie = _login(app)
     dashboard = _call(app, cookie=cookie)
     assert "Undo drafts and labels" in dashboard["body"]
+    assert "There is no item" in dashboard["body"]
     preview = _call(app, "/undo", cookie=cookie)
     assert "Type UNDO to continue" in preview["body"]
     response = _call(

@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import contextvars
 import os
+import threading
 
 
 _METRICS = contextvars.ContextVar("email_scanner_metrics", default=None)
+_LOCK = threading.Lock()
 
 
 def reset():
@@ -25,7 +27,8 @@ def reset():
 def add(key, amount=1):
     metrics = _METRICS.get()
     if metrics is not None and key in metrics:
-        metrics[key] += max(0, int(amount or 0))
+        with _LOCK:
+            metrics[key] += max(0, int(amount or 0))
 
 
 def record_model_response(response, cost_multiplier=1.0):

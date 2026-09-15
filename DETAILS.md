@@ -66,7 +66,10 @@ Google scope.
     history are encrypted and backed up.
 
 History scans accept 1 to 5,000 messages. Selections above 100 use the batch
-service in groups of up to 200; smaller selections use groups of 50.
+service in groups of up to 200; smaller selections use groups of 50 and analyze
+up to four messages concurrently. Category and completion labels share one
+Gmail update after a draft is safely recorded. Undo journals retain every
+change in the run without an item-count cutoff.
 Retryable failures are deferred while later groups continue. The 15-minute
 timer checks for due retries without contacting Gmail when the queue is empty.
 

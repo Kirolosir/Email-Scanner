@@ -1160,7 +1160,8 @@ class HostedDashboardApp:
               <p>Undo {_escape(rollback_summary.get('drafts'))} created drafts
               and {_escape(rollback_summary.get('labels'))} label changes across
               {_escape(rollback_summary.get('messages'))} emails. You will review
-              the impact and confirm before anything changes.</p></div>
+              the impact and confirm before anything changes. There is no item
+              limit.</p></div>
             <a class="secondary danger-link" href="/undo">Review undo</a>
           </section>""" if rollback_summary is not None else ""
 
@@ -1272,7 +1273,8 @@ class HostedDashboardApp:
                 <p>This will remove {_escape(summary.get('labels'))} labels added
                 by that run and move {_escape(summary.get('drafts'))} drafts to
                 Gmail Trash. If you edited one of those drafts, your edits will
-                move to Trash with it. No email will be sent.</p></div>
+                move to Trash with it. The whole run is included, regardless of
+                size. No email will be sent.</p></div>
               <form method="post" action="/undo">
                 <input type="hidden" name="csrf" value="{self._csrf_value()}">
                 <input type="hidden" name="group_id"

@@ -312,6 +312,31 @@ def test_adaptive_throttle_speeds_up_and_backs_off_on_rate_limit(monkeypatch):
     assert gemini_client._adaptive_interval == pytest.approx(6.8)
 
 
+def test_normal_scan_analysis_runs_concurrently_and_keeps_order(monkeypatch):
+    lock = __import__("threading").Lock()
+    barrier = __import__("threading").Barrier(3)
+    active = 0
+    peak = 0
+
+    def analyze(email, profile=None):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        barrier.wait(timeout=2)
+        with lock:
+            active -= 1
+        return {"message": email["message"]}
+
+    monkeypatch.setattr(gemini_client, "analyze_and_draft", analyze)
+    results = gemini_client.analyze_many(
+        [{"message": index} for index in range(3)], max_workers=3
+    )
+
+    assert peak == 3
+    assert [result["message"] for result in results] == [0, 1, 2]
+
+
 def test_batch_api_is_refused_for_small_scans():
     with pytest.raises(ValueError, match="above 100"):
         gemini_client.analyze_batch([{}] * 100, profile=_custom_profile())
