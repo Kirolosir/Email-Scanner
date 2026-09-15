@@ -51,3 +51,28 @@ def test_latest_summary_recovers_the_last_pre_journal_run(tmp_path):
     assert summary["messages"] == 1
     assert summary["drafts"] == 1
     assert summary["labels"] == 1
+
+
+def test_completed_undo_does_not_rebuild_or_recurse_from_old_report(tmp_path):
+    raw_id = "m_previous"
+    opaque = __import__("hashlib").sha256(raw_id.encode()).hexdigest()[:16]
+    (tmp_path / "daily-state.json").write_text(json.dumps({
+        "messages": {raw_id: {"draft_id": "d_previous"}},
+    }), encoding="utf-8")
+    review = tmp_path / "review"
+    review.mkdir()
+    (review / "latest.json").write_text(json.dumps({
+        "created_at": "2026-09-09T16:00:00+00:00", "applied": True,
+        "messages": [{
+            "opaque_message_id": opaque, "draft_created": True,
+            "labels": {"state": "applied", "names": ["Triage/Processed"]},
+        }],
+    }), encoding="utf-8")
+    path = tmp_path / "rollback" / "1788969600-00000.json"
+    journal = RollbackJournal(path, "1788969600")
+    journal.record_labels(raw_id, ["Triage/Processed"])
+    journal.record_draft(raw_id, "d_previous")
+    journal.complete()
+    journal.mark_undone()
+
+    assert latest_summary(tmp_path) is None

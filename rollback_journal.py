@@ -141,7 +141,7 @@ def group_journals(active, group_id):
             for path, document in zip(paths, documents)]
 
 
-def latest_summary(active):
+def latest_summary(active, _allow_bootstrap=True):
     directory = Path(active) / "rollback"
     try:
         paths = sorted(directory.glob("*.json"), reverse=True)
@@ -157,8 +157,8 @@ def latest_summary(active):
             continue
         groups.setdefault(document["group_id"], []).append(document)
     if not groups:
-        if _bootstrap_latest_report(active):
-            return latest_summary(active)
+        if _allow_bootstrap and _bootstrap_latest_report(active):
+            return latest_summary(active, _allow_bootstrap=False)
         return None
     group_id = max(groups)
     entries = [entry for document in groups[group_id]
