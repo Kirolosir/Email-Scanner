@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import html
 import json
+import logging
 import re
 from pathlib import Path
 from urllib.parse import parse_qs, quote
@@ -24,6 +25,8 @@ import hosted_settings
 from hosted_status import HostedConfig, status_document
 from rollback_journal import latest_summary
 
+
+logger = logging.getLogger(__name__)
 
 SESSION_COOKIE = "email_scanner_session"
 MAX_FORM_BYTES = 8192
@@ -790,9 +793,32 @@ class HostedDashboardApp:
                             occupant, "Gmail disconnect is temporarily unavailable."
                         ),
                     )
+                from hosted_control import HostedControlError
+
                 try:
                     self.control.disconnect(form.get("confirmation", ""))
+                except HostedControlError as exc:
+                    # This message is documented as user-safe (never token or
+                    # OAuth detail) and already says exactly what went wrong -
+                    # a real mismatch, or no account connected - so it is
+                    # shown as-is rather than replaced with a guess.
+                    try:
+                        occupant = connection.current(self.config.state_root)
+                    except connection.ConnectionConfigError:
+                        occupant = None
+                    if occupant is not None:
+                        return self._respond(
+                            start_response, "400 Bad Request",
+                            self._signout_page(occupant, str(exc)),
+                        )
                 except Exception:  # noqa: BLE001 - keep provider detail private
+                    # Anything else - a lock, an archive write, a revocation
+                    # call - is not a confirmation mismatch, and telling the
+                    # owner to retype an address they already typed correctly
+                    # only hides the real fault. Logged here because
+                    # disconnect() itself never does, and this was previously
+                    # the only place such a failure could be seen at all.
+                    logger.exception("Gmail disconnect failed")
                     try:
                         occupant = connection.current(self.config.state_root)
                     except connection.ConnectionConfigError:
@@ -802,8 +828,8 @@ class HostedDashboardApp:
                             start_response, "400 Bad Request",
                             self._signout_page(
                                 occupant,
-                                "Sign out was refused. Type the connected Gmail "
-                                "address exactly.",
+                                "Sign out failed unexpectedly. Try again in a "
+                                "moment.",
                             ),
                         )
             return self._redirect(
@@ -951,9 +977,29 @@ class HostedDashboardApp:
                 )
             if self.control is None:
                 return self._redirect(start_response, "/?connect=failed")
+
+            from hosted_control import HostedControlError
+
             try:
                 self.control.disconnect(form.get("confirmation", ""))
+            except HostedControlError as exc:
+                # User-safe by construction: a real mismatch, or no account
+                # connected. Shown as-is rather than replaced with a guess.
+                try:
+                    occupant = connection.current(self.config.state_root)
+                except connection.ConnectionConfigError:
+                    occupant = None
+                if occupant is None:
+                    return self._redirect(start_response, "/")
+                return self._respond(
+                    start_response, "400 Bad Request",
+                    self._settings_page(occupant, error=str(exc)),
+                )
             except Exception:  # noqa: BLE001 - KMS/revocation detail stays private
+                # Not a confirmation mismatch - a lock, an archive write, a
+                # revocation call. Telling the owner to retype an address
+                # they already typed correctly only hides the real fault.
+                logger.exception("Gmail disconnect failed")
                 try:
                     occupant = connection.current(self.config.state_root)
                 except connection.ConnectionConfigError:
@@ -963,10 +1009,9 @@ class HostedDashboardApp:
                 return self._respond(
                     start_response, "400 Bad Request",
                     self._settings_page(
-                        occupant, error=(
-                            "disconnect was refused; type the connected Gmail "
-                            "address exactly"
-                        ),
+                        occupant,
+                        error="disconnect failed unexpectedly; try again in "
+                              "a moment",
                     ),
                 )
             return self._redirect(start_response, "/?disconnected=1")

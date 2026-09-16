@@ -216,6 +216,44 @@ def test_signout_confirmation_disconnects_gmail_and_clears_session(tmp_path):
 
 
 def test_signout_refuses_wrong_address_without_clearing_session(tmp_path):
+    """A real HostedControlError, not a stand-in.
+
+    Previously this test raised a bare ValueError, which happened to produce
+    this exact message only because the old code showed the same wording for
+    every exception - it was not actually testing a wrong-address mismatch.
+    HostedControlError is what disconnect() genuinely raises for one.
+    """
+    from hosted_control import HostedControlError
+
+    address = "owner@example.test"
+    connection.connect(tmp_path, address)
+
+    class Control:
+        def disconnect(self, confirmation):
+            raise HostedControlError(
+                "type the connected Gmail address exactly to disconnect"
+            )
+
+    app = _app(tmp_path, control=Control())
+    response = _call(
+        app, "/logout", "POST",
+        urlencode({"csrf": app._csrf_value(), "confirmation": "wrong@example.test"}),
+        _login(app),
+    )
+    assert response["status"].startswith("400")
+    assert "type the connected Gmail address exactly" in response["body"]
+    assert "Set-Cookie" not in response["headers"]
+    assert connection.current(tmp_path).account == address
+
+
+def test_signout_does_not_blame_the_typed_address_for_an_unrelated_failure(
+        tmp_path):
+    """The regression: a lock, an archive write, a revocation call - none of
+    these are a confirmation mismatch, and the address was typed correctly.
+    Telling the owner to retype it hides the real fault. This was reported
+    live: a real disconnect failed with this exact misleading message even
+    though the address was typed correctly.
+    """
     address = "owner@example.test"
     connection.connect(tmp_path, address)
 
@@ -226,14 +264,40 @@ def test_signout_refuses_wrong_address_without_clearing_session(tmp_path):
     app = _app(tmp_path, control=Control())
     response = _call(
         app, "/logout", "POST",
-        urlencode({"csrf": app._csrf_value(), "confirmation": "wrong@example.test"}),
+        urlencode({"csrf": app._csrf_value(), "confirmation": address}),
         _login(app),
     )
     assert response["status"].startswith("400")
-    assert "Type the connected Gmail address exactly" in response["body"]
+    assert "type the connected Gmail address exactly" not in response["body"].lower()
+    assert "unexpectedly" in response["body"]
+    assert "private disconnect detail" not in response["body"]
     assert "Set-Cookie" not in response["headers"]
     assert connection.current(tmp_path).account == address
-    assert "private disconnect detail" not in response["body"]
+
+
+def test_the_unrelated_signout_failure_is_logged_for_diagnosis(tmp_path, caplog):
+    """disconnect() itself never logs; before this fix, this was the only
+    place such a failure could be seen at all - and it was hidden."""
+    import logging
+
+    address = "owner@example.test"
+    connection.connect(tmp_path, address)
+
+    class Control:
+        def disconnect(self, confirmation):
+            raise ValueError("private disconnect detail")
+
+    app = _app(tmp_path, control=Control())
+    with caplog.at_level(logging.ERROR, logger="hosted_dashboard"):
+        _call(
+            app, "/logout", "POST",
+            urlencode({"csrf": app._csrf_value(), "confirmation": address}),
+            _login(app),
+        )
+    assert any("disconnect" in record.message.lower()
+              for record in caplog.records)
+    assert any("private disconnect detail" in str(record.exc_info)
+              for record in caplog.records if record.exc_info)
 
 
 def test_connected_owner_can_open_and_save_settings(tmp_path):
@@ -742,6 +806,55 @@ def test_disconnect_requires_csrf_and_passes_typed_address(tmp_path):
     assert response["status"].startswith("303")
     assert response["headers"]["Location"] == "/?disconnected=1"
     assert control.confirmations == [address]
+
+
+def test_disconnect_shows_the_real_mismatch_message(tmp_path):
+    from hosted_control import HostedControlError
+
+    address = "owner@example.test"
+    connection.connect(tmp_path, address)
+
+    class Control:
+        def disconnect(self, confirmation):
+            raise HostedControlError(
+                "type the connected Gmail address exactly to disconnect"
+            )
+
+    app = _app(tmp_path, control=Control())
+    response = _call(
+        app, "/disconnect", "POST",
+        urlencode({"csrf": app._csrf_value(), "confirmation": "wrong@example.test"}),
+        _login(app),
+    )
+    assert response["status"].startswith("400")
+    assert "type the connected Gmail address exactly" in response["body"]
+    assert connection.current(tmp_path).account == address
+
+
+def test_disconnect_does_not_blame_the_typed_address_for_an_unrelated_failure(
+        tmp_path):
+    """The same live regression, on the settings-page route this time - the
+    one actually reported: typed correctly, refused anyway, blaming the
+    address for an unrelated failure.
+    """
+    address = "owner@example.test"
+    connection.connect(tmp_path, address)
+
+    class Control:
+        def disconnect(self, confirmation):
+            raise RuntimeError("private KMS detail")
+
+    app = _app(tmp_path, control=Control())
+    response = _call(
+        app, "/disconnect", "POST",
+        urlencode({"csrf": app._csrf_value(), "confirmation": address}),
+        _login(app),
+    )
+    assert response["status"].startswith("400")
+    assert "type the connected gmail address exactly" not in response["body"].lower()
+    assert "unexpectedly" in response["body"]
+    assert "private KMS detail" not in response["body"]
+    assert connection.current(tmp_path).account == address
 
 
 def test_service_binds_to_loopback_and_runs_unprivileged():
