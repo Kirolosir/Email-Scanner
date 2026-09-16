@@ -1496,6 +1496,7 @@ class HostedDashboardApp:
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{html.escape(title)} · Email Scanner</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='7.2' fill='%230071e3'/%3E%3Crect x='2.75' y='5.25' width='18.5' height='13.5' rx='2.75' fill='none' stroke='%23fff' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M4 7.5 12 13.25 20 7.5' fill='none' stroke='%23fff' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <style>
 /* Email Scanner — Apple-style UI refresh
    Drop-in replacement for the <style> block in hosted_dashboard.py :: _page().
