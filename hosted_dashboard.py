@@ -29,6 +29,17 @@ from rollback_journal import latest_summary
 logger = logging.getLogger(__name__)
 
 SESSION_COOKIE = "email_scanner_session"
+# Without an explicit Max-Age this was a browser session cookie, cleared the
+# moment the browser was fully quit rather than just the tab closed - the
+# owner had to click "Continue with Google" again on every fresh browser
+# launch, even though the underlying Gmail grant (production OAuth, not
+# testing mode) was still good for months. 30 days trades that friction
+# against a real cost: this cookie is one static value shared by every
+# session rather than per-login, so there is no way to sign out one device
+# without signing out all of them, and quitting the browser was the only
+# thing that ever cleared a stale one. A device that stays signed in now
+# stays signed in for the full window instead of clearing itself on its own.
+SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
 MAX_FORM_BYTES = 8192
 RUN_REFRESH_SECONDS = 4
 MAX_RUN_FEEDBACK_AGE = dt.timedelta(days=2)
@@ -505,7 +516,9 @@ class HostedDashboardApp:
     def _session_cookie(self, clear=False):
         secure = "; Secure" if self.config.require_forwarded_https else ""
         value = "" if clear else self._session_value()
-        maximum = "; Max-Age=0" if clear else ""
+        maximum = (
+            "; Max-Age=0" if clear else f"; Max-Age={SESSION_MAX_AGE_SECONDS}"
+        )
         return (
             f"{SESSION_COOKIE}={value}; Path=/; HttpOnly; SameSite=Lax"
             f"{secure}{maximum}"

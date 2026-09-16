@@ -106,6 +106,26 @@ def test_oauth_session_cookie_survives_the_cross_site_return(tmp_path):
     assert "SameSite=Strict" not in cookie
 
 
+def test_the_login_session_persists_across_a_full_browser_restart(tmp_path):
+    """Without an explicit Max-Age this was a plain session cookie, cleared
+    the moment the browser was fully quit rather than just the tab closed -
+    reported live as having to click "Continue with Google" again on every
+    fresh launch, despite the underlying Gmail grant still being good.
+    """
+    from hosted_dashboard import SESSION_MAX_AGE_SECONDS
+
+    assert SESSION_MAX_AGE_SECONDS == 30 * 24 * 60 * 60
+    cookie = _app(tmp_path)._session_cookie()
+    assert f"Max-Age={SESSION_MAX_AGE_SECONDS}" in cookie
+
+
+def test_signing_out_still_clears_the_session_immediately(tmp_path):
+    """The persistence above must not weaken an explicit sign-out."""
+    cookie = _app(tmp_path)._session_cookie(clear=True)
+    assert "Max-Age=0" in cookie
+    assert str(30 * 24 * 60 * 60) not in cookie
+
+
 def test_login_cookie_opens_the_dashboard(tmp_path):
     app = _app(tmp_path)
     response = _call(app, cookie=_login(app))
