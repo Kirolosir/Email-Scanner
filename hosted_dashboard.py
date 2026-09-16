@@ -73,7 +73,7 @@ HTML_HEADERS = [
     ("X-Frame-Options", "DENY"),
     ("Referrer-Policy", "no-referrer"),
     ("Content-Security-Policy", (
-        "default-src 'none'; style-src 'unsafe-inline'; "
+        "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; "
         "form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
     )),
 ]

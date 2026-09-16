@@ -804,3 +804,27 @@ def test_a_stray_query_string_on_favicon_still_serves_it(tmp_path):
     app = _app(tmp_path)
     response = _call(app, "/favicon.ico", query="v=2")
     assert response["status"].startswith("200")
+
+
+def test_the_csp_allows_the_data_uri_favicon_to_actually_load(tmp_path):
+    """The regression: default-src 'none' with no img-src override blocks
+    every image load, including the <link rel="icon" href="data:..."> tag
+    itself - silently, with no visible error on the page. A private window
+    still showed no icon because of this, independent of any caching.
+    """
+    app = _app(tmp_path)
+    response = _call(app, "/login")
+    csp = response["headers"]["Content-Security-Policy"]
+    assert "img-src 'self' data:" in csp
+    assert "default-src 'none'" in csp
+
+
+def test_the_favicon_href_scheme_is_actually_permitted_by_the_csp(tmp_path):
+    """Pins the two together: the href really is a data: URI, and the
+    policy really does allow that scheme for images."""
+    from hosted_dashboard import FAVICON_HREF
+    assert FAVICON_HREF.startswith("data:image/svg+xml,")
+    app = _app(tmp_path)
+    csp = _call(app, "/login")["headers"]["Content-Security-Policy"]
+    img_src = next(part for part in csp.split(";") if "img-src" in part)
+    assert "data:" in img_src
