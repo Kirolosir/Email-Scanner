@@ -1,153 +1,90 @@
-
-# Email Drafting Tool
+# AI-Assisted Email Triage & Drafting Platform
 
 [![Tests](https://github.com/Kirolosir/Email-Scanner/actions/workflows/tests.yml/badge.svg)](https://github.com/Kirolosir/Email-Scanner/actions/workflows/tests.yml)
 
 [Live application](https://email-scanner.136-116-196-15.nip.io/login)
 
-This is a Python tool for sorting a Gmail inbox and saving reply drafts. It
-never sends mail. The person using the account opens each draft in Gmail and
-decides whether to edit, send, or delete it.
+A production-deployed Gmail triage and drafting system built for a high-volume recruiting inbox. The platform classifies incoming mail, applies Gmail labels, prepares reply drafts, and leaves every message for human review before anything is sent.
 
-The project combines a small Python web dashboard, Google OAuth, the Gmail API,
-scheduled background work, and Gemini-powered classification and reply
-generation.
+The system is designed around a strict no-send boundary: it can read, label, and draft, but production code contains no Gmail send operation.
 
 ![Dashboard overview](docs/images/dashboard-overview.png)
 
-![Inbox settings](docs/images/dashboard-settings.png)
-
 _Screenshots use synthetic account and run data._
+
+## Stack
+
+Python, Gmail API, Gemini API, Google OAuth 2.0, Google Cloud KMS, pytest
 
 ## Engineering highlights
 
-- Account-bound Google OAuth with one connected Gmail account at a time.
-- Envelope-encrypted credentials and backups backed by Cloud KMS.
-- Idempotent message and draft journals that make interrupted runs safe to
-  resume.
-- Account-bound rollback journals that undo only the latest run's recorded
-  drafts and label additions.
-- Bounded retry queues for transient Gmail and generation failures.
-- PII-free operational status, structured coverage reports, and usage metrics.
-- A tested no-send boundary: the application can label mail and create drafts,
-  but production code contains no Gmail send operation.
+- Processes a 9,000+ message recruiting inbox while keeping final communication under human control.
+- Uses account-bound OAuth so credentials and approvals cannot be reused across Gmail accounts.
+- Encrypts stored credentials and rotating backups with Google Cloud KMS.
+- Uses idempotent message and draft journals to prevent duplicate work across interrupted or repeated runs.
+- Supports resumable background jobs, bounded retries, and per-message failure isolation for large inbox scans.
+- Reconciles saved processing state with Gmail so deleted program-created drafts can be safely rebuilt.
+- Provides guarded rollback that removes only the drafts and label changes created by the selected run.
+- Publishes content-free reliability and usage metrics without exposing message bodies or personal data.
+- Enforces the no-send rule through both application structure and automated tests.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
     Browser[Owner dashboard] --> Web[Dashboard service]
-    Web --> State[(Private state)]
-    Timer[One-minute job check] --> Runner[Bounded runner]
+    Web --> State[(Encrypted state)]
+    Timer[Scheduled job check] --> Runner[Bounded worker]
     Runner --> Gmail[Gmail API]
     Runner --> Gemini[Gemini API]
     Runner --> State
-    Runner --> KMS[Cloud KMS encryption]
+    Runner --> KMS[Google Cloud KMS]
 ```
 
-## What it does
+## Core workflows
 
-The project has two workflows.
+### Inbox triage
 
-`campaign.py` handles a one-time message sent to a known group, such as a
-clinic announcement. It reads an existing Gmail label, groups messages by
-sender address, and uses the newest thread for each person. This prevents ten
-emails from the same recruit from producing ten copies of the same draft.
+The triage pipeline scans eligible Gmail messages, classifies them into account-configured categories, applies the matching labels, and prepares drafts for messages with a safe reply address.
 
-A protected campaign cannot create drafts from an unreviewed list. The tool
-first produces the recipient list for inspection. A separate approval file
-records the Gmail account, label, and addresses that were approved. Every
-created draft ID is written to a private log. If the run needs to be undone,
-the rollback command moves only those drafts to Trash.
+Recent-mail scans use an overlap window plus a local completion journal so delayed messages are still found without drafting the same message twice. Larger scans run as resumable jobs and continue from saved progress instead of restarting the entire inbox.
 
-`triage.py` and `daily_triage.py` handle regular inbox mail. The first run can
-look back about two months. Later runs use a three-day overlap and a local
-journal so delayed mail is still found without creating another draft for a
-message that was already handled. Scheduled runs require explicit scan, write,
-and draft caps and can produce a private, content-free review report.
+Messages with unsafe or ambiguous reply metadata are not drafted. Spam, trash, sent mail, existing drafts, bounce addresses, self-replies, and malformed reply targets are excluded from draft creation.
 
-The hosted dashboard turns those internal caps into one message batch size and
-reserves enough writes and drafts to finish every eligible message in the
-batch. **Scan new mail** checks the recent overlap window. **Scan previous
-emails** accepts a number from 1 to 5,000 and checks that many of the newest
-eligible messages without an age cutoff. Scans above 100 messages use the
-provider's batch service in concurrent groups of up to 200. The resumable
-background worker completes up to 1,000 messages per pass and releases the
-inbox between passes so recent-mail scans stay responsive. Smaller scans
-read, analyze, and write with up to four quota-paced workers. Successful
-messages combine
-their category and completion labels into one Gmail update.
+### Recruiting metadata
 
-The dashboard shows live analysis and drafting progress, keeps failed runs
-visible until they are resolved, and provides a review queue with direct links
-to Gmail drafts. Its guarded undo action previews the latest run, requires a
-typed confirmation, moves only that run's new drafts to Trash, removes only its
-recorded label additions, and makes those messages eligible to scan again. The
-undo covers the complete run without a draft or label count limit. A
-coach profile stores the owner's role, program, signature,
-and voice guidance. For recruiting messages, the classifier also extracts the
-stated recruit name, graduation year, position, school or club, and location.
-The dashboard marks these details as model-extracted so the coach verifies them
-against the original email before sending.
+For recruiting messages, the classifier can extract the stated recruit name, graduation year, position, school or club, and location. These values are displayed for review rather than treated as verified facts.
 
-Each completed run also publishes a content-free reliability summary. It
-separates created, preserved, and rebuilt drafts from messages without a safe
-reply address and from retrieval or generation failures. Temporary failures
-enter a private, bounded retry queue; the one-minute worker resumes
-only the due messages, so a large history job does not need to start over.
-Configuration and bounded run history are encrypted with the deployment key,
-written to rotating backups, decrypted immediately for an integrity check, and
-covered by an offline restore test. The dashboard reports Gmail requests and
-retries, quota units, model calls and tokens, estimated standard paid-tier
-cost, run time, average run time, queue depth, and backup health.
+Graduation-year labels require both a high-confidence recruiting classification and matching year evidence in the current message. Quoted replies, signatures, phone numbers, dates, and unrelated numbers do not qualify.
 
-Triage assigns messages to categories configured for that account, then adds
-the matching Gmail labels. Existing labels are left alone. A one-time,
-account-bound activation can enable an unsent generated draft for every message
-with a safe, unambiguous reply address. The current account-wide policy includes
-mailing-list, bulk-precedence, and auto-submitted messages when they still have
-a safe reply address. Spam, trash, sent mail, existing drafts, bounce/no-reply
-targets, self-replies, missing or ambiguous addresses, and malformed reply
-metadata never get a new draft. Uncertain messages receive the configured Other
-and Needs Review labels plus a neutral acknowledgement draft.
+### Campaign drafting
 
-For account-wide runs, saved completion state is checked against the drafts
-that currently exist in Gmail. If a program-created draft was deleted, the
-message becomes eligible again and the missing draft is rebuilt. Hosted label
-defaults use ordinary Gmail names such as `Finance`, `Other`, `Needs Review`,
-and `Processed`; they do not add a machine-specific prefix.
+The campaign workflow prepares one draft per recipient from an approved Gmail label. Messages are grouped by sender and the newest thread is used, preventing repeated conversations with the same person from creating duplicate campaign drafts.
 
-The activation is off by default and tied to a digest of the account settings.
-The account owner must type the full confirmation; `--yes` cannot create it.
-Every generated reply remains in Gmail Drafts for the owner to review, edit,
-send manually, or discard. Failed or rejected generation is retried once, then
-replaced with a fact-free acknowledgement. Older
-category-specific and fixed-template approvals remain supported for migration.
+Campaign runs require an inspected recipient list and account-bound approval before drafts can be created. Every created draft is journaled so the run can be rolled back precisely.
 
-Recruiting-year labels have their own check. A classification alone cannot add
-one. The sender must be a recruit, the category must be relevant, confidence
-must be high, and the current message must contain matching year evidence.
-Quoted replies, signatures, dates, telephone numbers, and unrelated numbers do
-not count. The same rule applies whether or not a reply draft is created.
+## Reliability and safety
 
-Google's `gmail.modify` scope technically permits sending email, but this tool
-does not send. That boundary is enforced through application code and tests,
-not through the OAuth permission itself.
+The worker uses bounded retry queues for temporary Gmail or generation failures. Each message is isolated so one bad message does not stop the rest of the run.
 
-## Offline tests
+Configuration and run history are encrypted, written to rotating backups, and checked after backup creation. The dashboard reports request counts, retries, quota usage, model usage, queue depth, run timing, and backup health without exposing message content.
 
-Create the virtual environment and install the dependencies described in the
-detailed guide. From the project directory, run:
+Google's Gmail modify scope technically permits sending mail, but this application never calls the send endpoint. Draft review and sending remain manual actions inside Gmail.
 
-```sh
+## Testing
+
+```bash
 .venv/bin/python -m pytest -q
 ```
 
-The test suite is offline and uses synthetic messages, fake Gmail objects, and
-stub classifiers. It does not connect to Gmail, Gemini, OAuth, or the hosted
-authorization service. The suite checks the no-send rule, add-only normal
-labeling, exact rollback removal, approval binding, recruiting-year evidence,
-duplicate prevention, and the hosted authorization code. A passing test run checks the local code;
-it does not grant access to a Gmail account.
+The test suite runs offline with synthetic messages, fake Gmail objects, and stubbed classifiers. Coverage includes:
 
-Full setup, safety architecture, and rollout details: see [DETAILS.md](DETAILS.md).
+- no-send enforcement
+- duplicate prevention
+- approval binding
+- rollback behavior
+- recruiting-year evidence rules
+- retry and recovery paths
+- hosted authorization behavior
+
+Full setup and implementation details are in [DETAILS.md](DETAILS.md).
