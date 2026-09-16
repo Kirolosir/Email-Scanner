@@ -752,3 +752,55 @@ def test_service_binds_to_loopback_and_runs_unprivileged():
     assert "ProtectSystem=strict" in unit
     assert "ReadWritePaths=/mnt/state" in unit
     assert "--access-logfile /dev/null" in unit
+
+
+def test_favicon_is_served_without_a_session(tmp_path):
+    """The regression: browsers probe /favicon.ico on their own, unauthenticated.
+
+    Before this route existed, an unrecognized path fell through to the
+    session gate and got 303'd to /login - so a browser that fetched
+    /favicon.ico directly (most do, independent of the <link> tag) received
+    a redirect instead of an icon, and many browsers cache that failure
+    stubbornly rather than retrying it after the page's <link> tag arrives.
+    """
+    app = _app(tmp_path)
+    response = _call(app, "/favicon.ico")
+    assert response["status"].startswith("200")
+    assert not response["status"].startswith("303")
+    assert response["headers"]["Content-Type"] == "image/svg+xml"
+
+
+def test_favicon_body_matches_the_shared_source():
+    from hosted_dashboard import FAVICON_SVG
+    app = _app(Path("/tmp"))
+    response = _call(app, "/favicon.ico")
+    assert response["body"] == FAVICON_SVG
+
+
+def test_favicon_is_cacheable_unlike_the_no_store_dashboard_pages(tmp_path):
+    """A static, non-sensitive asset should not force a refetch on every load."""
+    app = _app(tmp_path)
+    response = _call(app, "/favicon.ico")
+    assert "no-store" not in response["headers"]["Cache-Control"]
+    assert "max-age" in response["headers"]["Cache-Control"]
+
+
+def test_favicon_head_request_returns_no_body(tmp_path):
+    app = _app(tmp_path)
+    response = _call(app, "/favicon.ico", method="HEAD")
+    assert response["status"].startswith("200")
+    assert response["body"] == ""
+
+
+def test_the_in_page_link_tag_uses_the_same_favicon_source(tmp_path):
+    """Pins the two together so they cannot silently drift apart."""
+    from hosted_dashboard import FAVICON_HREF
+    app = _app(tmp_path)
+    response = _call(app, "/login")
+    assert f'href="{FAVICON_HREF}"' in response["body"]
+
+
+def test_a_stray_query_string_on_favicon_still_serves_it(tmp_path):
+    app = _app(tmp_path)
+    response = _call(app, "/favicon.ico", query="v=2")
+    assert response["status"].startswith("200")

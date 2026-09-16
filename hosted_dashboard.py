@@ -15,7 +15,7 @@ import html
 import json
 import re
 from pathlib import Path
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote
 
 import connection
 import connection_schedule
@@ -41,6 +41,24 @@ COUNT_KEYS = (
     "estimated_cost_microusd", "duration_seconds", "average_duration_seconds",
     "backup_verified", "backup_failures",
 )
+
+# The envelope mark, as plain SVG source. The one source of truth for both
+# the in-page <link rel="icon"> (built from it below) and the direct
+# /favicon.ico route: browsers commonly probe /favicon.ico on their own,
+# separately from the <link> tag, and cache a failed answer there stubbornly,
+# so the icon has to be reachable at that literal path too, not just embedded
+# in the page.
+FAVICON_SVG = (
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'>"
+    "<rect width='24' height='24' rx='7.2' fill='#0071e3'/>"
+    "<rect x='2.75' y='5.25' width='18.5' height='13.5' rx='2.75' fill='none' "
+    "stroke='#fff' stroke-width='1.9' stroke-linecap='round' "
+    "stroke-linejoin='round'/>"
+    "<path d='M4 7.5 12 13.25 20 7.5' fill='none' stroke='#fff' "
+    "stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'/>"
+    "</svg>"
+)
+FAVICON_HREF = "data:image/svg+xml," + quote(FAVICON_SVG)
 
 HTML_HEADERS = [
     ("Content-Type", "text/html; charset=utf-8"),
@@ -556,6 +574,21 @@ class HostedDashboardApp:
                 self._page("HTTPS required", "<h1>HTTPS is required.</h1>"),
                 head=head,
             )
+
+        # Browsers commonly fetch /favicon.ico on their own, independent of
+        # the <link rel="icon"> tag, and cache a failed answer there
+        # stubbornly - so this has to be a real, unauthenticated route rather
+        # than falling through to the session gate below and 303-ing to
+        # /login, which is what happened before this route existed.
+        if path == "/favicon.ico" and method in {"GET", "HEAD"}:
+            payload = FAVICON_SVG.encode("utf-8")
+            start_response("200 OK", [
+                ("Content-Type", "image/svg+xml"),
+                ("Cache-Control", "public, max-age=604800, immutable"),
+                ("X-Content-Type-Options", "nosniff"),
+                ("Content-Length", str(len(payload))),
+            ])
+            return [b"" if head else payload]
 
         # OAuth state is the callback's authentication, so this route must be
         # handled before the ordinary dashboard-session gate. The resulting
@@ -1496,7 +1529,7 @@ class HostedDashboardApp:
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{html.escape(title)} · Email Scanner</title>
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='7.2' fill='%230071e3'/%3E%3Crect x='2.75' y='5.25' width='18.5' height='13.5' rx='2.75' fill='none' stroke='%23fff' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M4 7.5 12 13.25 20 7.5' fill='none' stroke='%23fff' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="icon" type="image/svg+xml" href="{FAVICON_HREF}">
 <style>
 /* Email Scanner — Apple-style UI refresh
    Drop-in replacement for the <style> block in hosted_dashboard.py :: _page().
