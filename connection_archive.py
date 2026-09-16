@@ -137,6 +137,18 @@ def disconnect(connection, root, *, revoke=None, token_document=None,
     active = Path(connection.directory)
     destination = archive_path(root, connection.account)
 
+    # archive_path is one fixed location per account, not per disconnect
+    # event - "where one account's archive lives", not "where this disconnect
+    # lands". A returning account that disconnects a second time computes the
+    # exact same destination as its first disconnect. Without this, the
+    # per-entry move below hits a directory already occupied by the prior
+    # archive and shutil.move refuses it outright - observed live, crashing
+    # every disconnect attempt for an account that had ever disconnected
+    # before. This disconnect's archive replaces the last one, matching the
+    # single-slot design restore() and restorable() already assume.
+    if destination.exists():
+        shutil.rmtree(destination, ignore_errors=True)
+
     # Revoke first, while the token still exists, but never let the outcome
     # decide whether the local copy is destroyed.
     revocation = "not attempted"

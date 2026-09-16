@@ -112,6 +112,40 @@ def test_disconnect_vacates_the_deployment(tmp_path):
     assert not connection.directory.exists()
 
 
+def test_a_second_disconnect_of_the_same_account_replaces_the_first_archive(
+        tmp_path):
+    """The live regression: archive_path is one fixed location per account,
+    not per disconnect event, so a returning account's second disconnect
+    computes the exact same destination as its first. Reported live as a
+    crash - shutil.move refusing a destination already occupied by the
+    prior archive - on every attempt to disconnect an account that had ever
+    disconnected before.
+    """
+    # Unfixed, the second cycle doesn't crash yet - shutil.move sees an
+    # existing destination directory and nests the source one level inside
+    # it instead. It's the THIRD cycle that collides with that nested path
+    # and raises shutil.Error, matching the exact live traceback. Three
+    # rounds reproduces the real incident rather than only its first,
+    # quieter symptom.
+    for round_number in range(1, 4):
+        connection = _populated(tmp_path)
+        (connection.directory / "draft-logs" / "d.log").write_text(
+            f"draft-round-{round_number}\n", encoding="utf-8")
+        manifest = disconnect(
+            connection, tmp_path, now=T0 + dt.timedelta(days=round_number)
+        )
+        assert manifest["archived_at"] != ""
+
+    directory = archive_path(tmp_path, A)
+    assert (directory / "draft-logs" / "d.log").read_text(
+        encoding="utf-8") == "draft-round-3\n"
+    # Exactly the last round's manifest, not a merge of all three - one file
+    # at this exact path, not nested deeper by a collision.
+    assert list((directory / "draft-logs").iterdir()) == [
+        directory / "draft-logs" / "d.log"
+    ]
+
+
 def test_the_token_is_destroyed_and_exists_nowhere_afterwards(tmp_path):
     connection = _populated(tmp_path)
     disconnect(connection, tmp_path, now=T0)
