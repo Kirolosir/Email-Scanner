@@ -48,14 +48,20 @@ COUNT_KEYS = (
 # separately from the <link> tag, and cache a failed answer there stubbornly,
 # so the icon has to be reachable at that literal path too, not just embedded
 # in the page.
+#
+# FILLED shapes, not thin strokes. The in-page .mark glyph (in the CSS below)
+# uses a thin-stroke outline and reads fine there because it renders at
+# 30-56px. A favicon renders at 16-32px through each browser's own tab-icon
+# pipeline, which is commonly cruder than ordinary image rendering and can
+# lose a ~2px stroke entirely - a real report showed exactly a plain blue
+# square with the envelope lines gone. A solid fill has no thin line to
+# lose, so it is the robust choice for this specific use regardless of the
+# exact cause.
 FAVICON_SVG = (
     "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'>"
     "<rect width='24' height='24' rx='7.2' fill='#0071e3'/>"
-    "<rect x='2.75' y='5.25' width='18.5' height='13.5' rx='2.75' fill='none' "
-    "stroke='#fff' stroke-width='1.9' stroke-linecap='round' "
-    "stroke-linejoin='round'/>"
-    "<path d='M4 7.5 12 13.25 20 7.5' fill='none' stroke='#fff' "
-    "stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'/>"
+    "<rect x='3' y='6' width='18' height='12.5' rx='2' fill='#fff'/>"
+    "<path d='M3 6.8 12 13.6 21 6.8 21 6 3 6Z' fill='#0071e3'/>"
     "</svg>"
 )
 FAVICON_HREF = "data:image/svg+xml," + quote(FAVICON_SVG)
