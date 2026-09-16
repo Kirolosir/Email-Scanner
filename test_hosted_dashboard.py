@@ -133,6 +133,39 @@ def test_login_cookie_opens_the_dashboard(tmp_path):
     assert "No Gmail account connected" in response["body"]
 
 
+def test_visiting_login_while_already_signed_in_goes_straight_to_the_dashboard(
+        tmp_path):
+    """The actual live report: /login never checked for an existing session,
+    so navigating there directly - a bookmark, an address-bar habit -
+    prompted a fresh sign-in every time even with a perfectly valid,
+    unexpired session cookie already present. The persistent-session fix
+    was correct; it just never got a chance to apply on this route.
+    """
+    app = _app(tmp_path)
+    cookie = _login(app)
+    response = _call(app, "/login", cookie=cookie)
+    assert response["status"].startswith("303")
+    assert response["headers"]["Location"] == "/"
+
+
+def test_visiting_login_signed_out_still_shows_the_form(tmp_path):
+    app = _app(tmp_path)
+    response = _call(app, "/login")
+    assert response["status"].startswith("200")
+    assert "Continue with Google" in response["body"]
+
+
+def test_a_connect_error_is_still_shown_even_when_already_signed_in(tmp_path):
+    """An already-signed-in owner can still hit a "Link Google account"
+    failure, and that error must not be silently swallowed by the redirect.
+    """
+    app = _app(tmp_path)
+    cookie = _login(app)
+    response = _call(app, "/login", cookie=cookie, query="connect=account_mismatch")
+    assert response["status"].startswith("200")
+    assert "One Gmail account is already connected" in response["body"]
+
+
 def test_connected_dashboard_shows_safe_counts_and_labels(tmp_path):
     seat = connection.connect(tmp_path, "owner@example.test")
     (seat.directory / "daily-status.json").write_text(json.dumps({

@@ -636,10 +636,20 @@ class HostedDashboardApp:
             query = parse_qs(
                 str(environ.get("QUERY_STRING", "")), keep_blank_values=True
             )
+            connect_error = (query.get("connect") or [""])[-1]
+            # Visiting /login directly - a bookmark, an address-bar habit -
+            # showed the sign-in form every time regardless of an already
+            # valid session, because this route never checked for one. The
+            # persistent session cookie was working; it just never got the
+            # chance to matter here. An error from a "Link Google account"
+            # attempt still needs to be shown even to an already-signed-in
+            # owner, so the redirect is skipped whenever there is one.
+            if not connect_error and self._session_ok(environ):
+                return self._redirect(start_response, "/")
             return self._respond(
                 start_response, "200 OK",
                 self._login_page(
-                    connect_error=(query.get("connect") or [""])[-1],
+                    connect_error=connect_error,
                     signed_out=query.get("signed_out") == ["1"],
                 ),
                 head=head,
