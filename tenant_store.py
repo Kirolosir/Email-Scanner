@@ -63,6 +63,7 @@ class ClaimedJob:
     processed_count: int
     group_size: int
     attempt_number: int
+    idempotency_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,15 @@ class MailboxView:
     processed_count: int
     requested_count: int | None
     setup_status: str
+    last_job_id: uuid.UUID | None = None
+    last_job_kind: str | None = None
+    last_job_created_at: dt.datetime | None = None
+    last_job_started_at: dt.datetime | None = None
+    last_job_finished_at: dt.datetime | None = None
+    last_job_error_code: str | None = None
+    last_job_group_size: int = 200
+    last_job_attempts: int = 0
+    last_daily_success_at: dt.datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -497,15 +507,31 @@ class PostgresTenantStore:
             cursor.execute(
                 """
                 SELECT m.id, m.address, s.timezone, s.run_at, s.enabled,
-                       s.next_run_at, latest.status, COALESCE(latest.processed_count, 0),
-                       latest.requested_count, m.setup_status
+                       s.next_run_at, latest.status,
+                       COALESCE(latest.processed_count, 0),
+                       latest.requested_count, m.setup_status,
+                       latest.id, latest.kind, latest.created_at,
+                       latest.started_at, latest.finished_at,
+                       latest.last_error_code,
+                       COALESCE(latest.group_size, 200),
+                       COALESCE(latest.attempts, 0), daily.finished_at
                 FROM mailboxes AS m
                 JOIN mailbox_settings AS s ON s.mailbox_id = m.id
                 LEFT JOIN LATERAL (
-                    SELECT status, processed_count, requested_count
-                    FROM jobs WHERE mailbox_id = m.id
-                    ORDER BY created_at DESC LIMIT 1
+                    SELECT j.id, j.kind, j.status, j.processed_count,
+                           j.requested_count, j.created_at, j.started_at,
+                           j.finished_at, j.last_error_code, j.group_size,
+                           (SELECT count(*) FROM job_attempts AS a
+                            WHERE a.job_id = j.id) AS attempts
+                    FROM jobs AS j WHERE j.mailbox_id = m.id
+                    ORDER BY j.created_at DESC LIMIT 1
                 ) AS latest ON true
+                LEFT JOIN LATERAL (
+                    SELECT j.finished_at FROM jobs AS j
+                    WHERE j.mailbox_id = m.id AND j.kind = 'daily'
+                      AND j.status = 'succeeded'
+                    ORDER BY j.finished_at DESC NULLS LAST LIMIT 1
+                ) AS daily ON true
                 WHERE m.user_id = %s AND m.disconnected_at IS NULL
                 ORDER BY lower(m.address)
                 """,
@@ -543,6 +569,38 @@ class PostgresTenantStore:
                 )
                 if cursor.fetchone() is None:
                     raise TenantAccessDenied("mailbox not found")
+
+    def set_mailbox_enabled(self, user_id, mailbox_id, enabled, *, now=None):
+        now = now or _utc_now()
+        with self.database.transaction():
+            with self.database.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT s.timezone, s.run_at
+                    FROM mailbox_settings AS s
+                    JOIN mailboxes AS m ON m.id = s.mailbox_id
+                    WHERE s.mailbox_id = %s AND m.user_id = %s
+                      AND m.disconnected_at IS NULL
+                    FOR UPDATE OF s
+                    """,
+                    (mailbox_id, user_id),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise TenantAccessDenied("mailbox not found")
+                next_run = (
+                    next_scheduled_run(row[0], row[1], now)
+                    if enabled else None
+                )
+                cursor.execute(
+                    """
+                    UPDATE mailbox_settings
+                    SET enabled = %s, next_run_at = %s, updated_at = %s
+                    WHERE mailbox_id = %s
+                    """,
+                    (bool(enabled), next_run, now, mailbox_id),
+                )
+        return True
 
     def set_mailbox_setup(self, user_id, mailbox_id, status, *, error_code=None):
         if status not in {"pending", "ready", "error"}:
@@ -634,6 +692,49 @@ class PostgresTenantStore:
             raise TenantAccessDenied("mailbox not found")
         return row[0]
 
+    def enqueue_job_if_idle(self, user_id, mailbox_id, kind, idempotency_key,
+                            *, requested_count=None, run_after=None):
+        """Queue one operation while holding the tenant-owned mailbox row."""
+        if kind not in ALLOWED_JOB_KINDS:
+            raise TenantStoreError("unsupported job kind")
+        if requested_count is not None and not 1 <= requested_count <= 5000:
+            raise TenantStoreError("requested count must be between 1 and 5000")
+        job_id = uuid.uuid4()
+        with self.database.transaction():
+            with self.database.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT id FROM mailboxes
+                    WHERE id = %s AND user_id = %s AND disconnected_at IS NULL
+                    FOR UPDATE
+                    """,
+                    (mailbox_id, user_id),
+                )
+                if cursor.fetchone() is None:
+                    raise TenantAccessDenied("mailbox not found")
+                cursor.execute(
+                    """
+                    SELECT 1 FROM jobs
+                    WHERE mailbox_id = %s AND status IN ('queued', 'running')
+                    LIMIT 1
+                    """,
+                    (mailbox_id,),
+                )
+                if cursor.fetchone() is not None:
+                    return None
+                cursor.execute(
+                    """
+                    INSERT INTO jobs
+                        (id, mailbox_id, kind, idempotency_key,
+                         requested_count, run_after)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (job_id, mailbox_id, kind, str(idempotency_key),
+                     requested_count, run_after or _utc_now()),
+                )
+                return cursor.fetchone()[0]
+
     def enqueue_due_jobs(self, *, now=None, limit=100):
         """Move due schedules into the queue without double-enqueueing."""
         now = now or _utc_now()
@@ -724,7 +825,8 @@ class PostgresTenantStore:
                     FROM candidate AS c
                     WHERE j.id = c.id
                     RETURNING j.id, j.mailbox_id, j.kind, j.requested_count,
-                              j.processed_count, j.group_size
+                              j.processed_count, j.group_size,
+                              j.idempotency_key
                     """,
                     (now, now, now + lease, str(worker_id)),
                 )
@@ -742,7 +844,7 @@ class PostgresTenantStore:
                     (attempt_id, row[0], now, row[0]),
                 )
                 attempt_number = cursor.fetchone()[0]
-        return ClaimedJob(*row, attempt_number)
+        return ClaimedJob(*row[:6], attempt_number, row[6])
 
     def update_job_progress(self, job_id, worker_id, processed_count,
                             *, now=None, lease=dt.timedelta(minutes=10)):

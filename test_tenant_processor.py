@@ -99,3 +99,29 @@ def test_backfill_is_grouped_and_resumes_from_saved_offset(tmp_path):
     assert triage.calls[0]["ids"][0] == "m-200"
     assert progress == [400, 450]
     assert (directory / "jobs" / f"{job.id}.json").is_file()
+
+
+def test_undo_job_uses_the_recorded_group_and_does_not_scan(tmp_path, monkeypatch):
+    mailbox = _mailbox()
+    directory = tmp_path / "mailboxes" / str(mailbox.id)
+    _artifacts(directory)
+    triage = Triage()
+    processor = _processor(triage)
+    calls = []
+    monkeypatch.setattr(
+        "tenant_processor._undo_group",
+        lambda service, active, group, status: calls.append(
+            (service, active, group, status)
+        ) or 0,
+    )
+    job = ClaimedJob(
+        uuid.uuid4(), mailbox.id, "undo", 250, 0, 200, 1,
+        "undo:1788969600:request-1",
+    )
+    progress = []
+
+    processor(job, mailbox, directory, {"refresh_token": "secret"}, progress.append)
+
+    assert triage.calls == []
+    assert calls[0][2] == "1788969600"
+    assert progress == [250]

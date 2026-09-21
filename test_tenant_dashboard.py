@@ -61,6 +61,14 @@ class Store:
         self.enqueued.append(args)
         return uuid.uuid4()
 
+    def enqueue_job_if_idle(self, *args, **kwargs):
+        self.enqueued.append(args + (kwargs,))
+        return uuid.uuid4()
+
+    def set_mailbox_enabled(self, *args, **kwargs):
+        self.schedule = args + (kwargs,)
+        return True
+
 
 class Control:
     def __init__(self):
@@ -164,7 +172,7 @@ def test_disconnect_is_separate_and_keeps_the_session():
         _form(store, mailbox_id=mailbox_id, confirmation="owner@example.test"),
         cookie=_cookie(),
     )
-    assert response["headers"]["Location"] == "/?disconnected=1"
+    assert response["headers"]["Location"] == "/?notice=disconnected"
     assert control.disconnected == [
         (store.user_id, mailbox_id, "owner@example.test")
     ]
@@ -179,10 +187,62 @@ def test_run_request_carries_the_signed_in_user_and_mailbox():
         app, "/run-now", "POST",
         _form(store, mailbox_id=mailbox_id), cookie=_cookie(),
     )
-    assert response["headers"]["Location"] == "/?run=requested"
+    assert response["headers"]["Location"] == "/?notice=run-queued"
     assert store.enqueued[0][0:3] == (
         store.user_id, mailbox_id, "incoming"
     )
+
+
+def test_history_scan_validates_count_and_queues_backfill():
+    app, store, _control = _app()
+    mailbox_id = uuid.uuid4()
+    invalid = _call(
+        app, "/backfill", "POST",
+        _form(store, mailbox_id=mailbox_id, count="9"), cookie=_cookie(),
+    )
+    assert invalid["headers"]["Location"] == "/?notice=invalid-count"
+
+    response = _call(
+        app, "/backfill", "POST",
+        _form(store, mailbox_id=mailbox_id, count="1000"), cookie=_cookie(),
+    )
+    assert response["headers"]["Location"] == "/?notice=backfill-queued"
+    assert store.enqueued[-1][0:3] == (
+        store.user_id, mailbox_id, "backfill"
+    )
+    assert store.enqueued[-1][-1]["requested_count"] == 1000
+
+
+def test_schedule_can_be_paused_without_disconnect():
+    app, store, _control = _app()
+    mailbox_id = uuid.uuid4()
+    response = _call(
+        app, "/schedule", "POST",
+        _form(store, mailbox_id=mailbox_id, enabled="0"), cookie=_cookie(),
+    )
+    assert response["headers"]["Location"] == "/?notice=schedule-off"
+    assert store.schedule[0:3] == (store.user_id, mailbox_id, False)
+
+
+def test_dashboard_shows_history_schedule_progress_and_results(tmp_path):
+    app, store, _control = _app(tmp_path)
+    mailbox_id = uuid.uuid4()
+    store.mailboxes_for_user = lambda _user_id: [MailboxView(
+        mailbox_id, "coach@example.test", "America/New_York",
+        dt.time(18, 0), True, NOW + dt.timedelta(hours=2), "running",
+        200, 1000, "ready", uuid.uuid4(), "backfill", NOW,
+        NOW - dt.timedelta(minutes=4), None, None, 200, 1, None,
+    )]
+
+    response = _call(app, cookie=_cookie())
+
+    assert response["status"].startswith("200")
+    assert "Scan previous emails" in response["body"]
+    assert 'max="5000"' in response["body"]
+    assert "Daily automation" in response["body"]
+    assert "Groups 1/5" in response["body"]
+    assert "Remaining: 800" in response["body"]
+    assert "Retried" in response["body"]
 
 
 def test_mutating_routes_require_the_session_specific_csrf_token():

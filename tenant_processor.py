@@ -17,6 +17,7 @@ from hosted_runner import (
     _apply_pending_label_plan,
     _pending_label_plan,
     _refresh_credentials,
+    _undo_group,
 )
 from private_runtime import atomic_write_json, ensure_private_directory
 
@@ -154,6 +155,19 @@ class TenantMailboxProcessor:
         try:
             credentials, services = self._services(token_document)
             campaign.DRAFT_LOG_DIR = str(Path(directory) / "draft-logs")
+            if job.kind == "undo":
+                parts = job.idempotency_key.split(":", 2)
+                group_id = parts[1] if len(parts) == 3 else ""
+                if parts[0] != "undo" or not group_id:
+                    raise TenantProcessorError("undo boundary is invalid")
+                code = _undo_group(
+                    services[0], directory, group_id,
+                    Path(directory) / "daily-status.json",
+                )
+                if code != 0:
+                    raise TenantProcessorError("undo did not complete")
+                progress(job.requested_count or 0)
+                return
             prepared_labels = _pending_label_plan(directory, mailbox)
             if prepared_labels is not None:
                 _apply_pending_label_plan(services[0], prepared_labels)
