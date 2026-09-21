@@ -106,19 +106,32 @@ class TenantControl:
             raise HostedControlError(
                 "Google authorization could not start", code="start_failed"
             )
-        with self._state_lock:
-            self._prune_states()
-            if len(self._states) >= MAX_PENDING_STATES:
-                raise HostedControlError(
-                    "too many Google sign-ins are already pending",
-                    code="start_failed",
+        persistent = getattr(self.store, "create_oauth_transaction", None)
+        if callable(persistent):
+            try:
+                persistent(
+                    state, purpose, user_id, flow.code_verifier,
+                    ttl_seconds=OAUTH_TTL_SECONDS,
+                    max_pending=MAX_PENDING_STATES,
                 )
-            self._states[state] = {
-                "purpose": purpose,
-                "user_id": user_id,
-                "verifier": flow.code_verifier,
-                "expires": self._clock() + OAUTH_TTL_SECONDS,
-            }
+            except Exception as exc:  # noqa: BLE001 - keep database detail private
+                raise HostedControlError(
+                    "Google authorization could not start", code="start_failed"
+                ) from exc
+        else:
+            with self._state_lock:
+                self._prune_states()
+                if len(self._states) >= MAX_PENDING_STATES:
+                    raise HostedControlError(
+                        "too many Google sign-ins are already pending",
+                        code="start_failed",
+                    )
+                self._states[state] = {
+                    "purpose": purpose,
+                    "user_id": user_id,
+                    "verifier": flow.code_verifier,
+                    "expires": self._clock() + OAUTH_TTL_SECONDS,
+                }
         return url
 
     def begin_login(self):
@@ -132,9 +145,20 @@ class TenantControl:
             str(query_string or ""), keep_blank_values=True
         )
         state = (query.get("state") or [""])[-1]
-        with self._state_lock:
-            self._prune_states()
-            entry = self._states.pop(state, None)
+        persistent = getattr(self.store, "consume_oauth_transaction", None)
+        if callable(persistent):
+            try:
+                entry = persistent(state)
+            except Exception as exc:  # noqa: BLE001 - keep database detail private
+                raise HostedControlError(
+                    "Google sign-in could not be verified", code="state_expired"
+                ) from exc
+            if entry is not None and not entry.pop("valid", False):
+                entry = None
+        else:
+            with self._state_lock:
+                self._prune_states()
+                entry = self._states.pop(state, None)
         expected_user = uuid.UUID(str(user_id)) if user_id is not None else None
         if (entry is None or entry["purpose"] != purpose
                 or entry["user_id"] != expected_user):

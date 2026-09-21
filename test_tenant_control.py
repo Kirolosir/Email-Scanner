@@ -69,6 +69,22 @@ class Store:
         return "connected-mailbox"
 
 
+class PersistentStore(Store):
+    def __init__(self):
+        super().__init__()
+        self.transactions = {}
+
+    def create_oauth_transaction(self, state, purpose, user_id, verifier,
+                                 **_kwargs):
+        self.transactions[state] = {
+            "purpose": purpose, "user_id": user_id,
+            "verifier": verifier, "valid": True,
+        }
+
+    def consume_oauth_transaction(self, state):
+        return self.transactions.pop(state, None)
+
+
 class DisconnectStore(Store):
     def __init__(self, owner, mailbox_id, record):
         super().__init__()
@@ -145,6 +161,32 @@ def test_login_callback_returns_verified_stable_identity(tmp_path):
         "google-subject-1",
         "mailbox@example.test",
     )
+
+
+def test_login_state_survives_dashboard_process_restart(tmp_path):
+    store = PersistentStore()
+    first, _flows, _store = _control(tmp_path, store=store)
+    first.begin_login()
+
+    restarted, _flows, _store = _control(tmp_path, store=store)
+    result = restarted.complete_login(urlencode({
+        "state": "login-state", "code": "one-use-code",
+    }))
+
+    assert result.email == "mailbox@example.test"
+    assert store.transactions == {}
+
+
+def test_mailbox_state_survives_dashboard_process_restart(tmp_path):
+    store = PersistentStore()
+    owner = uuid.uuid4()
+    first, _flows, _store = _control(tmp_path, store=store)
+    first.begin_mailbox_connect(owner)
+
+    restarted, _flows, _store = _control(tmp_path, store=store)
+    assert restarted.complete_mailbox_connect(urlencode({
+        "state": "mailbox-state", "code": "one-use-code",
+    }), owner) == "connected-mailbox"
 
 
 def test_login_state_cannot_authorize_a_mailbox(tmp_path):

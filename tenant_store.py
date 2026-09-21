@@ -188,6 +188,67 @@ class PostgresTenantStore:
     def close(self):
         self.database.close()
 
+    @staticmethod
+    def _oauth_state_hash(state):
+        value = str(state or "")
+        if not 16 <= len(value) <= 512:
+            raise TenantStoreError("OAuth state is invalid")
+        return hashlib.sha256(value.encode("utf-8")).digest()
+
+    def create_oauth_transaction(self, state, purpose, user_id, verifier, *,
+                                 ttl_seconds, max_pending):
+        if purpose not in {"login", "mailbox"}:
+            raise TenantStoreError("OAuth purpose is invalid")
+        owner = uuid.UUID(str(user_id)) if user_id is not None else None
+        if (purpose == "login") != (owner is None):
+            raise TenantStoreError("OAuth owner is invalid")
+        verifier = str(verifier or "")
+        if not 20 <= len(verifier) <= 512:
+            raise TenantStoreError("OAuth verifier is invalid")
+        ttl_seconds = int(ttl_seconds)
+        if not 1 <= ttl_seconds <= 3600 or not 1 <= int(max_pending) <= 10000:
+            raise TenantStoreError("OAuth transaction limit is invalid")
+        state_hash = self._oauth_state_hash(state)
+        with self.database.transaction():
+            with self.database.cursor() as cursor:
+                cursor.execute(
+                    "DELETE FROM oauth_transactions WHERE expires_at <= now()"
+                )
+                cursor.execute("SELECT count(*) FROM oauth_transactions")
+                if int(cursor.fetchone()[0]) >= int(max_pending):
+                    raise TenantStoreError("too many OAuth transactions")
+                cursor.execute(
+                    """
+                    INSERT INTO oauth_transactions
+                        (state_hash, purpose, user_id, code_verifier, expires_at)
+                    VALUES (%s, %s, %s, %s,
+                            now() + make_interval(secs => %s))
+                    """,
+                    (state_hash, purpose, owner, verifier, ttl_seconds),
+                )
+        return True
+
+    def consume_oauth_transaction(self, state):
+        state_hash = self._oauth_state_hash(state)
+        with self.database.transaction():
+            with self.database.cursor() as cursor:
+                cursor.execute(
+                    """
+                    DELETE FROM oauth_transactions
+                    WHERE state_hash = %s
+                    RETURNING purpose, user_id, code_verifier,
+                              expires_at > now()
+                    """,
+                    (state_hash,),
+                )
+                row = cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            "purpose": row[0], "user_id": row[1],
+            "verifier": row[2], "valid": bool(row[3]),
+        }
+
     def create_or_get_user(self, issuer, subject, display_email):
         user_id = uuid.uuid4()
         with self.database.transaction():
