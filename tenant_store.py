@@ -87,6 +87,10 @@ class MailboxView:
     last_job_group_size: int = 200
     last_job_attempts: int = 0
     last_daily_success_at: dt.datetime | None = None
+    last_authorized_at: dt.datetime | None = None
+    max_scan: int = 2000
+    write_limit: int = 10000
+    max_drafts: int = 2000
 
 
 @dataclass(frozen=True)
@@ -514,7 +518,9 @@ class PostgresTenantStore:
                        latest.started_at, latest.finished_at,
                        latest.last_error_code,
                        COALESCE(latest.group_size, 200),
-                       COALESCE(latest.attempts, 0), daily.finished_at
+                       COALESCE(latest.attempts, 0), daily.finished_at,
+                       m.last_authorized_at, s.max_scan, s.write_limit,
+                       s.max_drafts
                 FROM mailboxes AS m
                 JOIN mailbox_settings AS s ON s.mailbox_id = m.id
                 LEFT JOIN LATERAL (

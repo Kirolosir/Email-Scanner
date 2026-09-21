@@ -89,7 +89,7 @@ class Control:
         return "https://accounts.example.test/mailbox"
 
     def complete_mailbox_connect(self, _query, _user_id):
-        return True
+        return SimpleNamespace(id=uuid.uuid4())
 
     def disconnect_mailbox(self, *args):
         self.disconnected.append(args)
@@ -153,6 +153,22 @@ def test_login_callback_creates_a_user_specific_session():
     assert store.session_issued is True
 
 
+def test_mailbox_callback_opens_full_settings_for_the_new_mailbox():
+    app, _store, control = _app()
+    mailbox_id = uuid.uuid4()
+    control.complete_mailbox_connect = lambda _query, _user_id: SimpleNamespace(
+        id=mailbox_id
+    )
+
+    response = _call(
+        app, "/oauth/callback", cookie=_cookie(), query="state=s&code=c"
+    )
+
+    assert response["headers"]["Location"] == (
+        f"/settings?mailbox_id={mailbox_id}&connected=1"
+    )
+
+
 def test_sign_out_revokes_only_the_website_session():
     app, store, control = _app()
     response = _call(
@@ -187,7 +203,9 @@ def test_run_request_carries_the_signed_in_user_and_mailbox():
         app, "/run-now", "POST",
         _form(store, mailbox_id=mailbox_id), cookie=_cookie(),
     )
-    assert response["headers"]["Location"] == "/?notice=run-queued"
+    assert response["headers"]["Location"] == (
+        f"/?mailbox_id={mailbox_id}&notice=run-queued"
+    )
     assert store.enqueued[0][0:3] == (
         store.user_id, mailbox_id, "incoming"
     )
@@ -200,13 +218,17 @@ def test_history_scan_validates_count_and_queues_backfill():
         app, "/backfill", "POST",
         _form(store, mailbox_id=mailbox_id, count="9"), cookie=_cookie(),
     )
-    assert invalid["headers"]["Location"] == "/?notice=invalid-count"
+    assert invalid["headers"]["Location"] == (
+        f"/?mailbox_id={mailbox_id}&notice=invalid-count"
+    )
 
     response = _call(
         app, "/backfill", "POST",
         _form(store, mailbox_id=mailbox_id, count="1000"), cookie=_cookie(),
     )
-    assert response["headers"]["Location"] == "/?notice=backfill-queued"
+    assert response["headers"]["Location"] == (
+        f"/?mailbox_id={mailbox_id}&notice=backfill-queued"
+    )
     assert store.enqueued[-1][0:3] == (
         store.user_id, mailbox_id, "backfill"
     )
@@ -220,7 +242,9 @@ def test_schedule_can_be_paused_without_disconnect():
         app, "/schedule", "POST",
         _form(store, mailbox_id=mailbox_id, enabled="0"), cookie=_cookie(),
     )
-    assert response["headers"]["Location"] == "/?notice=schedule-off"
+    assert response["headers"]["Location"] == (
+        f"/?mailbox_id={mailbox_id}&notice=schedule-off"
+    )
     assert store.schedule[0:3] == (store.user_id, mailbox_id, False)
 
 
@@ -239,10 +263,37 @@ def test_dashboard_shows_history_schedule_progress_and_results(tmp_path):
     assert response["status"].startswith("200")
     assert "Scan previous emails" in response["body"]
     assert 'max="5000"' in response["body"]
-    assert "Daily automation" in response["body"]
+    assert "Next daily run" in response["body"]
     assert "Groups 1/5" in response["body"]
-    assert "Remaining: 800" in response["body"]
-    assert "Retried" in response["body"]
+    assert "Draft coverage" in response["body"]
+    assert "Usage and recovery" in response["body"]
+    assert "Coach voice" in response["body"]
+    assert "Review queue" in response["body"]
+    assert "--blue:#0071e3" in response["body"]
+
+
+def test_undo_preview_is_scoped_to_owned_mailbox(tmp_path):
+    from rollback_journal import RollbackJournal
+
+    app, store, _control = _app(tmp_path)
+    mailbox_id = uuid.uuid4()
+    directory = tmp_path / "mailboxes" / str(mailbox_id)
+    journal = RollbackJournal(
+        directory / "rollback" / "1788969600-00000.json", "1788969600"
+    )
+    journal.record_labels("m1", ["Triage/Processed"])
+    journal.record_draft("m1", "d1")
+    journal.complete()
+
+    response = _call(
+        app, "/undo", cookie=_cookie(),
+        query=urlencode({"mailbox_id": mailbox_id}),
+    )
+
+    assert response["status"].startswith("200")
+    assert "Undo the previous run?" in response["body"]
+    assert str(mailbox_id) in response["body"]
+    assert "Type UNDO" in response["body"]
 
 
 def test_mutating_routes_require_the_session_specific_csrf_token():

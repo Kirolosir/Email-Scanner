@@ -11,13 +11,25 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlencode
 
 from hosted_control import HostedControlError
-from hosted_dashboard import HTML_HEADERS, SESSION_COOKIE, SESSION_MAX_AGE_SECONDS
+from hosted_dashboard import (
+    COUNT_KEYS,
+    HTML_HEADERS,
+    SESSION_COOKIE,
+    SESSION_MAX_AGE_SECONDS,
+    HostedDashboardApp,
+    _escape,
+    _safe_coach_profile,
+    _safe_counts,
+    _safe_labels,
+    _safe_review_queue,
+    _render_review_queue,
+)
 from rollback_journal import latest_summary
 from tenant_store import TenantAccessDenied, csrf_value
 
 
 MAX_FORM_BYTES = 8192
-SUMMARY_KEYS = ("scanned", "labeled", "drafted", "skipped", "failures")
+SUMMARY_KEYS = tuple(COUNT_KEYS)
 
 
 def _read_json(path):
@@ -130,54 +142,32 @@ class TenantDashboardApp:
 
     @staticmethod
     def _page(title, content, *, refresh=False):
-        refresh_tag = '<meta http-equiv="refresh" content="4">' if refresh else ""
-        return f"""<!doctype html><html lang="en"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width">
-{refresh_tag}
-<title>{html.escape(title)} · Email Scanner</title>
-<style>
-*{{box-sizing:border-box}}:root{{--blue:#0672e5;--ink:#14213d;--muted:#667085;
---line:#e4e9f1;--surface:#fff;--bg:#f5f7fb;--green:#087a55;--amber:#a35b00;
---red:#c0362c}}body{{font:15px system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-margin:0;background:var(--bg);color:var(--ink)}}main{{max-width:1120px;margin:0 auto;padding:38px 22px 72px}}
-.topbar{{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:28px}}
-.brand{{display:flex;align-items:center;gap:12px}}.mark{{width:42px;height:42px;border-radius:13px;
-background:var(--blue);color:#fff;display:grid;place-items:center;font-size:22px}}h1,h2,h3,p{{margin-top:0}}
-h1{{font-size:1.8rem;margin-bottom:3px}}h2{{font-size:1.25rem}}h3{{font-size:.96rem;margin-bottom:5px}}
-.panel{{background:var(--surface);padding:24px;border:1px solid var(--line);border-radius:20px;
-box-shadow:0 8px 28px rgba(20,33,61,.045);margin:16px 0}}.mailbox-head{{display:flex;
-align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap}}.row{{display:flex;gap:10px;
-align-items:center;flex-wrap:wrap}}.grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}}
-.split{{display:grid;grid-template-columns:1.15fr .85fr;gap:16px}}.metric{{background:#f8fafc;
-border:1px solid #edf0f5;border-radius:14px;padding:14px}}.metric strong{{display:block;font-size:1.35rem}}
-.muted{{color:var(--muted)}}.eyebrow{{color:var(--muted);font-size:.76rem;font-weight:750;
-letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px}}a,button{{background:var(--blue);color:#fff;
-padding:10px 15px;border:0;border-radius:10px;text-decoration:none;font:inherit;font-weight:700;cursor:pointer}}
-a.secondary,button.secondary{{background:#edf2f8;color:#344054}}button.danger{{background:#fff0ef;color:var(--red)}}
-input,textarea{{padding:10px 12px;border:1px solid #cbd3df;border-radius:9px;font:inherit;max-width:100%}}
-input[type=number]{{width:110px}}.badge{{display:inline-flex;align-items:center;padding:5px 9px;
-border-radius:999px;background:#edf7f3;color:var(--green);font-size:.8rem;font-weight:750}}.badge.wait{{background:#fff6e7;color:var(--amber)}}
-.badge.bad{{background:#fff0ef;color:var(--red)}}.notice{{padding:14px 16px;border-radius:13px;margin:0 0 16px;
-border:1px solid #b8d7ff;background:#edf6ff;color:#174f91}}.notice.good{{border-color:#b7e2d1;background:#edf9f4;color:#096548}}
-.notice.bad{{border-color:#f0c1bd;background:#fff2f1;color:#9c2d24}}.progress-track{{height:10px;background:#e9edf3;
-border-radius:999px;overflow:hidden;margin:12px 0 7px}}.progress-fill{{height:100%;background:var(--blue);border-radius:999px}}
-.schedule{{padding:16px;border:1px solid var(--line);border-radius:15px;background:#fbfcfe}}.actions{{margin-top:18px}}
-.danger-zone{{border-top:1px solid var(--line);padding-top:18px;margin-top:20px}}form{{margin:0}}
-@media(max-width:760px){{.grid,.split{{grid-template-columns:1fr}}main{{padding:24px 14px 48px}}.panel{{padding:18px}}}}
-</style></head><body><main>{content}</main></body></html>"""
+        page = HostedDashboardApp._page(title, content)
+        if refresh:
+            page = page.replace(
+                '<meta name="viewport"',
+                '<meta http-equiv="refresh" content="4">\n<meta name="viewport"',
+                1,
+            )
+        return page
 
     def _login_page(self, error=""):
         try:
             location = self.control.begin_login()
-            action = f'<a href="{html.escape(location)}">Continue with Google</a>'
+            action = (
+                f'<a class="google-button" href="{html.escape(location)}">'
+                '<span aria-hidden="true">G</span>Continue with Google</a>'
+            )
         except HostedControlError:
             action = "<p>Sign-in is temporarily unavailable.</p>"
-        notice = f'<p>{html.escape(error)}</p>' if error else ""
+        notice = f'<p class="notice bad">{html.escape(error)}</p>' if error else ""
         return self._page("Sign in", f"""
-<div class="topbar"><div class="brand"><div class="mark">✉</div><div><h1>Email Scanner</h1>
-<div class="muted">Organize mail and prepare replies</div></div></div></div>
-<section class="panel"><h2>Sign in</h2><p class="muted">Your website session and Gmail
-connection are managed separately.</p>{notice}{action}</section>""")
+<main class="login-shell"><section class="login-card"><div class="mark">ES</div>
+<p class="eyebrow">Email Scanner</p><h1>Continue with Google</h1>
+<p class="lede">Sign in to your private dashboard. You can connect and manage
+your Gmail inbox separately after signing in.</p>{notice}{action}
+<p class="browser-note">Each person receives an isolated dashboard, mailbox
+connection, schedule, run history, and settings.</p></section></main>""")
 
     @staticmethod
     def _notice(query):
@@ -203,100 +193,179 @@ connection are managed separately.</p>{notice}{action}</section>""")
     def _dashboard(self, identity, query=None):
         query = query or {}
         mailboxes = self.store.mailboxes_for_user(identity.user_id)
-        cards = []
-        refresh = False
-        for mailbox in mailboxes:
-            from tenant_worker import artifact_directory
-            directory = artifact_directory(self.config.state_root, mailbox.id)
-            counts = _job_counts(directory, mailbox.last_job_id)
-            rollback = latest_summary(directory)
-            active = mailbox.last_job_status in {"queued", "running"}
-            refresh = refresh or active
-            status_label = {
-                "queued": "Queued", "running": "Running",
-                "succeeded": "Completed", "failed": "Needs attention",
-                "cancelled": "Cancelled",
-            }.get(mailbox.last_job_status, "No runs yet")
-            status_class = (
-                "wait" if active else "bad" if mailbox.last_job_status == "failed" else ""
-            )
-            total = mailbox.requested_count or max(mailbox.processed_count, counts["scanned"])
-            percent = (
-                min(100, round(mailbox.processed_count / total * 100))
-                if total else 0
-            )
-            group_size = max(1, mailbox.last_job_group_size)
-            groups_done = math.ceil(mailbox.processed_count / group_size) if mailbox.processed_count else 0
-            groups_total = math.ceil(total / group_size) if total else 0
-            remaining = max(0, total - mailbox.processed_count) if active else 0
-            error = ""
-            if mailbox.last_job_status == "failed":
-                error = ('<div class="notice bad">The latest run stopped safely. '
-                         'Reconnect Gmail if needed, then try again.</div>')
-            progress = f"""
-<div class="panel"><div class="mailbox-head"><div><p class="eyebrow">Latest activity</p>
-<h2>{html.escape((mailbox.last_job_kind or 'scan').replace('_', ' ').title())}</h2></div>
-<span class="badge {status_class}">{status_label}</span></div>{error}
-<div class="progress-track"><div class="progress-fill" style="width:{percent}%"></div></div>
-<p class="muted">{mailbox.processed_count} of {total or '—'} processed · {percent}%
- · Groups {groups_done}/{groups_total or '—'} · ETA: {html.escape(_eta(mailbox, self.clock()))}</p>
-<div class="grid">
-<div class="metric"><span class="muted">Scanned</span><strong>{counts['scanned'] or mailbox.processed_count}</strong></div>
-<div class="metric"><span class="muted">Labeled</span><strong>{counts['labeled']}</strong></div>
-<div class="metric"><span class="muted">Drafted</span><strong>{counts['drafted']}</strong></div>
-<div class="metric"><span class="muted">Skipped</span><strong>{counts['skipped']}</strong></div>
-<div class="metric"><span class="muted">Failed</span><strong>{counts['failures']}</strong></div>
-<div class="metric"><span class="muted">Retried</span><strong>{max(0, mailbox.last_job_attempts - 1)}</strong></div>
-</div><p class="muted" style="margin:12px 0 0">Remaining: {remaining}</p></div>""" if mailbox.last_job_status else ""
-            setup = "Ready" if mailbox.setup_status == "ready" else "Setup required"
-            setup_class = "" if mailbox.setup_status == "ready" else "wait"
-            disabled = " disabled" if mailbox.setup_status != "ready" or active else ""
-            undo_card = ""
-            if rollback is not None and not active:
-                undo_card = f"""
-<div class="danger-zone"><div class="mailbox-head"><div><h3>Undo last run</h3>
-<p class="muted">Remove {rollback['drafts']} drafts and {rollback['labels']} label changes
-across {rollback['messages']} emails.</p></div>
-<form method="post" action="/undo"><input type="hidden" name="csrf" value="{csrf_value(identity)}">
-<input type="hidden" name="mailbox_id" value="{mailbox.id}"><input type="hidden" name="group_id" value="{rollback['group_id']}">
-<button class="danger" name="confirmation" value="UNDO">Undo last run</button></form></div></div>"""
-            cards.append(f"""
-<section class="panel"><div class="mailbox-head"><div><p class="eyebrow">Connected mailbox</p>
-<h2>{html.escape(mailbox.address)}</h2></div><span class="badge {setup_class}">{setup}</span></div>
-<div class="split"><div><h3>Scan new mail</h3><p class="muted">Label and draft replies for newly arrived messages.</p>
-<form method="post" action="/run-now" class="row">
-<input type="hidden" name="csrf" value="{csrf_value(identity)}">
-<input type="hidden" name="mailbox_id" value="{mailbox.id}">
-<button{disabled}>Run now</button></form></div>
-<div><h3>Scan previous emails</h3><p class="muted">Choose between 10 and 5,000 messages.</p>
-<form method="post" action="/backfill" class="row"><input type="hidden" name="csrf" value="{csrf_value(identity)}">
-<input type="hidden" name="mailbox_id" value="{mailbox.id}"><input type="number" name="count" min="10" max="5000" value="100" required>
-<button{disabled}>Start scan</button></form></div></div>
-<div class="schedule"><div class="mailbox-head"><div><h3>Daily automation</h3>
-<p class="muted">{html.escape(str(mailbox.run_at)[:5])} {html.escape(mailbox.timezone)} · Next: {_display_time(mailbox.next_run_at)}<br>
-Last successful daily run: {_display_time(mailbox.last_daily_success_at, 'No successful daily run yet')}</p></div>
-<form method="post" action="/schedule"><input type="hidden" name="csrf" value="{csrf_value(identity)}">
-<input type="hidden" name="mailbox_id" value="{mailbox.id}"><input type="hidden" name="enabled" value="{'0' if mailbox.enabled else '1'}">
-<button class="secondary">{'Pause' if mailbox.enabled else 'Resume'}</button></form></div></div>
-<div class="row actions"><a class="secondary" href="/settings?mailbox_id={mailbox.id}">Settings</a></div>
-{undo_card}
-<form method="post" action="/disconnect" class="row">
-<input type="hidden" name="csrf" value="{csrf_value(identity)}">
-<input type="hidden" name="mailbox_id" value="{mailbox.id}">
-<input name="confirmation" placeholder="Type Gmail address" required>
-<button class="danger">Disconnect Gmail</button></form></section>{progress}""")
-        if not cards:
-            cards.append('<section class="panel"><h2>No Gmail account connected</h2><p class="muted">Link an account to configure labels, drafting, and scheduling.</p></section>')
-        return self._page("Dashboard", f"""
-<div class="topbar"><div class="brand"><div class="mark">✉</div><div><h1>Email Scanner</h1>
-<div class="muted">Signed in as {html.escape(identity.display_email)}</div></div></div><div class="row">
-<form method="post" action="/connect"><input type="hidden" name="csrf"
-value="{csrf_value(identity)}"><button>Link Gmail account</button></form>
-<form method="post" action="/logout"><input type="hidden" name="csrf"
-value="{csrf_value(identity)}"><button class="secondary">Sign out</button></form></div></div>
-{self._notice(query)}{''.join(cards)}""", refresh=refresh)
+        requested = (query.get("mailbox_id") or [""])[-1]
+        mailbox = next(
+            (item for item in mailboxes if str(item.id) == requested),
+            mailboxes[0] if mailboxes else None,
+        )
+        csrf = csrf_value(identity)
+        header = f"""
+<header class="topbar"><a class="brand" href="/"><span class="mark small">ES</span>
+<span>Email Scanner</span></a><div class="top-actions">
+<span class="ghost-link">{html.escape(identity.display_email)}</span>
+<form method="post" action="/connect"><input type="hidden" name="csrf" value="{csrf}">
+<button class="ghost" type="submit">Link Gmail account</button></form>
+<form method="post" action="/logout"><input type="hidden" name="csrf" value="{csrf}">
+<button class="ghost" type="submit">Sign out</button></form></div></header>"""
+        if mailbox is None:
+            return self._page("Dashboard", f"""{header}<main class="workspace">
+{self._notice(query)}<section class="account-hero"><div><p class="eyebrow">Connected inbox</p>
+<h1>No Gmail account connected</h1><p class="lede">Link a Gmail account to restore
+the complete dashboard: scans, historical backfill, labels, drafts, daily scheduling,
+run history, and undo.</p></div><div class="hero-actions"><span class="status"><i></i>Waiting</span>
+<form method="post" action="/connect"><input type="hidden" name="csrf" value="{csrf}">
+<button type="submit">Link Gmail account</button></form></div></section>
+<section class="overview-grid"><article class="panel schedule"><p class="eyebrow">Next daily run</p>
+<h2>Connect Gmail first</h2><p>Your own schedule appears here.</p></article>
+<article class="panel health"><p class="eyebrow">Gmail connection</p><h2>Not connected</h2>
+<p>Credentials are isolated for each person and mailbox.</p></article>
+<article class="panel last-run"><p class="eyebrow">Last run</p><h2>Not run yet</h2>
+<p>Run results and recovery controls appear after setup.</p></article></section></main>""")
 
-    def _settings_page(self, identity, mailbox, *, error=""):
+        from tenant_worker import artifact_directory
+        directory = artifact_directory(self.config.state_root, mailbox.id)
+        counts = _job_counts(directory, mailbox.last_job_id)
+        if not any(counts.values()):
+            counts.update(_safe_counts(directory))
+        labels = _safe_labels(directory)
+        review_rows = _safe_review_queue(directory)
+        coach = _safe_coach_profile(directory)
+        rollback = latest_summary(directory)
+        active = mailbox.last_job_status in {"queued", "running"}
+        ready = mailbox.setup_status == "ready"
+        total = mailbox.requested_count or max(mailbox.processed_count, counts.get("scanned", 0))
+        percent = min(100, round(mailbox.processed_count / total * 100)) if total else 0
+        group_size = max(1, mailbox.last_job_group_size)
+        groups_done = math.ceil(mailbox.processed_count / group_size) if mailbox.processed_count else 0
+        groups_total = math.ceil(total / group_size) if total else 0
+        progress = ""
+        if mailbox.last_job_status:
+            progress = f"""<section class="panel run-progress" aria-live="polite">
+<div class="section-head"><div><p class="eyebrow">Latest activity</p>
+<h2>{_escape((mailbox.last_job_kind or 'scan').replace('_', ' ').title())}: {_escape(mailbox.last_job_status.title())}</h2></div>
+<span class="count-badge">{percent}%</span></div><progress value="{mailbox.processed_count}" max="{total or 1}"></progress>
+<p>{mailbox.processed_count} of {total or '—'} processed · Groups {groups_done}/{groups_total or '—'}
+ · ETA: {_escape(_eta(mailbox, self.clock()))}</p></section>"""
+        failure = ""
+        if mailbox.last_job_status == "failed":
+            failure = """<section class="failure-alert" role="alert"><div>
+<p class="eyebrow">Run needs attention</p><h2>The latest run stopped safely</h2>
+<p>No email was sent. Review the mailbox settings or reconnect Gmail, then try again.</p></div>
+<a class="secondary" href="/settings?mailbox_id=%s">Review settings</a></section>""" % mailbox.id
+
+        switcher = ""
+        if len(mailboxes) > 1:
+            links = "".join(
+                f'<a class="secondary" href="/?mailbox_id={item.id}">{html.escape(item.address)}</a>'
+                for item in mailboxes
+            )
+            switcher = f'<section class="panel"><div class="section-head"><div><p class="eyebrow">Your mailboxes</p><h2>Switch inbox</h2></div></div><div class="section-actions">{links}</div></section>'
+
+        settings_url = f"/settings?mailbox_id={mailbox.id}"
+        disabled = " disabled" if not ready or active else ""
+        setup_notice = "" if ready else f"""<p class="notice progress"><strong>Finish mailbox setup.</strong>
+Choose labels, schedule, and reply style before the first scan.
+<a href="{settings_url}">Open settings</a></p>"""
+        history = f"""<section class="panel history-run"><div><p class="eyebrow">Inbox catch-up</p>
+<h2>Start background backfill</h2><p>Scan previous emails in resumable 200-message groups.
+Every replyable email is labeled and receives an unsent draft. New-mail processing remains available
+between groups.</p></div><form method="post" action="/backfill"><input type="hidden" name="csrf" value="{csrf}">
+<input type="hidden" name="mailbox_id" value="{mailbox.id}"><label for="message_count">Previous messages</label>
+<div class="history-controls"><input id="message_count" name="count" type="number" min="10" max="5000" value="100" required>
+<button type="submit"{disabled}>Start backfill</button></div></form></section>"""
+        undo = ""
+        if rollback is not None and not active:
+            undo = f"""<section class="panel undo-run"><div><p class="eyebrow">Previous run</p>
+<h2>Undo drafts and labels</h2><p>Undo {rollback['drafts']} drafts and {rollback['labels']} label changes
+across {rollback['messages']} emails. The full run is included with no item limit.</p></div>
+<a class="secondary danger-link" href="/undo?mailbox_id={mailbox.id}">Review undo</a></section>"""
+
+        count_labels = {
+            "drafted": "drafts created", "drafts_existing": "existing drafts preserved",
+            "drafts_rebuilt": "missing drafts rebuilt", "no_reply_address": "no reply address",
+            "fetch_failures": "email retrieval failures", "generation_fallbacks": "generation fallbacks",
+            "retry_queued": "queued for retry", "gmail_requests": "Gmail requests",
+            "gmail_retries": "Gmail retries", "gmail_quota_units": "Gmail quota units",
+            "gemini_calls": "generation calls", "gemini_input_tokens": "input tokens",
+            "gemini_output_tokens": "output tokens", "estimated_cost_microusd": "estimated cost",
+            "duration_seconds": "run time (seconds)", "average_duration_seconds": "average run time",
+            "backup_verified": "verified backups", "backup_failures": "backup failures",
+        }
+        coverage_keys = {"drafted", "drafts_existing", "drafts_rebuilt", "no_reply_address",
+                         "fetch_failures", "generation_fallbacks", "retry_queued"}
+        usage_keys = {"gmail_requests", "gmail_retries", "gmail_quota_units", "gemini_calls",
+                      "gemini_input_tokens", "gemini_output_tokens", "estimated_cost_microusd",
+                      "duration_seconds", "average_duration_seconds", "backup_verified", "backup_failures"}
+
+        def cards(keys, *, exclude=False):
+            selected = []
+            for key, value in counts.items():
+                include = key not in keys if exclude else key in keys
+                if not include or not value:
+                    continue
+                displayed = f"${value / 1_000_000:.4f}" if key == "estimated_cost_microusd" else value
+                selected.append(f'<div class="metric"><span>{_escape(count_labels.get(key, key.replace("_", " ")))}</span><strong>{_escape(displayed)}</strong></div>')
+            return "".join(selected) or '<p class="empty">Results will appear after the first run.</p>'
+
+        label_rows = "".join(
+            '<li><div><strong>' + _escape(item["display"]) + '</strong><span>'
+            + _escape(item["name"]) + '</span></div><span class="tag">'
+            + ("labels + drafts" if item["drafting"] else "labels only") + '</span></li>'
+            for item in labels
+        ) or '<li class="empty">Finish settings to prepare Gmail labels.</li>'
+        coach_name = coach.get("display_name") or "Coach profile"
+        coach_context = " · ".join(value for value in (coach.get("role"), coach.get("organization")) if value) \
+            or "Add your role and program so replies sound like you."
+        status_text = "Active" if ready and mailbox.enabled else "Setup required" if not ready else "Paused"
+        run_status = mailbox.last_job_status.title() if mailbox.last_job_status else "Not run yet"
+        finished = _display_time(mailbox.last_job_finished_at, "No completed run yet")
+        remaining = max(0, total - mailbox.processed_count) if active else 0
+        activity_values = (
+            ("scanned", counts.get("scanned", mailbox.processed_count)),
+            ("classified", counts.get("classified", 0)),
+            ("labeled", counts.get("labeled", 0)),
+            ("drafted", counts.get("drafted", 0)),
+            ("skipped", counts.get("skipped", 0)),
+            ("failed", counts.get("failures", 0)),
+            ("retried", max(0, mailbox.last_job_attempts - 1)),
+            ("remaining", remaining),
+        )
+        activity_cards = "".join(
+            f'<div class="metric"><span>{label}</span><strong>{value}</strong></div>'
+            for label, value in activity_values
+        )
+
+        return self._page("Dashboard", f"""{header}<main class="workspace">
+{self._notice(query)}{setup_notice}{failure}<section class="account-hero"><div>
+<p class="eyebrow">Connected inbox</p><h1>{html.escape(mailbox.address)}</h1>
+<p class="lede">Email Scanner organizes eligible mail and prepares unsent Gmail drafts for review.
+Nothing is sent automatically.</p></div><div class="hero-actions"><span class="status {'good' if ready else ''}"><i></i>{status_text}</span>
+<a class="secondary" href="{settings_url}">Edit labels &amp; schedule</a>
+<form method="post" action="/run-now"><input type="hidden" name="csrf" value="{csrf}">
+<input type="hidden" name="mailbox_id" value="{mailbox.id}"><button type="submit"{disabled}>Scan new mail</button></form></div></section>
+{switcher}{progress}<section class="overview-grid"><article class="panel schedule"><p class="eyebrow">Next daily run</p>
+<h2>{_display_time(mailbox.next_run_at)}</h2><p>Up to {mailbox.max_scan} recent messages at {str(mailbox.run_at)[:5]} {html.escape(mailbox.timezone)}.</p>
+<form method="post" action="/schedule"><input type="hidden" name="csrf" value="{csrf}"><input type="hidden" name="mailbox_id" value="{mailbox.id}">
+<input type="hidden" name="enabled" value="{'0' if mailbox.enabled else '1'}"><button class="secondary" type="submit">{'Pause' if mailbox.enabled else 'Resume'} daily run</button></form></article>
+<article class="panel health"><p class="eyebrow">Gmail connection</p><h2>Connected securely</h2>
+<p>Last authorized {_display_time(mailbox.last_authorized_at, 'during account setup')}</p></article>
+<article class="panel last-run"><p class="eyebrow">Last run</p><h2>{run_status}</h2><p>{finished}</p></article></section>
+{history}{undo}<section class="content-grid"><article class="panel results"><div class="section-head"><div><p class="eyebrow">Activity</p>
+<h2>Latest run results</h2></div></div><div class="metrics">{activity_cards}</div></article>
+<article class="panel labels"><div class="section-head"><div><p class="eyebrow">Rules</p><h2>Your Gmail labels</h2></div>
+<div class="section-actions"><span class="count-badge">{len(labels)}</span><a class="secondary" href="{settings_url}">Edit labels</a></div></div><ul>{label_rows}</ul></article></section>
+<section class="content-grid"><article class="panel results"><div class="section-head"><div><p class="eyebrow">Coverage</p><h2>Draft coverage</h2></div></div>
+<div class="metrics">{cards(coverage_keys)}</div></article><article class="panel results"><div class="section-head"><div><p class="eyebrow">Reliability</p>
+<h2>Usage and recovery</h2></div></div><div class="metrics">{cards(usage_keys)}</div></article></section>
+<section class="panel coach-card"><div><p class="eyebrow">Coach voice</p><h2>{_escape(coach_name)}</h2><p>{_escape(coach_context)}</p></div>
+<a class="secondary" href="{settings_url}">Edit profile</a></section>
+<section class="panel review-queue"><div class="section-head"><div><p class="eyebrow">Review queue</p><h2>Replies ready in Gmail</h2>
+<p>Review, edit, and send each response from Gmail.</p></div><a class="secondary" href="https://mail.google.com/mail/u/0/#drafts" target="_blank" rel="noopener noreferrer">Open all drafts</a></div>
+<div class="draft-list">{_render_review_queue(review_rows)}</div></section></main>""", refresh=active)
+
+    def _settings_page(self, identity, mailbox, *, error="", form=None,
+                       connected=False):
+        import hosted_settings
         from tenant_worker import artifact_directory
 
         directory = artifact_directory(self.config.state_root, mailbox.id)
@@ -312,27 +381,80 @@ value="{csrf_value(identity)}"><button class="secondary">Sign out</button></form
             f"{entry.get('display', '')} | {entry.get('label', '')}"
             for entry in taxonomy if isinstance(entry, dict)
             and entry.get("slug") != "other"
-        )
+        ) or ("Recruit intro | Recruits/Intro\nRecruit update | Recruits/Update\n"
+              "Parent | Recruits/Parent\nCoach | Coaches\nCamp inquiry | Camps")
         drafting = document.get("ai_drafting")
         drafting = drafting if isinstance(drafting, dict) else {}
-        notice = f"<p>{html.escape(error)}</p>" if error else ""
-        return self._page("Mailbox settings", f"""
-<div class="topbar"><div class="brand"><div class="mark">✉</div><div><h1>Mailbox settings</h1>
-<div class="muted">{html.escape(mailbox.address)}</div></div></div></div>
-<section class="panel">{notice}
-<form method="post" action="/settings">
-<input type="hidden" name="csrf" value="{csrf_value(identity)}">
+        values = {
+            "labels": labels,
+            "timezone": str(document.get("timezone") or mailbox.timezone or "UTC"),
+            "run_at": str(mailbox.run_at)[:5],
+            "display_name": str(drafting.get("display_name") or ""),
+            "role": str(drafting.get("role") or ""),
+            "organization": str(drafting.get("organization") or ""),
+            "signature": str(drafting.get("signature") or ""),
+            "draft_guidance": str(drafting.get("default_guidance")
+                                  or hosted_settings.DEFAULT_DRAFT_GUIDANCE),
+            "max_scan": str(mailbox.max_scan),
+        }
+        if form:
+            values.update(form)
+        fields = {key: html.escape(str(value)) for key, value in values.items()}
+        notice = f'<p class="notice bad">{html.escape(error)}</p>' if error else ""
+        if connected and not error:
+            notice = (
+                '<p class="notice good">Gmail connected securely. Review '
+                'these settings to activate scanning and daily runs.</p>'
+            )
+        csrf = csrf_value(identity)
+        return self._page("Settings", f"""
+<header class="topbar"><a class="brand" href="/"><span class="mark small">ES</span>
+<span>Email Scanner</span></a><div class="top-actions"><a class="ghost-link" href="/?mailbox_id={mailbox.id}">Dashboard</a>
+<form method="post" action="/logout"><input type="hidden" name="csrf" value="{csrf}"><button class="ghost">Sign out</button></form></div></header>
+<main class="workspace settings-shell"><section class="account-hero compact"><div><p class="eyebrow">Inbox settings</p>
+<h1>Shape your daily assistant</h1><p class="lede">Choose the labels, schedule, batch size, and reply style for {html.escape(mailbox.address)}.</p></div></section>
+{notice}<form class="settings-form" method="post" action="/settings"><input type="hidden" name="csrf" value="{csrf}">
 <input type="hidden" name="mailbox_id" value="{mailbox.id}">
-<p><label>Labels<br><textarea name="labels" rows="7" required>{html.escape(labels)}</textarea></label></p>
-<p><label>Timezone <input name="timezone" value="{html.escape(str(document.get('timezone') or 'UTC'))}" required></label></p>
-<p><label>Daily time <input type="time" name="run_at" value="{html.escape(str(mailbox.run_at)[:5])}" required></label></p>
-<p><label>Name <input name="display_name" value="{html.escape(str(drafting.get('display_name') or ''))}" required></label></p>
-<p><label>Role <input name="role" value="{html.escape(str(drafting.get('role') or ''))}"></label></p>
-<p><label>Organization <input name="organization" value="{html.escape(str(drafting.get('organization') or ''))}"></label></p>
-<p><label>Signature <input name="signature" value="{html.escape(str(drafting.get('signature') or ''))}" required></label></p>
-<p><label>Messages per daily run <input type="number" name="max_scan" min="1" max="2000" value="2000" required></label></p>
-<input type="hidden" name="confirm_unsent_drafts" value="yes">
-<button>Save settings</button> <a href="/">Cancel</a></form></section>""")
+<section class="panel form-section"><div class="form-copy"><p class="eyebrow">1 · Organize</p><h2>Gmail labels</h2>
+<p>Enter one label per line as <strong>Display name | Gmail label</strong>. Other is added automatically.</p></div>
+<div><label for="labels">Labels, up to 12</label><textarea id="labels" name="labels" rows="8" required spellcheck="false">{fields['labels']}</textarea>
+<p class="field-note">Example: Recruit intro | Recruits/Intro</p></div></section>
+<section class="panel form-section"><div class="form-copy"><p class="eyebrow">2 · Schedule</p><h2>Daily run</h2>
+<p>Choose when this mailbox checks new messages and how many it can process.</p></div><div class="field-grid">
+<div><label for="run_at">Start time</label><input id="run_at" name="run_at" type="time" value="{fields['run_at']}" required></div>
+<div><label for="timezone">Timezone</label><input id="timezone" name="timezone" value="{fields['timezone']}" required autocomplete="off">
+<p class="field-note">Use an IANA city-based timezone name or UTC.</p></div>
+<div><label for="max_scan">Messages scanned</label><input id="max_scan" name="max_scan" type="number" min="1" max="2000" value="{fields['max_scan']}" required>
+<p class="field-note">Every eligible message receives a label and an unsent draft.</p></div></div></section>
+<section class="panel form-section"><div class="form-copy"><p class="eyebrow">3 · Reply profile</p><h2>Your voice and program</h2>
+<p>Provide the context used to prepare replies. Every response remains an unsent Gmail draft.</p></div><div>
+<label for="display_name">Your name</label><input id="display_name" name="display_name" maxlength="120" value="{fields['display_name']}" required>
+<div class="field-grid coach-fields"><div><label for="role">Role</label><input id="role" name="role" maxlength="120" value="{fields['role']}" placeholder="Head Coach"></div>
+<div><label for="organization">School or program</label><input id="organization" name="organization" maxlength="160" value="{fields['organization']}"></div></div>
+<label for="signature">Draft signature</label><textarea id="signature" name="signature" rows="3" maxlength="500" required>{fields['signature']}</textarea>
+<label for="draft_guidance">How replies should sound</label><textarea id="draft_guidance" name="draft_guidance" rows="5" maxlength="1200" required>{fields['draft_guidance']}</textarea>
+<p class="field-note">Describe your tone, the information senders should provide, and the next steps you usually suggest.</p></div></section>
+<section class="panel confirmation"><label class="check-row"><input type="checkbox" name="confirm_unsent_drafts" value="yes" required>
+<span><strong>I approve these labels and generated drafts.</strong> Responses stay unsent until I review and send them.</span></label>
+<div class="save-row"><a href="/?mailbox_id={mailbox.id}">Cancel</a><button type="submit">Save and prepare labels</button></div></section></form>
+<section class="panel danger-zone"><div><p class="eyebrow">Disconnect</p><h2>Remove this Gmail account</h2>
+<p>This revokes access, destroys the stored credential, and stops future runs for this mailbox only.</p></div>
+<form method="post" action="/disconnect"><input type="hidden" name="csrf" value="{csrf}"><input type="hidden" name="mailbox_id" value="{mailbox.id}">
+<label for="confirmation">Type {html.escape(mailbox.address)} to confirm</label><div class="disconnect-row"><input id="confirmation" name="confirmation" type="email" required autocomplete="off">
+<button class="danger" type="submit">Disconnect Gmail</button></div></form></section></main>""")
+
+    def _undo_page(self, identity, mailbox, summary):
+        csrf = csrf_value(identity)
+        return self._page("Undo previous run", f"""
+<header class="topbar"><a class="brand" href="/?mailbox_id={mailbox.id}"><span class="mark small">ES</span><span>Email Scanner</span></a>
+<a class="ghost-link" href="/?mailbox_id={mailbox.id}">Cancel</a></header><main class="workspace settings-shell">
+<section class="panel danger-zone undo-confirm"><div><p class="eyebrow">Confirm rollback</p><h1>Undo the previous run?</h1>
+<p>This removes {summary['labels']} labels added by that run and moves {summary['drafts']} drafts to Gmail Trash across
+{summary['messages']} emails. The entire run is included, regardless of size. No email will be sent.</p></div>
+<form method="post" action="/undo"><input type="hidden" name="csrf" value="{csrf}"><input type="hidden" name="mailbox_id" value="{mailbox.id}">
+<input type="hidden" name="group_id" value="{html.escape(str(summary['group_id']))}"><label for="undo_confirmation">Type UNDO to continue</label>
+<input id="undo_confirmation" name="confirmation" autocomplete="off" required><button class="danger" type="submit">Undo previous run</button></form>
+</section></main>""")
 
     def __call__(self, environ, start_response):
         path = str(environ.get("PATH_INFO") or "/")
@@ -365,10 +487,13 @@ value="{csrf_value(identity)}"><button class="secondary">Sign out</button></form
                         start_response, "/",
                         [("Set-Cookie", self._cookie(issued.token))],
                     )
-                self.control.complete_mailbox_connect(
+                mailbox = self.control.complete_mailbox_connect(
                     environ.get("QUERY_STRING", ""), identity.user_id
                 )
-                return self._redirect(start_response, "/?notice=connected")
+                return self._redirect(
+                    start_response,
+                    f"/settings?mailbox_id={mailbox.id}&connected=1",
+                )
             except (HostedControlError, TenantAccessDenied):
                 location = (
                     "/?notice=connect-failed" if identity is not None
@@ -389,7 +514,33 @@ value="{csrf_value(identity)}"><button class="secondary">Sign out</button></form
                 return self._redirect(start_response, "/")
             return self._respond(
                 start_response, "200 OK",
-                self._settings_page(identity, mailbox), head=head,
+                self._settings_page(
+                    identity, mailbox,
+                    connected=(query.get("connected") or [""])[-1] == "1",
+                ), head=head,
+            )
+
+        if path == "/undo" and method in {"GET", "HEAD"}:
+            query = parse_qs(str(environ.get("QUERY_STRING", "")))
+            try:
+                mailbox_id = uuid.UUID((query.get("mailbox_id") or [""])[-1])
+                mailbox = self.store.mailbox_view_for_user(
+                    identity.user_id, mailbox_id
+                )
+                from tenant_worker import artifact_directory
+
+                summary = latest_summary(artifact_directory(
+                    self.config.state_root, mailbox_id
+                ))
+                if summary is None:
+                    raise ValueError("no undo boundary")
+            except (ValueError, TenantAccessDenied):
+                return self._redirect(
+                    start_response, "/?notice=undo-unavailable"
+                )
+            return self._respond(
+                start_response, "200 OK",
+                self._undo_page(identity, mailbox, summary), head=head,
             )
 
         if path in {"/connect", "/logout", "/disconnect", "/run-now",
@@ -434,11 +585,12 @@ value="{csrf_value(identity)}"><button class="secondary">Sign out</button></form
                         return self._respond(
                             start_response, "400 Bad Request",
                             self._settings_page(
-                                identity, mailbox, error=str(exc)
+                                identity, mailbox, error=str(exc), form=form
                             ),
                         )
                     return self._redirect(
-                        start_response, "/?notice=settings-saved"
+                        start_response,
+                        f"/?mailbox_id={mailbox_id}&notice=settings-saved",
                     )
                 if path == "/disconnect":
                     self.control.disconnect_mailbox(
@@ -455,7 +607,8 @@ value="{csrf_value(identity)}"><button class="secondary">Sign out</button></form
                     )
                     return self._redirect(
                         start_response,
-                        f"/?notice=schedule-{'on' if enabled else 'off'}",
+                        f"/?mailbox_id={mailbox_id}&notice=schedule-"
+                        f"{'on' if enabled else 'off'}",
                     )
                 if path == "/backfill":
                     try:
@@ -464,7 +617,8 @@ value="{csrf_value(identity)}"><button class="secondary">Sign out</button></form
                         count = 0
                     if not 10 <= count <= 5000:
                         return self._redirect(
-                            start_response, "/?notice=invalid-count"
+                            start_response,
+                            f"/?mailbox_id={mailbox_id}&notice=invalid-count",
                         )
                     job_id = self.store.enqueue_job_if_idle(
                         identity.user_id, mailbox_id, "backfill",
@@ -472,7 +626,8 @@ value="{csrf_value(identity)}"><button class="secondary">Sign out</button></form
                     )
                     notice = "backfill-queued" if job_id else "already-running"
                     return self._redirect(
-                        start_response, f"/?notice={notice}"
+                        start_response,
+                        f"/?mailbox_id={mailbox_id}&notice={notice}",
                     )
                 if path == "/undo":
                     from tenant_worker import artifact_directory
@@ -486,7 +641,8 @@ value="{csrf_value(identity)}"><button class="secondary">Sign out</button></form
                             or summary is None
                             or requested_group != summary.get("group_id")):
                         return self._redirect(
-                            start_response, "/?notice=undo-unavailable"
+                            start_response,
+                            f"/?mailbox_id={mailbox_id}&notice=undo-unavailable",
                         )
                     job_id = self.store.enqueue_job_if_idle(
                         identity.user_id, mailbox_id, "undo",
@@ -495,14 +651,18 @@ value="{csrf_value(identity)}"><button class="secondary">Sign out</button></form
                     )
                     notice = "undo-queued" if job_id else "already-running"
                     return self._redirect(
-                        start_response, f"/?notice={notice}"
+                        start_response,
+                        f"/?mailbox_id={mailbox_id}&notice={notice}",
                     )
                 job_id = self.store.enqueue_job_if_idle(
                     identity.user_id, mailbox_id, "incoming",
                     f"manual:{uuid.uuid4()}",
                 )
                 notice = "run-queued" if job_id else "already-running"
-                return self._redirect(start_response, f"/?notice={notice}")
+                return self._redirect(
+                    start_response,
+                    f"/?mailbox_id={mailbox_id}&notice={notice}",
+                )
             except (ValueError, HostedControlError, TenantAccessDenied):
                 return self._redirect(
                     start_response, "/?notice=action-failed"
