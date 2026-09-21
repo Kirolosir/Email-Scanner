@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime as dt
 import hmac
 import html
+import json
 import uuid
 from urllib.parse import parse_qs, urlencode
 
@@ -125,7 +126,8 @@ connection are managed separately.</p>{notice}{action}</section>""")
 <form method="post" action="/run-now" class="row">
 <input type="hidden" name="csrf" value="{csrf_value(identity)}">
 <input type="hidden" name="mailbox_id" value="{mailbox.id}">
-<button>Run now</button></form>
+<button>Run now</button>
+<a href="/settings?mailbox_id={mailbox.id}">Settings</a></form>
 <form method="post" action="/disconnect" class="row">
 <input type="hidden" name="csrf" value="{csrf_value(identity)}">
 <input type="hidden" name="mailbox_id" value="{mailbox.id}">
@@ -141,6 +143,42 @@ value="{csrf_value(identity)}"><button>Link Gmail account</button></form>
 value="{csrf_value(identity)}"><button class="secondary">Sign out</button></form>
 </div><p class="muted">Signed in as {html.escape(identity.display_email)}</p>
 {''.join(cards)}""")
+
+    def _settings_page(self, identity, mailbox, *, error=""):
+        from tenant_worker import artifact_directory
+
+        directory = artifact_directory(self.config.state_root, mailbox.id)
+        try:
+            document = json.loads(
+                (directory / "account.json").read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError):
+            document = {}
+        taxonomy = document.get("taxonomy")
+        taxonomy = taxonomy if isinstance(taxonomy, list) else []
+        labels = "\n".join(
+            f"{entry.get('display', '')} | {entry.get('label', '')}"
+            for entry in taxonomy if isinstance(entry, dict)
+            and entry.get("slug") != "other"
+        )
+        drafting = document.get("ai_drafting")
+        drafting = drafting if isinstance(drafting, dict) else {}
+        notice = f"<p>{html.escape(error)}</p>" if error else ""
+        return self._page("Mailbox settings", f"""
+<section><h1>Mailbox settings</h1><p>{html.escape(mailbox.address)}</p>{notice}
+<form method="post" action="/settings">
+<input type="hidden" name="csrf" value="{csrf_value(identity)}">
+<input type="hidden" name="mailbox_id" value="{mailbox.id}">
+<p><label>Labels<br><textarea name="labels" rows="7" required>{html.escape(labels)}</textarea></label></p>
+<p><label>Timezone <input name="timezone" value="{html.escape(str(document.get('timezone') or 'UTC'))}" required></label></p>
+<p><label>Daily time <input type="time" name="run_at" value="{html.escape(str(mailbox.run_at)[:5])}" required></label></p>
+<p><label>Name <input name="display_name" value="{html.escape(str(drafting.get('display_name') or ''))}" required></label></p>
+<p><label>Role <input name="role" value="{html.escape(str(drafting.get('role') or ''))}"></label></p>
+<p><label>Organization <input name="organization" value="{html.escape(str(drafting.get('organization') or ''))}"></label></p>
+<p><label>Signature <input name="signature" value="{html.escape(str(drafting.get('signature') or ''))}" required></label></p>
+<p><label>Messages per daily run <input type="number" name="max_scan" min="1" max="2000" value="2000" required></label></p>
+<input type="hidden" name="confirm_unsent_drafts" value="yes">
+<button>Save settings</button> <a href="/">Cancel</a></form></section>""")
 
     def __call__(self, environ, start_response):
         path = str(environ.get("PATH_INFO") or "/")
@@ -177,7 +215,22 @@ value="{csrf_value(identity)}"><button class="secondary">Sign out</button></form
         if identity is None:
             return self._redirect(start_response, "/login")
 
-        if path in {"/connect", "/logout", "/disconnect", "/run-now"} \
+        if path == "/settings" and method in {"GET", "HEAD"}:
+            query = parse_qs(str(environ.get("QUERY_STRING", "")))
+            try:
+                mailbox_id = uuid.UUID((query.get("mailbox_id") or [""])[-1])
+                mailbox = self.store.mailbox_view_for_user(
+                    identity.user_id, mailbox_id
+                )
+            except (ValueError, TenantAccessDenied):
+                return self._redirect(start_response, "/")
+            return self._respond(
+                start_response, "200 OK",
+                self._settings_page(identity, mailbox), head=head,
+            )
+
+        if path in {"/connect", "/logout", "/disconnect", "/run-now",
+                    "/settings"} \
                 and method == "POST":
             form = self._form(environ)
             if form is None or not hmac.compare_digest(
@@ -201,6 +254,27 @@ value="{csrf_value(identity)}"><button class="secondary">Sign out</button></form
                 )
             try:
                 mailbox_id = uuid.UUID(str(form.get("mailbox_id", "")))
+                if path == "/settings":
+                    import hosted_settings
+                    from tenant_settings import save_mailbox_settings
+
+                    try:
+                        save_mailbox_settings(
+                            self.store, self.config.state_root,
+                            identity.user_id, mailbox_id, form,
+                            now=self.clock(),
+                        )
+                    except hosted_settings.SettingsError as exc:
+                        mailbox = self.store.mailbox_view_for_user(
+                            identity.user_id, mailbox_id
+                        )
+                        return self._respond(
+                            start_response, "400 Bad Request",
+                            self._settings_page(
+                                identity, mailbox, error=str(exc)
+                            ),
+                        )
+                    return self._redirect(start_response, "/?saved=1")
                 if path == "/disconnect":
                     self.control.disconnect_mailbox(
                         identity.user_id, mailbox_id,

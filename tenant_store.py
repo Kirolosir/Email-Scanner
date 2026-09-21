@@ -49,6 +49,10 @@ class Mailbox:
     address: str
     disconnected_at: dt.datetime | None
 
+    @property
+    def account(self):
+        return self.address
+
 
 @dataclass(frozen=True)
 class ClaimedJob:
@@ -94,6 +98,10 @@ class WorkerMailbox:
     write_limit: int
     max_drafts: int
     policy_version: int
+
+    @property
+    def account(self):
+        return self.address
 
 
 def _utc_now():
@@ -505,6 +513,12 @@ class PostgresTenantStore:
             )
             return [MailboxView(*row) for row in cursor.fetchall()]
 
+    def mailbox_view_for_user(self, user_id, mailbox_id):
+        for mailbox in self.mailboxes_for_user(user_id):
+            if mailbox.id == mailbox_id:
+                return mailbox
+        raise TenantAccessDenied("mailbox not found")
+
     def update_mailbox_settings(self, user_id, mailbox_id, *, timezone,
                                 run_at, enabled, max_scan, write_limit,
                                 max_drafts, now=None):
@@ -548,6 +562,27 @@ class PostgresTenantStore:
                 )
                 if cursor.fetchone() is None:
                     raise TenantAccessDenied("mailbox not found")
+
+    def begin_mailbox_setup(self, user_id, mailbox_id):
+        """Pause claims only when no worker currently owns this mailbox."""
+        with self.database.transaction():
+            with self.database.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE mailboxes AS m
+                    SET setup_status = 'pending', setup_error_code = NULL
+                    WHERE m.id = %s AND m.user_id = %s
+                      AND m.disconnected_at IS NULL
+                      AND NOT EXISTS (
+                          SELECT 1 FROM jobs AS j
+                          WHERE j.mailbox_id = m.id AND j.status = 'running'
+                      )
+                    RETURNING m.id
+                    """,
+                    (mailbox_id, user_id),
+                )
+                if cursor.fetchone() is None:
+                    raise TenantAccessDenied("mailbox is unavailable or busy")
 
     def disconnect_mailbox(self, user_id, mailbox_id, *, now=None):
         with self.database.transaction():
@@ -754,6 +789,32 @@ class PostgresTenantStore:
                     WHERE job_id = %s AND finished_at IS NULL
                     """,
                     (now, outcome, str(error_code or "") or None, job_id),
+                )
+
+    def retry_job(self, job_id, worker_id, *, error_code, run_after,
+                  now=None):
+        now = now or _utc_now()
+        with self.database.transaction():
+            with self.database.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE jobs SET status = 'queued', worker_id = NULL,
+                        leased_until = NULL, run_after = %s,
+                        last_error_code = %s
+                    WHERE id = %s AND worker_id = %s AND status = 'running'
+                    RETURNING id
+                    """,
+                    (run_after, str(error_code), job_id, str(worker_id)),
+                )
+                if cursor.fetchone() is None:
+                    raise TenantAccessDenied("job lease is not owned")
+                cursor.execute(
+                    """
+                    UPDATE job_attempts SET finished_at = %s,
+                        outcome = 'retry', error_code = %s
+                    WHERE job_id = %s AND finished_at IS NULL
+                    """,
+                    (now, str(error_code), job_id),
                 )
 
     def requeue_expired_jobs(self, *, now=None):

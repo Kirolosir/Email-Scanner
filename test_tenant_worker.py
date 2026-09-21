@@ -18,6 +18,7 @@ class Store:
         self.record = record
         self.progress = []
         self.finished = []
+        self.retried = []
 
     def claim_next_job(self, worker_id, **_kwargs):
         assert worker_id == "worker-1"
@@ -41,6 +42,9 @@ class Store:
 
     def finish_job(self, *args, **kwargs):
         self.finished.append((args, kwargs))
+
+    def retry_job(self, *args, **kwargs):
+        self.retried.append((args, kwargs))
 
 
 def _store(tmp_path):
@@ -110,3 +114,19 @@ def test_artifact_path_uses_uuid_and_never_mailbox_address(tmp_path):
     path = artifact_directory(tmp_path, mailbox_id)
     assert path == tmp_path / "mailboxes" / str(mailbox_id)
     assert "@" not in str(path)
+
+
+def test_transient_processing_failure_requeues_the_same_job(tmp_path):
+    store, provider = _store(tmp_path)
+    _artifacts(tmp_path, store.mailbox.id)
+
+    def fail(*_args):
+        raise ConnectionError("private provider detail")
+
+    assert process_one(
+        store, tmp_path, provider, fail,
+        worker_id="worker-1", now=NOW,
+    ) is False
+    assert store.finished == []
+    assert store.retried[0][0][0:2] == (store.job_id, "worker-1")
+    assert store.retried[0][1]["error_code"] == "mailbox_job_failed"

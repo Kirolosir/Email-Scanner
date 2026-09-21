@@ -81,6 +81,7 @@ def test_migrations_are_ordered_and_have_stable_checksums():
     migrations = discover_migrations("migrations")
     assert [item[0] for item in migrations] == [
         "0001_multitenant.sql", "0002_mailbox_setup_state.sql",
+        "0003_expand_write_limit.sql",
     ]
     assert len(migrations[0][1]) == 32
     assert "CREATE TABLE users" in migrations[0][2]

@@ -1,6 +1,7 @@
 import datetime as dt
 import io
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlencode
 
@@ -9,6 +10,7 @@ from tenant_store import (
     IssuedSession,
     SessionIdentity,
     TenantAccessDenied,
+    MailboxView,
     csrf_value,
 )
 
@@ -48,6 +50,13 @@ class Store:
         assert user_id == self.user_id
         return []
 
+    def mailbox_view_for_user(self, user_id, mailbox_id):
+        assert user_id == self.user_id
+        return MailboxView(
+            mailbox_id, "owner@example.test", "UTC", dt.time(18, 0),
+            True, None, None, 0, None, "pending",
+        )
+
     def enqueue_job(self, *args):
         self.enqueued.append(args)
         return uuid.uuid4()
@@ -79,10 +88,13 @@ class Control:
         return True
 
 
-def _app():
+def _app(state_root=None):
     store = Store()
     control = Control()
-    config = SimpleNamespace(require_forwarded_https=False)
+    config = SimpleNamespace(
+        require_forwarded_https=False,
+        state_root=Path(state_root or "/unused-state-root"),
+    )
     return TenantDashboardApp(
         config, store, control, clock=lambda: NOW
     ), store, control
@@ -181,3 +193,15 @@ def test_mutating_routes_require_the_session_specific_csrf_token():
     assert response["status"].startswith("403")
     assert control.connected_for == []
     assert store.revoked == []
+
+
+def test_settings_page_is_scoped_to_the_requested_owned_mailbox(tmp_path):
+    app, store, _control = _app(tmp_path)
+    mailbox_id = uuid.uuid4()
+    response = _call(
+        app, "/settings", cookie=_cookie(),
+        query=urlencode({"mailbox_id": mailbox_id}),
+    )
+    assert response["status"].startswith("200")
+    assert "owner@example.test" in response["body"]
+    assert str(mailbox_id) in response["body"]

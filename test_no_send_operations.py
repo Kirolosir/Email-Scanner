@@ -54,6 +54,8 @@ PRODUCTION = [
     ROOT / "tenant_scheduler.py",
     ROOT / "legacy_tenant_import.py",
     ROOT / "tenant_worker.py",
+    ROOT / "tenant_processor.py",
+    ROOT / "tenant_settings.py",
     ROOT / "tenant_store.py",
     ROOT / "mailbox_tokens.py",
     ROOT / "web_status.py",

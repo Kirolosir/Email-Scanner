@@ -155,6 +155,16 @@ The import re-encrypts the credential for its mailbox UUID, copies only the
 reviewed runtime artifacts, and leaves the legacy connection untouched. A
 mailbox stays out of the scheduler until the import reaches `ready`.
 
+The tenant scheduler queues due mailboxes once per minute. Run multiple worker
+instances so separate mailboxes progress concurrently while the database keeps
+each individual mailbox single-operation:
+
+```sh
+systemctl enable --now tenant-scheduler.timer
+systemctl enable --now tenant-worker@1 tenant-worker@2
+systemctl enable --now tenant-worker@3 tenant-worker@4
+```
+
 These files document the VM layout:
 
 - `Caddyfile.example`

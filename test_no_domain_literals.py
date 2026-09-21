@@ -76,6 +76,8 @@ PIPELINE_MODULES = [
     "tenant_scheduler.py",
     "legacy_tenant_import.py",
     "tenant_worker.py",
+    "tenant_processor.py",
+    "tenant_settings.py",
     "encrypted_backup.py",
     "retry_queue.py",
     "runtime_metrics.py",
