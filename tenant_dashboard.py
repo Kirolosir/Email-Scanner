@@ -164,10 +164,10 @@ class TenantDashboardApp:
         return self._page("Sign in", f"""
 <main class="login-shell"><section class="login-card"><div class="mark">ES</div>
 <p class="eyebrow">Email Scanner</p><h1>Continue with Google</h1>
-<p class="lede">Sign in to your private dashboard. You can connect and manage
-your Gmail inbox separately after signing in.</p>{notice}{action}
-<p class="browser-note">Each person receives an isolated dashboard, mailbox
-connection, schedule, run history, and settings.</p></section></main>""")
+<p class="lede">Sign in to your private dashboard. The app will then continue
+directly to Gmail permission so you can link your mailbox.</p>{notice}{action}
+<p class="browser-note">Google uses two secure steps: website identity, then
+Gmail access. Each person receives an isolated dashboard and mailbox.</p></section></main>""")
 
     @staticmethod
     def _notice(query):
