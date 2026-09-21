@@ -150,7 +150,17 @@ def test_login_callback_creates_a_user_specific_session():
     response = _call(app, "/oauth/callback", query="state=s&code=c")
     assert response["status"].startswith("303")
     assert "email_scanner_session=new-session" in response["headers"]["Set-Cookie"]
+    assert response["headers"]["Location"] == "/link-gmail"
     assert store.session_issued is True
+
+
+def test_post_login_handoff_starts_gmail_authorization():
+    app, store, control = _app()
+
+    response = _call(app, "/link-gmail", cookie=_cookie())
+
+    assert response["headers"]["Location"].endswith("/mailbox")
+    assert control.connected_for == [store.user_id]
 
 
 def test_mailbox_callback_opens_full_settings_for_the_new_mailbox():
@@ -178,6 +188,35 @@ def test_sign_out_revokes_only_the_website_session():
     assert "Max-Age=0" in response["headers"]["Set-Cookie"]
     assert store.revoked == [(store.identity.session_id, store.user_id)]
     assert control.disconnected == []
+
+
+def test_link_gmail_button_starts_mailbox_authorization():
+    app, store, control = _app()
+
+    response = _call(
+        app, "/connect", "POST", _form(store), cookie=_cookie()
+    )
+
+    assert response["headers"]["Location"].endswith("/mailbox")
+    assert control.connected_for == [store.user_id]
+
+
+def test_connected_user_cannot_start_a_second_mailbox_link():
+    app, store, control = _app()
+    mailbox_id = uuid.uuid4()
+    store.mailboxes_for_user = lambda _user_id: [MailboxView(
+        mailbox_id, "coach@example.test", "UTC", dt.time(18, 0),
+        True, None, None, 0, None, "ready",
+    )]
+
+    response = _call(
+        app, "/connect", "POST", _form(store), cookie=_cookie()
+    )
+
+    assert response["headers"]["Location"] == (
+        f"/?mailbox_id={mailbox_id}&notice=already-connected"
+    )
+    assert control.connected_for == []
 
 
 def test_disconnect_is_separate_and_keeps_the_session():
@@ -270,6 +309,7 @@ def test_dashboard_shows_history_schedule_progress_and_results(tmp_path):
     assert "Coach voice" in response["body"]
     assert "Review queue" in response["body"]
     assert "--blue:#0071e3" in response["body"]
+    assert 'action="/connect"' not in response["body"]
 
 
 def test_undo_preview_is_scoped_to_owned_mailbox(tmp_path):

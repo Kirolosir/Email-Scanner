@@ -182,6 +182,7 @@ connection, schedule, run history, and settings.</p></section></main>""")
             "schedule-off": ("Daily scanning is paused.", ""),
             "disconnected": ("The Gmail account was disconnected from this website.", "good"),
             "connected": ("Gmail connected. Complete the mailbox settings to begin scanning.", "good"),
+            "already-connected": ("A Gmail account is already linked. Disconnect it before linking a different account.", "good"),
             "invalid-count": ("Choose a whole number from 10 to 5,000.", "bad"),
             "undo-unavailable": ("There is no completed run available to undo.", "bad"),
             "connect-failed": ("Google could not finish linking that Gmail account. Start again.", "bad"),
@@ -199,20 +200,22 @@ connection, schedule, run history, and settings.</p></section></main>""")
             mailboxes[0] if mailboxes else None,
         )
         csrf = csrf_value(identity)
+        connect_action = "" if mailboxes else f"""
+<form method="post" action="/connect"><input type="hidden" name="csrf" value="{csrf}">
+<button class="ghost" type="submit">Link Gmail account</button></form>"""
         header = f"""
 <header class="topbar"><a class="brand" href="/"><span class="mark small">ES</span>
 <span>Email Scanner</span></a><div class="top-actions">
 <span class="ghost-link">{html.escape(identity.display_email)}</span>
-<form method="post" action="/connect"><input type="hidden" name="csrf" value="{csrf}">
-<button class="ghost" type="submit">Link Gmail account</button></form>
+{connect_action}
 <form method="post" action="/logout"><input type="hidden" name="csrf" value="{csrf}">
 <button class="ghost" type="submit">Sign out</button></form></div></header>"""
         if mailbox is None:
             return self._page("Dashboard", f"""{header}<main class="workspace">
 {self._notice(query)}<section class="account-hero"><div><p class="eyebrow">Connected inbox</p>
-<h1>No Gmail account connected</h1><p class="lede">Link a Gmail account to restore
-the complete dashboard: scans, historical backfill, labels, drafts, daily scheduling,
-run history, and undo.</p></div><div class="hero-actions"><span class="status"><i></i>Waiting</span>
+<h1>Finish connecting Gmail</h1><p class="lede">Website sign-in is complete, but Gmail access has not been linked yet.
+Link one Gmail account to activate scans, historical backfill, labels, drafts, daily scheduling,
+run history, and undo.</p></div><div class="hero-actions"><span class="status"><i></i>Step 2 of 2</span>
 <form method="post" action="/connect"><input type="hidden" name="csrf" value="{csrf}">
 <button type="submit">Link Gmail account</button></form></div></section>
 <section class="overview-grid"><article class="panel schedule"><p class="eyebrow">Next daily run</p>
@@ -484,7 +487,7 @@ Nothing is sent automatically.</p></div><div class="hero-actions"><span class="s
                     )
                     issued = self.store.issue_session(user_id, now=self.clock())
                     return self._redirect(
-                        start_response, "/",
+                        start_response, "/link-gmail",
                         [("Set-Cookie", self._cookie(issued.token))],
                     )
                 mailbox = self.control.complete_mailbox_connect(
@@ -502,6 +505,22 @@ Nothing is sent automatically.</p></div><div class="hero-actions"><span class="s
                 return self._redirect(start_response, location)
         if identity is None:
             return self._redirect(start_response, "/login")
+
+        if path == "/link-gmail" and method in {"GET", "HEAD"}:
+            mailboxes = self.store.mailboxes_for_user(identity.user_id)
+            if mailboxes:
+                return self._redirect(
+                    start_response,
+                    f"/?mailbox_id={mailboxes[0].id}"
+                    "&notice=already-connected",
+                )
+            try:
+                location = self.control.begin_mailbox_connect(identity.user_id)
+            except HostedControlError:
+                return self._redirect(
+                    start_response, "/?notice=connect-failed"
+                )
+            return self._redirect(start_response, location)
 
         if path == "/settings" and method in {"GET", "HEAD"}:
             query = parse_qs(str(environ.get("QUERY_STRING", "")))
@@ -554,6 +573,13 @@ Nothing is sent automatically.</p></div><div class="hero-actions"><span class="s
                     self._page("Request refused", "<h1>Request refused</h1>"),
                 )
             if path == "/connect":
+                mailboxes = self.store.mailboxes_for_user(identity.user_id)
+                if mailboxes:
+                    return self._redirect(
+                        start_response,
+                        f"/?mailbox_id={mailboxes[0].id}"
+                        "&notice=already-connected",
+                    )
                 return self._redirect(
                     start_response,
                     self.control.begin_mailbox_connect(identity.user_id),

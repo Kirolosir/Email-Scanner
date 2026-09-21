@@ -399,6 +399,24 @@ class PostgresTenantStore:
         with self.database.transaction():
             with self.database.cursor() as cursor:
                 cursor.execute(
+                    "SELECT id FROM users WHERE id = %s FOR UPDATE",
+                    (user_id,),
+                )
+                if cursor.fetchone() is None:
+                    raise TenantAccessDenied("website user not found")
+                cursor.execute(
+                    """
+                    SELECT google_subject FROM mailboxes
+                    WHERE user_id = %s AND disconnected_at IS NULL
+                    """,
+                    (user_id,),
+                )
+                active = cursor.fetchone()
+                if active is not None and active[0] != str(google_subject):
+                    raise TenantAccessDenied(
+                        "one Gmail account is already connected"
+                    )
+                cursor.execute(
                     "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
                     (str(google_subject),),
                 )

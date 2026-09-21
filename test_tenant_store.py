@@ -83,11 +83,13 @@ def test_migrations_are_ordered_and_have_stable_checksums():
         "0001_multitenant.sql", "0002_mailbox_setup_state.sql",
         "0003_expand_write_limit.sql",
         "0004_persist_oauth_transactions.sql",
+        "0005_one_active_mailbox_per_user.sql",
     ]
     assert len(migrations[0][1]) == 32
     assert "CREATE TABLE users" in migrations[0][2]
-    assert "CREATE TABLE oauth_transactions" in migrations[-1][2]
-    assert "state_hash bytea PRIMARY KEY" in migrations[-1][2]
+    assert "CREATE TABLE oauth_transactions" in migrations[-2][2]
+    assert "state_hash bytea PRIMARY KEY" in migrations[-2][2]
+    assert "mailboxes_one_active_per_user" in migrations[-1][2]
 
 
 def test_next_scheduled_run_preserves_local_time_across_dst():
