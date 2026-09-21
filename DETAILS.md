@@ -121,50 +121,6 @@ relevant settings invalidates the old approval instead of silently widening it.
 
 ## Hosted deployment
 
-### Multi-account storage rollout
-
-The first migration slice adds PostgreSQL ownership, session, mailbox,
-credential, settings, job, message-state, rollback, and audit tables. It does
-not switch the live dashboard away from the existing single-account files yet;
-that cutover happens only after the user-specific OAuth and route checks are
-complete.
-
-Provision PostgreSQL 15 or newer. Set `DATABASE_URL` through the root-owned
-deployment environment, install the dependencies, and apply the schema before
-enabling the multi-account code:
-
-```sh
-.venv/bin/python db_migrate.py
-```
-
-Migration checksums are recorded in `schema_migrations`. Editing an applied
-migration is refused; schema changes must be added as a new numbered file.
-`HOSTED_MULTITENANT` remains false during migration. Enabling it switches the
-dashboard to user-specific sessions and PostgreSQL mailbox ownership; it must
-only be enabled after the existing account has been imported and the tenant
-worker is installed.
-
-The existing owner must sign in once through the new website flow before the
-legacy account can be matched to a stable user identity. Then import it with:
-
-```sh
-.venv/bin/python legacy_tenant_import.py
-```
-
-The import re-encrypts the credential for its mailbox UUID, copies only the
-reviewed runtime artifacts, and leaves the legacy connection untouched. A
-mailbox stays out of the scheduler until the import reaches `ready`.
-
-The tenant scheduler queues due mailboxes once per minute. Run multiple worker
-instances so separate mailboxes progress concurrently while the database keeps
-each individual mailbox single-operation:
-
-```sh
-systemctl enable --now tenant-scheduler.timer
-systemctl enable --now tenant-worker@1 tenant-worker@2
-systemctl enable --now tenant-worker@3 tenant-worker@4
-```
-
 These files document the VM layout:
 
 - `Caddyfile.example`
