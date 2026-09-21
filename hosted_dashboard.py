@@ -1888,4 +1888,14 @@ def build_application(env=None):
     control_config = HostedControlConfig.from_environment(
         values, config.state_root
     )
+    multitenant = str(values.get("HOSTED_MULTITENANT", "")).strip().lower()
+    if multitenant in {"1", "true", "yes"}:
+        from tenant_control import TenantControl
+        from tenant_dashboard import TenantDashboardApp
+        from tenant_store import PostgresTenantStore
+
+        store = PostgresTenantStore.connect(values.get("DATABASE_URL", ""))
+        return TenantDashboardApp(
+            config, store, TenantControl(control_config, store)
+        )
     return HostedDashboardApp(config, control=HostedControl(control_config))

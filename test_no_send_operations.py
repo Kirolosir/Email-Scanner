@@ -49,6 +49,11 @@ PRODUCTION = [
     ROOT / "hosted_dashboard_wsgi.py",
     ROOT / "hosted_settings.py",
     ROOT / "hosted_control.py",
+    ROOT / "tenant_control.py",
+    ROOT / "tenant_dashboard.py",
+    ROOT / "tenant_scheduler.py",
+    ROOT / "tenant_store.py",
+    ROOT / "mailbox_tokens.py",
     ROOT / "web_status.py",
 ]
 
