@@ -144,6 +144,17 @@ dashboard to user-specific sessions and PostgreSQL mailbox ownership; it must
 only be enabled after the existing account has been imported and the tenant
 worker is installed.
 
+The existing owner must sign in once through the new website flow before the
+legacy account can be matched to a stable user identity. Then import it with:
+
+```sh
+.venv/bin/python legacy_tenant_import.py
+```
+
+The import re-encrypts the credential for its mailbox UUID, copies only the
+reviewed runtime artifacts, and leaves the legacy connection untouched. A
+mailbox stays out of the scheduler until the import reaches `ready`.
+
 These files document the VM layout:
 
 - `Caddyfile.example`

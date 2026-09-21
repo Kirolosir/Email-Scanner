@@ -113,8 +113,13 @@ connection are managed separately.</p>{notice}{action}</section>""")
                     f"<p>Latest job: {html.escape(mailbox.last_job_status)} · "
                     f"{mailbox.processed_count}/{total}</p>"
                 )
+            setup = (
+                "Ready" if mailbox.setup_status == "ready"
+                else "Setup required"
+            )
             cards.append(f"""
 <section><h2>{html.escape(mailbox.address)}</h2>
+<p>Mailbox status: {setup}</p>
 <p>Daily run: {html.escape(str(mailbox.run_at))} {html.escape(mailbox.timezone)}
  · {'enabled' if mailbox.enabled else 'paused'}</p>{progress}
 <form method="post" action="/run-now" class="row">

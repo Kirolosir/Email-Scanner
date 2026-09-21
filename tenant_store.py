@@ -72,6 +72,28 @@ class MailboxView:
     last_job_status: str | None
     processed_count: int
     requested_count: int | None
+    setup_status: str
+
+
+@dataclass(frozen=True)
+class UserIdentity:
+    id: uuid.UUID
+    identity_issuer: str
+    identity_subject: str
+    display_email: str
+
+
+@dataclass(frozen=True)
+class WorkerMailbox:
+    id: uuid.UUID
+    user_id: uuid.UUID
+    address: str
+    timezone: str
+    run_at: dt.time
+    max_scan: int
+    write_limit: int
+    max_drafts: int
+    policy_version: int
 
 
 def _utc_now():
@@ -159,6 +181,21 @@ class PostgresTenantStore:
                     (user_id, str(issuer), str(subject), str(display_email)),
                 )
                 return cursor.fetchone()[0]
+
+    def user_for_email(self, display_email):
+        with self.database.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, identity_issuer, identity_subject, display_email
+                FROM users
+                WHERE lower(display_email) = lower(%s) AND disabled_at IS NULL
+                """,
+                (str(display_email),),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise TenantAccessDenied("website user not found")
+        return UserIdentity(*row)
 
     def issue_session(self, user_id, *, now=None, ttl=SESSION_TTL):
         now = now or _utc_now()
@@ -393,6 +430,45 @@ class PostgresTenantStore:
             raise TenantAccessDenied("mailbox credential not found")
         return EncryptedMailboxToken(*row)
 
+    def worker_mailbox(self, job_id, mailbox_id):
+        with self.database.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT m.id, m.user_id, m.address, s.timezone, s.run_at,
+                       s.max_scan, s.write_limit, s.max_drafts, s.policy_version
+                FROM jobs AS j
+                JOIN mailboxes AS m ON m.id = j.mailbox_id
+                JOIN mailbox_settings AS s ON s.mailbox_id = m.id
+                WHERE j.id = %s AND j.mailbox_id = %s
+                  AND j.status = 'running' AND m.disconnected_at IS NULL
+                  AND m.setup_status = 'ready'
+                """,
+                (job_id, mailbox_id),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise TenantAccessDenied("worker mailbox is unavailable")
+        return WorkerMailbox(*row)
+
+    def worker_credentials(self, job_id, mailbox_id):
+        with self.database.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT c.version, c.wrapped_key, c.nonce, c.ciphertext
+                FROM jobs AS j
+                JOIN mailboxes AS m ON m.id = j.mailbox_id
+                JOIN oauth_credentials AS c ON c.mailbox_id = m.id
+                WHERE j.id = %s AND j.mailbox_id = %s
+                  AND j.status = 'running' AND m.disconnected_at IS NULL
+                  AND m.setup_status = 'ready'
+                """,
+                (job_id, mailbox_id),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise TenantAccessDenied("worker credential is unavailable")
+        return EncryptedMailboxToken(*row)
+
     def mailbox_for_user(self, user_id, mailbox_id):
         with self.database.cursor() as cursor:
             cursor.execute(
@@ -414,7 +490,7 @@ class PostgresTenantStore:
                 """
                 SELECT m.id, m.address, s.timezone, s.run_at, s.enabled,
                        s.next_run_at, latest.status, COALESCE(latest.processed_count, 0),
-                       latest.requested_count
+                       latest.requested_count, m.setup_status
                 FROM mailboxes AS m
                 JOIN mailbox_settings AS s ON s.mailbox_id = m.id
                 LEFT JOIN LATERAL (
@@ -428,6 +504,50 @@ class PostgresTenantStore:
                 (user_id,),
             )
             return [MailboxView(*row) for row in cursor.fetchall()]
+
+    def update_mailbox_settings(self, user_id, mailbox_id, *, timezone,
+                                run_at, enabled, max_scan, write_limit,
+                                max_drafts, now=None):
+        now = now or _utc_now()
+        next_run_at = next_scheduled_run(timezone, run_at, now)
+        with self.database.transaction():
+            with self.database.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE mailbox_settings AS s
+                    SET timezone = %s, run_at = %s, enabled = %s,
+                        max_scan = %s, write_limit = %s, max_drafts = %s,
+                        next_run_at = %s, updated_at = %s
+                    FROM mailboxes AS m
+                    WHERE s.mailbox_id = m.id AND m.id = %s
+                      AND m.user_id = %s AND m.disconnected_at IS NULL
+                    RETURNING s.mailbox_id
+                    """,
+                    (str(timezone), run_at, bool(enabled), int(max_scan),
+                     int(write_limit), int(max_drafts), next_run_at, now,
+                     mailbox_id, user_id),
+                )
+                if cursor.fetchone() is None:
+                    raise TenantAccessDenied("mailbox not found")
+
+    def set_mailbox_setup(self, user_id, mailbox_id, status, *, error_code=None):
+        if status not in {"pending", "ready", "error"}:
+            raise TenantStoreError("mailbox setup status is invalid")
+        with self.database.transaction():
+            with self.database.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE mailboxes SET setup_status = %s,
+                        setup_error_code = %s
+                    WHERE id = %s AND user_id = %s
+                      AND disconnected_at IS NULL
+                    RETURNING id
+                    """,
+                    (status, str(error_code or "") or None,
+                     mailbox_id, user_id),
+                )
+                if cursor.fetchone() is None:
+                    raise TenantAccessDenied("mailbox not found")
 
     def disconnect_mailbox(self, user_id, mailbox_id, *, now=None):
         with self.database.transaction():
@@ -495,6 +615,7 @@ class PostgresTenantStore:
                     JOIN mailboxes AS m ON m.id = s.mailbox_id
                     WHERE s.enabled = true AND s.next_run_at <= %s
                       AND m.disconnected_at IS NULL
+                      AND m.setup_status = 'ready'
                     ORDER BY s.next_run_at
                     FOR UPDATE OF s SKIP LOCKED
                     LIMIT %s
@@ -552,6 +673,7 @@ class PostgresTenantStore:
                         WHERE j.status = 'queued'
                           AND j.run_after <= %s
                           AND m.disconnected_at IS NULL
+                          AND m.setup_status = 'ready'
                           AND NOT EXISTS (
                               SELECT 1 FROM jobs AS active
                               WHERE active.mailbox_id = j.mailbox_id
