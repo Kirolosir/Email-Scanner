@@ -400,6 +400,18 @@ def test_daily_same_day_guard_contacts_no_service(monkeypatch, tmp_path):
     assert result == 0
 
 
+def test_history_backfill_never_satisfies_the_daily_schedule():
+    history = SimpleNamespace(mode="daily", history_scan=True)
+    current_mail = SimpleNamespace(mode="daily", history_scan=False)
+
+    assert not daily_triage.should_mark_daily_complete(history, 0, [])
+    assert daily_triage.should_mark_daily_complete(current_mail, 0, [])
+    assert not daily_triage.should_mark_daily_complete(current_mail, 1, [])
+    assert not daily_triage.should_mark_daily_complete(
+        current_mail, 0, [object()]
+    )
+
+
 def stat_mode(path):
     return os.stat(path).st_mode & 0o777
 

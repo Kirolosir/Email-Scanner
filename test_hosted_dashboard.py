@@ -16,14 +16,14 @@ BEARER = "b" * 48
 
 
 def _app(tmp_path, control=None, run_requester=None, clock=None,
-         undo_requester=None):
+         undo_requester=None, cancel_requester=None):
     config = HostedConfig(
         tmp_path, BEARER, require_forwarded_https=False,
         require_mountpoint=False, verify_root=False,
     )
     return HostedDashboardApp(
         config, control=control, run_requester=run_requester, clock=clock,
-        undo_requester=undo_requester,
+        undo_requester=undo_requester, cancel_requester=cancel_requester,
     )
 
 
@@ -630,6 +630,39 @@ def test_dashboard_shows_live_progress_without_a_request_query(tmp_path):
     assert "Creating Gmail labels and drafts" in response["body"]
     assert "8 of 50" in response["body"]
     assert 'value="8"' in response["body"]
+    assert 'action="/cancel-run"' in response["body"]
+    assert "Cancel scan" in response["body"]
+
+
+def test_cancel_run_is_csrf_protected_and_requests_a_safe_stop(tmp_path):
+    seat = connection.connect(tmp_path, "owner@example.test")
+    (seat.directory / "daily-status.json").write_text(json.dumps({
+        "version": 1,
+        "last_run": {
+            "outcome": "running", "started_at": "2026-09-09T16:00:00+00:00",
+            "finished_at": None, "safe_error_codes": [], "counts": {},
+        },
+    }), encoding="utf-8")
+    calls = []
+
+    def request_cancel(root, *, now):
+        calls.append((root, now))
+        return 1788969600
+
+    app = _app(tmp_path, cancel_requester=request_cancel)
+    cookie = _login(app)
+    refused = _call(app, "/cancel-run", "POST", "csrf=wrong", cookie)
+    assert refused["status"].startswith("403")
+    assert calls == []
+
+    response = _call(
+        app, "/cancel-run", "POST",
+        urlencode({"csrf": app._csrf_value()}), cookie,
+    )
+    assert response["headers"]["Location"] == (
+        "/?run=cancel-requested&after=1788969600"
+    )
+    assert len(calls) == 1
 
 
 def test_dashboard_keeps_failed_run_alert_visible(tmp_path):

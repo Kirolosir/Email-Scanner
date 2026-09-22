@@ -42,9 +42,9 @@ def _validated_float_env(name, default, minimum=0.0, maximum=60.0):
 
 
 # Start conservatively, then decrease the spacing after successful requests.
-THROTTLE_SECONDS = _validated_float_env("GEMINI_THROTTLE_SECONDS", 1.0)
+THROTTLE_SECONDS = _validated_float_env("GEMINI_THROTTLE_SECONDS", 0.5)
 MIN_THROTTLE_SECONDS = _validated_float_env(
-    "GEMINI_MIN_THROTTLE_SECONDS", 0.25
+    "GEMINI_MIN_THROTTLE_SECONDS", 0.1
 )
 MAX_THROTTLE_SECONDS = _validated_float_env(
     "GEMINI_MAX_THROTTLE_SECONDS", 30.0, minimum=1.0, maximum=120.0
@@ -53,7 +53,7 @@ MAX_BACKOFF_SECONDS = _validated_float_env(
     "GEMINI_MAX_BACKOFF_SECONDS", 30.0, minimum=1.0, maximum=120.0
 )
 MAX_PARALLEL_REQUESTS = int(_validated_float_env(
-    "GEMINI_MAX_PARALLEL_REQUESTS", 4, minimum=1, maximum=16
+    "GEMINI_MAX_PARALLEL_REQUESTS", 8, minimum=1, maximum=16
 ))
 MAX_PARALLEL_BATCHES = int(_validated_float_env(
     "GEMINI_MAX_PARALLEL_BATCHES", 3, minimum=1, maximum=8
@@ -81,6 +81,10 @@ def _validated_years_env():
 SUPPORTED_GRAD_YEARS = _validated_years_env()
 
 logger = logging.getLogger(__name__)
+
+
+class AnalysisCancelled(RuntimeError):
+    """Raised after a cooperative cancellation request stops queued work."""
 
 
 def build_classification_prompt(email, profile=None):
@@ -717,7 +721,7 @@ def analyze_and_draft(email, profile=None, max_retries=3, model=None):
 
 
 def analyze_many(emails, profile=None, max_workers=None,
-                 progress_callback=None):
+                 progress_callback=None, cancel_check=None):
     """Analyze a normal-sized scan concurrently while preserving result order."""
     if not emails:
         return []
@@ -725,16 +729,25 @@ def analyze_many(emails, profile=None, max_workers=None,
         raise ValueError("normal concurrent analysis is limited to 100 messages")
     workers = min(len(emails), max_workers or MAX_PARALLEL_REQUESTS)
     if workers == 1:
+        if cancel_check is not None and cancel_check():
+            raise AnalysisCancelled("email analysis was cancelled")
         result = analyze_and_draft(emails[0], profile=profile)
         if progress_callback is not None:
             progress_callback(1, 1)
         return [result]
     results = [None] * len(emails)
     parent_context = contextvars.copy_context()
+
+    def _analyze(email):
+        if cancel_check is not None and cancel_check():
+            raise AnalysisCancelled("email analysis was cancelled")
+        return analyze_and_draft(email, profile=profile)
+
+    cancelled = False
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
             executor.submit(
-                parent_context.copy().run, analyze_and_draft, email, profile
+                parent_context.copy().run, _analyze, email
             ): index
             for index, email in enumerate(emails)
         }
@@ -743,6 +756,8 @@ def analyze_many(emails, profile=None, max_workers=None,
             index = futures[future]
             try:
                 results[index] = future.result()
+            except AnalysisCancelled:
+                cancelled = True
             except Exception as exc:
                 logger.warning(
                     "Concurrent analysis failed at item %d (%s); it will use "
@@ -751,11 +766,14 @@ def analyze_many(emails, profile=None, max_workers=None,
             completed += 1
             if progress_callback is not None:
                 progress_callback(completed, len(emails))
+    if cancelled or (cancel_check is not None and cancel_check()):
+        raise AnalysisCancelled("email analysis was cancelled")
     return results
 
 
 def analyze_batch(emails, profile=None, model=None, poll_seconds=10.0,
-                  timeout_seconds=86400.0, allow_small=False):
+                  timeout_seconds=86400.0, allow_small=False,
+                  cancel_check=None):
     """Run large scans through the discounted asynchronous Batch API."""
     if len(emails) <= 100 and not allow_small:
         raise ValueError("Batch API is reserved for scans above 100 messages")
@@ -779,6 +797,12 @@ def analyze_batch(emails, profile=None, model=None, poll_seconds=10.0,
         return str(getattr(value, "value", value))
 
     while _state_value(getattr(job, "state", "")) not in terminal:
+        if cancel_check is not None and cancel_check():
+            try:
+                client.batches.cancel(name=job.name)
+            except Exception:  # noqa: BLE001 - cancellation remains best-effort
+                pass
+            raise AnalysisCancelled("email analysis was cancelled")
         if time.monotonic() - started >= timeout_seconds:
             raise TimeoutError("Batch analysis did not finish before its deadline")
         time.sleep(max(1.0, float(poll_seconds)))
@@ -804,7 +828,7 @@ def analyze_batch(emails, profile=None, model=None, poll_seconds=10.0,
 
 
 def analyze_batch_groups(emails, profile=None, max_workers=None,
-                         progress_callback=None):
+                         progress_callback=None, cancel_check=None):
     """Analyze a large backfill through bounded concurrent batch jobs."""
     if len(emails) <= 100:
         raise ValueError("concurrent batch groups are reserved for large scans")
@@ -813,7 +837,9 @@ def analyze_batch_groups(emails, profile=None, max_workers=None,
         for offset in range(0, len(emails), BATCH_GROUP_SIZE)
     ]
     if len(groups) == 1:
-        result = analyze_batch(groups[0], profile=profile)
+        result = analyze_batch(
+            groups[0], profile=profile, cancel_check=cancel_check
+        )
         if progress_callback is not None:
             progress_callback(len(emails), len(emails))
         return result
@@ -822,7 +848,12 @@ def analyze_batch_groups(emails, profile=None, max_workers=None,
     parent_context = contextvars.copy_context()
 
     def _run_group(group):
-        return analyze_batch(group, profile=profile, allow_small=True)
+        if cancel_check is not None and cancel_check():
+            raise AnalysisCancelled("email analysis was cancelled")
+        return analyze_batch(
+            group, profile=profile, allow_small=True,
+            cancel_check=cancel_check,
+        )
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {

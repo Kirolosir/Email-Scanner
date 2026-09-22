@@ -356,13 +356,28 @@ def test_single_message_analysis_reports_completion(monkeypatch):
     assert progress == [(1, 1)]
 
 
+def test_normal_analysis_stops_before_starting_after_cancellation(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        gemini_client, "analyze_and_draft",
+        lambda email, profile=None: calls.append(email),
+    )
+
+    with pytest.raises(gemini_client.AnalysisCancelled):
+        gemini_client.analyze_many(
+            [{"message": 1}], cancel_check=lambda: True
+        )
+
+    assert calls == []
+
+
 def test_large_backfill_runs_bounded_batch_groups_concurrently(monkeypatch):
     lock = __import__("threading").Lock()
     barrier = __import__("threading").Barrier(3)
     active = 0
     peak = 0
 
-    def analyze(group, profile=None, allow_small=False):
+    def analyze(group, profile=None, allow_small=False, cancel_check=None):
         nonlocal active, peak
         with lock:
             active += 1
@@ -370,6 +385,7 @@ def test_large_backfill_runs_bounded_batch_groups_concurrently(monkeypatch):
         barrier.wait(timeout=2)
         with lock:
             active -= 1
+        assert cancel_check is None
         return list(group)
 
     monkeypatch.setattr(gemini_client, "analyze_batch", analyze)

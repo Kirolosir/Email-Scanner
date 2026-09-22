@@ -78,6 +78,28 @@ def test_repeat_click_is_refused_instead_of_queueing_a_duplicate(tmp_path):
     assert document["requested_at"] == NOW.isoformat(timespec="seconds")
 
 
+def test_cancel_request_is_private_bound_and_only_allowed_while_running(tmp_path):
+    occupant = _ready_connection(tmp_path)
+    with pytest.raises(requests.RunRequestError, match="no running"):
+        requests.request_cancel(tmp_path, now=NOW)
+
+    (occupant.directory / "daily-status.json").write_text(json.dumps({
+        "version": 1,
+        "last_run": {"outcome": "running"},
+    }), encoding="utf-8")
+    requested_epoch = requests.request_cancel(tmp_path, now=NOW)
+    path = requests.cancel_path(occupant.directory)
+
+    assert requested_epoch == int(NOW.timestamp())
+    assert requests.cancel_requested(
+        occupant.directory, occupant, now=NOW + dt.timedelta(seconds=1)
+    )
+    assert "@" not in path.read_text(encoding="utf-8")
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    requests.discard_cancel(occupant.directory)
+    assert not path.exists()
+
+
 def test_active_backfill_refuses_another_history_job_but_allows_recent(tmp_path):
     occupant = _ready_connection(tmp_path)
     (occupant.directory / requests.BACKFILL_FILE).write_text(

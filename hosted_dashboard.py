@@ -289,6 +289,11 @@ def _run_feedback(occupant, now, run_state="", requested_epoch=None):
             '<p class="notice bad">The run could not be requested. Nothing '
             'was changed; try again shortly.</p>', False,
         )
+    if run_state == "cancel-failed":
+        return (
+            '<p class="notice bad">There is no active scan to cancel, or the '
+            'cancellation request could not be saved.</p>', False,
+        )
     if occupant is None:
         return "", False
 
@@ -306,7 +311,20 @@ def _run_feedback(occupant, now, run_state="", requested_epoch=None):
             'Use Link Google account, then press Run now again.</p>', False,
         )
 
-    if run_state not in {"requested", "checking"} or requested_epoch is None:
+    if run_state == "cancel-requested":
+        if details["outcome"] == "running":
+            return (
+                '<p class="notice progress"><strong>Cancellation requested.'
+                '</strong> In-flight work will finish safely, then the scan '
+                'will stop.</p>', True,
+            )
+        if details["outcome"] == "cancelled":
+            return (
+                '<p class="notice good"><strong>Run cancelled.</strong> '
+                'Completed drafts and labels were kept.</p>', False,
+            )
+    if run_state not in {"requested", "checking", "cancel-requested"} \
+            or requested_epoch is None:
         return "", False
     requested = dt.datetime.fromtimestamp(
         requested_epoch, tz=dt.timezone.utc
@@ -332,6 +350,12 @@ def _run_feedback(occupant, now, run_state="", requested_epoch=None):
             '<p class="notice bad"><strong>The run stopped safely.</strong> '
             'No email was sent. Reconnect Google or review your settings, then '
             'try again.</p>', False,
+        )
+    if is_current_run and details["outcome"] == "cancelled":
+        return (
+            '<p class="notice good"><strong>Run cancelled.</strong> Work that '
+            'had already completed was kept; no additional emails will be '
+            'processed.</p>', False,
         )
 
     queued = hosted_run_request.request_path(occupant.directory).is_file()
@@ -401,7 +425,7 @@ FAILURE_MESSAGES = {
 }
 
 
-def _render_run_progress(details):
+def _render_run_progress(details, cancel_form=""):
     if details.get("outcome") != "running":
         return ""
     current = details.get("current", 0)
@@ -418,7 +442,8 @@ def _render_run_progress(details):
     return f"""
       <section class="panel run-progress" aria-live="polite">
         <div class="section-head"><div><p class="eyebrow">Live run</p>
-          <h2>{stage}</h2></div><strong>{html.escape(amount)}</strong></div>
+          <h2>{stage}</h2></div><div class="section-actions">
+          <strong>{html.escape(amount)}</strong>{cancel_form}</div></div>
         <progress max="{max(1, total)}" value="{min(current, max(1, total))}">{percent}%</progress>
         <p>{percent}% complete{estimate} · updates every {RUN_REFRESH_SECONDS} seconds.</p>
       </section>"""
@@ -495,12 +520,15 @@ def _cookie_map(environ):
 
 class HostedDashboardApp:
     def __init__(self, config, clock=None, control=None, run_requester=None,
-                 undo_requester=None):
+                 undo_requester=None, cancel_requester=None):
         self.config = config
         self.clock = clock or (lambda: dt.datetime.now(dt.timezone.utc))
         self.control = control
         self.run_requester = run_requester or hosted_run_request.request_run
         self.undo_requester = undo_requester or hosted_run_request.request_undo
+        self.cancel_requester = (
+            cancel_requester or hosted_run_request.request_cancel
+        )
 
     def _session_value(self):
         return hmac.new(
@@ -758,6 +786,26 @@ class HostedDashboardApp:
             return self._redirect(
                 start_response,
                 f"/?run=requested&after={requested_epoch}",
+            )
+
+        if path == "/cancel-run" and method == "POST":
+            form = self._form(environ)
+            if form is None or not self._csrf_ok(form):
+                return self._respond(
+                    start_response, "403 Forbidden",
+                    self._page("Request refused", "<h1>Request refused.</h1>"),
+                )
+            try:
+                requested_epoch = self.cancel_requester(
+                    self.config.state_root, now=self.clock()
+                )
+            except (hosted_run_request.RunRequestError,
+                    connection.ConnectionError,
+                    connection.ConnectionConfigError, OSError):
+                return self._redirect(start_response, "/?run=cancel-failed")
+            return self._redirect(
+                start_response,
+                f"/?run=cancel-requested&after={requested_epoch}",
             )
 
         if path == "/undo" and method in {"GET", "HEAD"}:
@@ -1136,7 +1184,13 @@ class HostedDashboardApp:
         connected = state.get("state") == "connected"
         status_tone = "good" if connected else "warn"
         status_text = "Active" if connected else state.get("state", "Vacant")
-        progress_panel = _render_run_progress(run_details)
+        cancel_form = (
+            '<form method="post" action="/cancel-run">'
+            f'<input type="hidden" name="csrf" value="{self._csrf_value()}">'
+            '<button class="danger" type="submit">Cancel scan</button></form>'
+            if run_details.get("outcome") == "running" else ""
+        )
+        progress_panel = _render_run_progress(run_details, cancel_form)
         failure_alert = _render_failure_alert(run_details)
         review_queue = _render_review_queue(review_rows)
         coach_name = coach_profile.get("display_name") or "Coach profile"

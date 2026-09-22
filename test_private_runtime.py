@@ -77,6 +77,20 @@ def test_status_publishes_bounded_live_progress(tmp_path):
     assert run["counts"]["drafted"] == 7
 
 
+def test_status_records_owner_cancellation_separately_from_failure(tmp_path):
+    status = RunStatus(tmp_path / "status.json")
+    status.start("daily:apply")
+    status.progress("Writing", {"drafted": 3}, current=3, total=10)
+
+    status.cancel({"drafted": 3})
+
+    run = status.data["last_run"]
+    assert run["outcome"] == "cancelled"
+    assert run["stage"] == "Cancelled"
+    assert run["counts"]["drafted"] == 3
+    assert status.data["history"][-1]["outcome"] == "cancelled"
+
+
 # --------------------------------------------------------------------
 # mkdir(parents=True, mode=0o700) applies the mode to the LAST component
 # only; parents get the umask, 0755 in practice. A nested state_dir such

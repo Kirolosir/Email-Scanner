@@ -361,3 +361,19 @@ class RunStatus:
         })
         self.data["history"] = history
         atomic_write_json(self.path, self.data)
+
+    def cancel(self, counts=None):
+        """Record an owner-requested stop without reporting a system failure."""
+        self.finish(False, counts, ["run_cancelled"])
+        run = self.data.get("last_run") or {}
+        run.update({
+            "outcome": "cancelled",
+            "stage": "Cancelled",
+            "safe_error_codes": ["run_cancelled"],
+        })
+        self.data["last_run"] = run
+        history = list(self.data.get("history", []))
+        if history:
+            history[-1]["outcome"] = "cancelled"
+            self.data["history"] = history
+        atomic_write_json(self.path, self.data)

@@ -62,7 +62,12 @@ from triage import (
     SAFETY_HEADERS,
 )
 from triage_config import DEFAULT_LABEL_CONFIG, load_triage_label_config
-from gemini_client import THROTTLE_SECONDS, analyze_batch_groups, analyze_many
+from gemini_client import (
+    THROTTLE_SECONDS,
+    AnalysisCancelled,
+    analyze_batch_groups,
+    analyze_many,
+)
 from gmail_reader import get_header_values
 from message_safety import (
     DEFAULT_MAX_BODY_CHARS,
@@ -869,9 +874,23 @@ def _estimate_metadata(messages, account_labels, config, state, own_address,
     return counts
 
 
+def should_mark_daily_complete(args, failures, deferred):
+    """Only a finished current-mail scan satisfies the daily schedule."""
+    return (
+        args.mode == "daily"
+        and not args.history_scan
+        and not failures
+        and not deferred
+    )
+
+
+class RunCancelled(RuntimeError):
+    """A cooperative stop requested by the signed-in account owner."""
+
+
 def _run_locked(args, classifier, config, templates, state, status,
                 gmail_service=None, message_ids_override=None,
-                gmail_write_services=None):
+                gmail_write_services=None, cancel_check=None):
     counts = {
         "scanned": 0, "classified": 0, "labeled": 0, "drafted": 0,
         "needs_review": 0, "skipped": 0, "failures": 0,
@@ -905,6 +924,12 @@ def _run_locked(args, classifier, config, templates, state, status,
         }
         status.finish(code == 0, counts, error_codes=error_codes)
         return code
+
+    def stop_if_cancelled():
+        if cancel_check is not None and cancel_check():
+            raise RunCancelled("mailbox scan was cancelled")
+
+    stop_if_cancelled()
 
     local_timezone = getattr(args, "local_timezone", LOCAL_TIMEZONE)
     today = dt.datetime.now(local_timezone).date()
@@ -1110,6 +1135,7 @@ def _run_locked(args, classifier, config, templates, state, status,
         and email.get("rfc_message_id")
     ] if account_wide_generation else []
     generation_emails = [prepared_emails[index] for index in generation_indices]
+    stop_if_cancelled()
     if len(generation_emails) > 100:
         status.progress(
             "Preparing large email batch", counts,
@@ -1122,9 +1148,12 @@ def _run_locked(args, classifier, config, templates, state, status,
                     "Analyzing background groups", counts,
                     current=current, total=total,
                 ),
+                cancel_check=cancel_check,
             )
             for index, result in zip(generation_indices, analyzed):
                 combined_results[index] = result
+        except AnalysisCancelled as exc:
+            raise RunCancelled("mailbox scan was cancelled") from exc
         except Exception as exc:
             logger.warning(
                 "Large batch analysis failed (%s); continuing with resumable "
@@ -1135,19 +1164,24 @@ def _run_locked(args, classifier, config, templates, state, status,
             "Analyzing emails concurrently", counts,
             current=0, total=len(generation_emails),
         )
-        analyzed = analyze_many(
-            generation_emails, profile=args.profile,
-            progress_callback=lambda current, total: status.progress(
-                "Analyzing emails concurrently", counts,
-                current=current, total=total,
-            ),
-        )
+        try:
+            analyzed = analyze_many(
+                generation_emails, profile=args.profile,
+                progress_callback=lambda current, total: status.progress(
+                    "Analyzing emails concurrently", counts,
+                    current=current, total=total,
+                ),
+                cancel_check=cancel_check,
+            )
+        except AnalysisCancelled as exc:
+            raise RunCancelled("mailbox scan was cancelled") from exc
         for index, result in zip(generation_indices, analyzed):
             combined_results[index] = result
 
     plans = []
     for index, (message, email, combined_result) in enumerate(
             zip(candidates, prepared_emails, combined_results), start=1):
+        stop_if_cancelled()
         status.progress(
             "Analyzing emails and writing replies", counts,
             current=index - 1, total=len(candidates),
@@ -1246,7 +1280,7 @@ def _run_locked(args, classifier, config, templates, state, status,
     if not plans:
         # Deferred work means the day is NOT done. Marking it complete here
         # would set the same-day guard and hide the remainder until tomorrow.
-        if args.mode == "daily" and not failures and not deferred:
+        if should_mark_daily_complete(args, failures, deferred):
             state.mark_daily_complete(today)
         print("Nothing eligible to process; no Gmail writes or draft log created.")
         return done(1 if failures else 0,
@@ -1258,6 +1292,7 @@ def _run_locked(args, classifier, config, templates, state, status,
     # Refresh after the human confirmation window. A manual draft created
     # while the preview was open must still suppress our draft creation.
     if plans:
+        stop_if_cancelled()
         draft_threads = list_existing_draft_threads(service, throttle)
         reconcile_existing_drafts(plans, state, draft_threads, config)
 
@@ -1284,6 +1319,7 @@ def _run_locked(args, classifier, config, templates, state, status,
             thread_locks.setdefault(thread_id, threading.Lock())
 
         def _execute(index, plan):
+            stop_if_cancelled()
             write_service = service_pool.get()
             try:
                 with thread_locks[plan["email"].get("thread_id", "")]:
@@ -1297,6 +1333,7 @@ def _run_locked(args, classifier, config, templates, state, status,
                 service_pool.put(write_service)
 
         completed_writes = 0
+        cancellation_seen = False
         with ThreadPoolExecutor(max_workers=len(write_services)) as executor:
             parent_context = contextvars.copy_context()
             futures = {
@@ -1312,6 +1349,9 @@ def _run_locked(args, classifier, config, templates, state, status,
                     labels, _draft_id, plan_errors = result
                     plan["_applied_labels"] = list(labels)
                     counts["labeled"] += len(labels)
+                except RunCancelled:
+                    cancellation_seen = True
+                    continue
                 except Exception as exc:
                     _draft_id = ""
                     plan_errors = [f"unexpected failure ({type(exc).__name__})"]
@@ -1343,10 +1383,16 @@ def _run_locked(args, classifier, config, templates, state, status,
                     current=completed_writes, total=len(plans),
                 )
 
+        if cancellation_seen or (
+                cancel_check is not None and cancel_check()):
+            if rollback_journal is not None:
+                rollback_journal.complete()
+            raise RunCancelled("mailbox scan was cancelled")
+
     if rollback_journal is not None:
         rollback_journal.complete()
 
-    if args.mode == "daily" and counts["failures"] == 0 and not deferred:
+    if should_mark_daily_complete(args, counts["failures"], deferred):
         state.mark_daily_complete(today)
     print(f"\nCompleted {len(plans)} candidates with {counts['failures']} errors.")
     if counts["drafted"]:
@@ -1355,7 +1401,8 @@ def _run_locked(args, classifier, config, templates, state, status,
 
 
 def _main_with_args(args, classifier=None, gmail_service=None,
-                    message_ids_override=None, gmail_write_services=None):
+                    message_ids_override=None, gmail_write_services=None,
+                    cancel_check=None):
     from runtime_metrics import reset
     reset()
     logging.basicConfig(
@@ -1405,7 +1452,13 @@ def _main_with_args(args, classifier=None, gmail_service=None,
                     gmail_service=gmail_service,
                     message_ids_override=message_ids_override,
                     gmail_write_services=gmail_write_services,
+                    cancel_check=cancel_check,
                 )
+            except RunCancelled:
+                current = (status.data.get("last_run") or {}).get("counts") or {}
+                status.cancel(current)
+                print("Mailbox scan cancelled; completed changes were preserved.")
+                return 0
             except Exception as exc:
                 print(f"Daily triage stopped safely ({type(exc).__name__}).")
                 # The status file stays a PII-free summary. The type name
@@ -1460,7 +1513,8 @@ def _finalize_review_report(args, reporter, code):
 
 
 def main(argv=None, classifier=None, gmail_service=None,
-         message_ids_override=None, gmail_write_services=None):
+         message_ids_override=None, gmail_write_services=None,
+         cancel_check=None):
     args = parse_args(argv)
     reporter = None
     if args.review_report:
@@ -1484,6 +1538,7 @@ def main(argv=None, classifier=None, gmail_service=None,
                 args, classifier=classifier, gmail_service=gmail_service,
                 message_ids_override=message_ids_override,
                 gmail_write_services=gmail_write_services,
+                cancel_check=cancel_check,
             )
     except Exception as exc:
         print(f"Daily triage stopped safely ({type(exc).__name__}).")

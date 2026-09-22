@@ -19,6 +19,7 @@ from rollback_journal import GROUP_ID, latest_summary
 
 
 REQUEST_FILE = "run-now-request.json"
+CANCEL_FILE = "cancel-run-request.json"
 BACKFILL_FILE = "backfill-job.json"
 REQUEST_VERSION = 3
 MAX_REQUEST_AGE = dt.timedelta(hours=1)
@@ -52,6 +53,10 @@ def _account_hash(account):
 
 def request_path(active):
     return Path(active) / REQUEST_FILE
+
+
+def cancel_path(active):
+    return Path(active) / CANCEL_FILE
 
 
 def _history_count(value):
@@ -96,6 +101,71 @@ def request_run(root, *, now=None, history_count=None):
             return int(requested_at.timestamp())
     except connection.ConnectionBusy as exc:
         raise RunAlreadyActive("a mailbox run is already in progress") from exc
+
+
+def request_cancel(root, *, now=None):
+    """Request cooperative cancellation of the connected mailbox's live run."""
+    root = Path(root)
+    requested_at = _utc_now(now)
+    occupant = connection.current(root)
+    if occupant is None:
+        raise RunRequestError("link a Google account before cancelling")
+    status_path = Path(occupant.directory) / "daily-status.json"
+    try:
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        status = {}
+    run = status.get("last_run") if isinstance(status, dict) else None
+    if not isinstance(run, dict) or run.get("outcome") != "running":
+        raise RunRequestError("there is no running mailbox scan to cancel")
+    atomic_write_json(cancel_path(occupant.directory), {
+        "version": 1,
+        "account_hash": _account_hash(occupant.account),
+        "requested_at": requested_at.isoformat(timespec="seconds"),
+    })
+    return int(requested_at.timestamp())
+
+
+def cancel_requested(active, occupant, *, now=None):
+    """Return whether a fresh, account-bound cancellation request exists."""
+    try:
+        document = json.loads(cancel_path(active).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(document, dict) or set(document) != {
+            "version", "account_hash", "requested_at"}:
+        return False
+    if document.get("version") != 1:
+        return False
+    account_hash = document.get("account_hash")
+    if not isinstance(account_hash, str) or not hmac.compare_digest(
+            account_hash, _account_hash(occupant.account)):
+        return False
+    raw_stamp = document.get("requested_at")
+    if not isinstance(raw_stamp, str):
+        return False
+    try:
+        requested_at = dt.datetime.fromisoformat(raw_stamp)
+    except ValueError:
+        return False
+    if requested_at.tzinfo is None or requested_at.utcoffset() is None:
+        return False
+    current = _utc_now(now)
+    age = current - requested_at.astimezone(dt.timezone.utc)
+    return -MAX_CLOCK_SKEW <= age <= MAX_REQUEST_AGE
+
+
+def discard_cancel(active):
+    try:
+        os.unlink(cancel_path(active))
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise RunRequestError(
+            "the cancellation request could not be removed"
+        ) from exc
 
 
 def request_undo(root, *, group_id, confirmation, now=None):

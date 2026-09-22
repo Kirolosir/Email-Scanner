@@ -251,7 +251,9 @@ def test_due_runner_injects_gmail_service_and_all_safety_limits(
     )
 
     assert code == 0
-    assert built == [("gmail", "v1", "refresh-value")] * 4
+    assert built == [
+        ("gmail", "v1", "refresh-value")
+    ] * runner.MAX_GMAIL_WRITE_WORKERS
     assert len(calls) == 1 and calls[0][1] is marker_service
     argv = calls[0][0]
     assert all(flag in argv for flag in (

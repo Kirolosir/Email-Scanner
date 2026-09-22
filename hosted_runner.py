@@ -63,7 +63,7 @@ BACKFILL_FILE = hosted_run_request.BACKFILL_FILE
 PENDING_LABEL_SETUP = hosted_settings.PENDING_LABEL_SETUP
 HISTORY_CHUNK_SIZE = 50
 BATCH_HISTORY_CHUNK_SIZE = 1000
-MAX_GMAIL_WRITE_WORKERS = 4
+MAX_GMAIL_WRITE_WORKERS = 6
 
 
 def _backfill_path(active):
@@ -417,6 +417,10 @@ def run_if_due(env=None, *, now=None, service_builder=build,
             return 0
 
         active = Path(occupant.directory)
+        try:
+            hosted_run_request.discard_cancel(active)
+        except hosted_run_request.RunRequestError:
+            pass
         status_path = active / STATUS_FILE
         retry_queue = RetryQueue(active / RETRY_QUEUE_FILE)
         try:
@@ -497,6 +501,11 @@ def run_if_due(env=None, *, now=None, service_builder=build,
             if "gmail_write_services" in inspect.signature(
                     daily_triage.main).parameters:
                 kwargs["gmail_write_services"] = gmail_write_services
+            if "cancel_check" in inspect.signature(
+                    daily_triage.main).parameters:
+                kwargs["cancel_check"] = lambda: (
+                    hosted_run_request.cancel_requested(active, occupant)
+                )
             return daily_triage.main(argv, **kwargs)
 
         if run_request and run_request.get("scope") == "rollback":
@@ -573,6 +582,8 @@ def run_if_due(env=None, *, now=None, service_builder=build,
             status = RunStatus(status_path)
             run = status.data.get("last_run") or {}
             counts = dict(run.get("counts") or {})
+            if run.get("outcome") == "cancelled":
+                return 0
             counts["retry_queued"] = len(retry_queue)
             error_codes = list(run.get("safe_error_codes") or [])
             if (not callable(getattr(provider, "wrap", None))
@@ -683,6 +694,11 @@ def run_if_due(env=None, *, now=None, service_builder=build,
                 message_ids_override=chunk,
             )
             result = getattr(daily_triage.main, "last_result", {}) or {}
+            latest_run = (RunStatus(status_path).data.get("last_run") or {})
+            if latest_run.get("outcome") == "cancelled":
+                _finish_backfill(active)
+                print("Background history scan cancelled; completed work was kept.")
+                return 0
             retry_queue.update(
                 result.get("failed_ids", ()),
                 result.get("completed_ids", ()), now=now,
@@ -720,6 +736,10 @@ def run_if_due(env=None, *, now=None, service_builder=build,
             return _update_reliability(0, apply_result=False)
         finally:
             campaign.DRAFT_LOG_DIR = old_log_dir
+            try:
+                hosted_run_request.discard_cancel(active)
+            except hosted_run_request.RunRequestError:
+                pass
             credentials = None
             gmail_service = None
 
