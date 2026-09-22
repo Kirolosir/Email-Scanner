@@ -57,6 +57,13 @@ def test_connecting_to_a_vacant_deployment_records_both_timestamps(tmp_path):
     assert occupied_by(tmp_path) == A
 
 
+def test_a_new_connection_defaults_to_eastern_time(tmp_path):
+    established = connect(tmp_path, A, now=T0)
+
+    assert established.timezone_name == "America/New_York"
+    assert established.run_at == "18:00"
+
+
 def test_the_record_is_owner_only(tmp_path):
     connect(tmp_path, A, now=T0)
     assert stat.S_IMODE(os.stat(record_path(tmp_path)).st_mode) == 0o600

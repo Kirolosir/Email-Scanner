@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import account_profile
 from private_runtime import atomic_write_json, ensure_private_directory
 
 
@@ -31,6 +32,7 @@ ALLOWED_KEYS = frozenset({
 })
 
 DEFAULT_LIMITS = {"max_scan": 25, "limit": 125, "max_drafts": 25}
+DEFAULT_TIMEZONE = account_profile.LEGACY_PROFILE.timezone
 
 
 class ConnectionError(RuntimeError):
@@ -254,7 +256,8 @@ def occupied_by(root):
     return connection.account if connection else None
 
 
-def prepare_connection(root, account, *, timezone="UTC", run_at="18:00",
+def prepare_connection(root, account, *, timezone=DEFAULT_TIMEZONE,
+                       run_at="18:00",
                        now=None, limits=None):
     """Build the connection record that ``connect`` would persist.
 
@@ -313,7 +316,7 @@ def persist_connection(connection):
     return connection
 
 
-def connect(root, account, *, timezone="UTC", run_at="18:00", now=None,
+def connect(root, account, *, timezone=DEFAULT_TIMEZONE, run_at="18:00", now=None,
             limits=None):
     """Establish or refresh the single connection.
 

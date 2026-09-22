@@ -364,6 +364,8 @@ def test_connected_owner_can_open_and_save_settings(tmp_path):
     assert "Your voice and program" in page["body"]
     assert 'name="role"' in page["body"]
     assert 'name="organization"' in page["body"]
+    assert 'value="America/New_York"' in page["body"]
+    assert 'value="America/Los_Angeles"' in page["body"]
     assert "Nothing is auto-sent" not in page["body"]
     assert "Responses must stay unsent" in page["body"]
 

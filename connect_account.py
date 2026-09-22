@@ -135,7 +135,8 @@ def build_provider(key_name, client_factory=None, crc32c=None):
 # ---------------------------------------------------------------------
 
 def connect_token_document(root, account, document, provider, *,
-                           timezone="UTC", run_at="18:00", now=None):
+                           timezone=conn.DEFAULT_TIMEZONE,
+                           run_at="18:00", now=None):
     """Establish a connection from an in-memory credential document.
 
     Order matters. The account is validated and occupancy checked first, but
@@ -200,7 +201,8 @@ def connect_token_document(root, account, document, provider, *,
     }
 
 
-def connect_account(root, account, token_path, provider, *, timezone="UTC",
+def connect_account(root, account, token_path, provider, *,
+                    timezone=conn.DEFAULT_TIMEZONE,
                     run_at="18:00", now=None, destroy_token_file=True):
     """Connect from a broker file, deleting its plaintext only on success."""
     document = read_token_document(token_path)
@@ -258,7 +260,7 @@ def parse_args(argv=None):
                         help="credential file written by broker_client collect")
     parser.add_argument("--kms-key", default=os.environ.get(KMS_KEY_ENV, ""),
                         help=f"Cloud KMS key name (default: ${KMS_KEY_ENV})")
-    parser.add_argument("--timezone", default="UTC")
+    parser.add_argument("--timezone", default=conn.DEFAULT_TIMEZONE)
     parser.add_argument("--run-at", default="18:00")
     parser.add_argument("--keep-token-file", action="store_true",
                         help="do not delete the plaintext credential afterwards")

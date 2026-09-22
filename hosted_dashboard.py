@@ -1545,8 +1545,17 @@ class HostedDashboardApp:
                     name="run_at" type="time" value="{fields['run_at']}" required></div>
                   <div><label for="timezone">Timezone</label><input id="timezone"
                     name="timezone" value="{fields['timezone']}" required
+                    list="timezone-options"
                     autocomplete="off"><p class="field-note">Use an IANA
-                    city-based timezone name or UTC.</p></div>
+                    city-based timezone name. Eastern time uses
+                    {connection.DEFAULT_TIMEZONE}.</p>
+                    <datalist id="timezone-options">
+                      <option value="{connection.DEFAULT_TIMEZONE}">Eastern</option>
+                      <option value="America/Chicago">Central</option>
+                      <option value="America/Denver">Mountain</option>
+                      <option value="America/Los_Angeles">Pacific</option>
+                      <option value="UTC">UTC</option>
+                    </datalist></div>
                   <div><label for="max_scan">Messages scanned</label><input
                     id="max_scan" name="max_scan" type="number" min="1"
                     max="{hosted_settings.MAX_MESSAGES_PER_RUN}"
