@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import datetime as dt
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -29,6 +30,11 @@ MAX_CATEGORIES = 12
 MAX_MESSAGES_PER_RUN = 2000
 MAX_WRITES_PER_MESSAGE = 5
 PENDING_LABEL_SETUP = "label-setup-pending.json"
+LABEL_SETUP_POLICY = "label-setup-policy.json"
+GMAIL_LABEL_CATALOG = "gmail-label-catalog.json"
+CREATE_MISSING_LABELS = "create_missing"
+EXISTING_LABELS_ONLY = "existing_only"
+LABEL_SETUP_MODES = {CREATE_MISSING_LABELS, EXISTING_LABELS_ONLY}
 MAX_DRAFT_GUIDANCE_CHARS = 1200
 DEFAULT_DRAFT_GUIDANCE = (
     "Sound like a real person, not a customer-service template. Respond to the "
@@ -56,7 +62,7 @@ def _bounded_int(value, name, minimum, maximum):
     return parsed
 
 
-def parse_label_lines(raw):
+def parse_label_lines(raw, system_labels=None):
     """Parse ``Display | Gmail/Label`` lines into reviewed categories."""
     lines = [line.strip() for line in str(raw or "").splitlines()
              if line.strip()]
@@ -110,16 +116,93 @@ def parse_label_lines(raw):
         })
         names.add("other")
 
-    for system_name in DEFAULT_SYSTEM_LABELS.values():
+    system_labels = system_labels or DEFAULT_SYSTEM_LABELS
+    for system_name in system_labels.values():
         if system_name.casefold() in names:
             raise SettingsError(
-                f"{system_name!r} is reserved for the assistant"
+                f"{system_name!r} is reserved for run tracking"
             )
     return categories
 
 
+def label_setup_mode(form):
+    mode = str(form.get("label_setup_mode", CREATE_MISSING_LABELS)).strip()
+    if mode not in LABEL_SETUP_MODES:
+        raise SettingsError("choose a valid Gmail label setup mode")
+    return mode
+
+
+def _system_labels(form):
+    labels = {
+        "needs_review": str(
+            form.get("needs_review_label", DEFAULT_SYSTEM_LABELS["needs_review"])
+        ).strip(),
+        "processed": str(
+            form.get("processed_label", DEFAULT_SYSTEM_LABELS["processed"])
+        ).strip(),
+    }
+    try:
+        for name in labels.values():
+            validate_label_name(name)
+    except ValueError as exc:
+        raise SettingsError(str(exc)) from exc
+    if len({name.casefold() for name in labels.values()}) != len(labels):
+        raise SettingsError("review and processed labels must be different")
+    return labels
+
+
+def save_gmail_label_catalog(active, account_labels, *, now=None):
+    """Save only Gmail label names for authenticated settings suggestions."""
+    names = account_labels.keys() if isinstance(account_labels, dict) \
+        else account_labels
+    labels = sorted({
+        str(name) for name in names
+        if isinstance(name, str) and name.strip() and len(name) <= 225
+    }, key=str.casefold)
+    refreshed = now or dt.datetime.now(dt.timezone.utc)
+    atomic_write_json(Path(active) / GMAIL_LABEL_CATALOG, {
+        "version": 1,
+        "refreshed_at": refreshed.astimezone(dt.timezone.utc).isoformat(),
+        "labels": labels,
+    })
+
+
+def load_gmail_label_catalog(active):
+    path = Path(active) / GMAIL_LABEL_CATALOG
+    try:
+        with path.open(encoding="utf-8") as handle:
+            document = json.load(handle)
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SettingsError("the Gmail label list could not be read") from exc
+    if (not isinstance(document, dict)
+            or set(document) != {"version", "refreshed_at", "labels"}
+            or document.get("version") != 1
+            or not isinstance(document.get("refreshed_at"), str)
+            or not isinstance(document.get("labels"), list)
+            or not all(isinstance(name, str) and name.strip()
+                       and len(name) <= 225 for name in document["labels"])):
+        raise SettingsError("the Gmail label list needs to be refreshed")
+    return tuple(document["labels"])
+
+
+def load_label_setup_mode(active):
+    try:
+        with (Path(active) / LABEL_SETUP_POLICY).open(
+                encoding="utf-8") as handle:
+            document = json.load(handle)
+    except FileNotFoundError:
+        return CREATE_MISSING_LABELS
+    except (OSError, json.JSONDecodeError):
+        return CREATE_MISSING_LABELS
+    mode = document.get("mode") if isinstance(document, dict) else None
+    return mode if mode in LABEL_SETUP_MODES else CREATE_MISSING_LABELS
+
+
 def build_settings_document(occupant, form):
-    categories = parse_label_lines(form.get("labels"))
+    system_labels = _system_labels(form)
+    categories = parse_label_lines(form.get("labels"), system_labels)
     timezone = str(form.get("timezone", "")).strip()
     try:
         ZoneInfo(timezone)
@@ -159,7 +242,7 @@ def build_settings_document(occupant, form):
         "account": occupant.account,
         "timezone": timezone,
         "taxonomy": categories,
-        "system_labels": dict(DEFAULT_SYSTEM_LABELS),
+        "system_labels": system_labels,
         "draft_all_replyable_messages": True,
         "fallback_category": "other",
         "ai_drafting": {
@@ -208,6 +291,7 @@ def save_settings(root, form):
         document, profile, run_at, limits = build_settings_document(
             occupant, form
         )
+        mode = label_setup_mode(form)
         try:
             taxonomy_document, ai_document = approve_account.build_documents(
                 profile
@@ -217,23 +301,45 @@ def save_settings(root, form):
         if ai_document is None:
             raise SettingsError("drafting approval was not produced")
 
+        active = Path(occupant.directory)
+        configured_labels = sorted(
+            [entry["label"] for entry in document["taxonomy"]]
+            + list(document["system_labels"].values())
+        )
+        if mode == EXISTING_LABELS_ONLY:
+            catalog = load_gmail_label_catalog(active)
+            if catalog is None:
+                raise SettingsError(
+                    "reconnect Gmail once to load its current labels before "
+                    "choosing existing labels only; nothing was changed"
+                )
+            present = set(catalog)
+            missing = [name for name in configured_labels if name not in present]
+            if missing:
+                shown = ", ".join(missing[:5])
+                suffix = "…" if len(missing) > 5 else ""
+                raise SettingsError(
+                    f"these exact Gmail labels do not exist: {shown}{suffix}; "
+                    "nothing was created"
+                )
         # Stop the timer before the multi-file bundle changes. Re-enabling is
         # the commit marker; any failure in between remains visibly disabled.
         connection.update_settings(root, occupant.account, enabled=False)
-        active = Path(occupant.directory)
         try:
             atomic_write_json(active / "account.json", document)
             atomic_write_json(
                 active / "taxonomy-confirmation.json", taxonomy_document
             )
             atomic_write_json(active / "ai-drafting-approval.json", ai_document)
+            atomic_write_json(active / LABEL_SETUP_POLICY, {
+                "version": 1,
+                "mode": mode,
+            })
             atomic_write_json(active / PENDING_LABEL_SETUP, {
                 "version": 1,
                 "account_config_digest": document_digest(document),
-                "labels": sorted(
-                    [entry["label"] for entry in document["taxonomy"]]
-                    + list(document["system_labels"].values())
-                ),
+                "labels": configured_labels,
+                "mode": mode,
             })
         except OSError as exc:
             raise SettingsError(

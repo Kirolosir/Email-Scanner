@@ -159,3 +159,52 @@ def test_settings_cannot_change_the_connected_identity(tmp_path):
     seat = connection.connect(tmp_path, A)
     settings.save_settings(tmp_path, _form())
     assert connection.current(tmp_path).account == seat.account == A
+
+
+def test_existing_labels_only_requires_exact_loaded_names_and_creates_none(
+        tmp_path):
+    seat = connection.connect(tmp_path, A)
+    form = _form(
+        label_setup_mode=settings.EXISTING_LABELS_ONLY,
+        needs_review_label="Coach Review",
+        processed_label="Coach Processed",
+        labels="Scheduling | Coach Scheduling\nOther | Coach Other",
+    )
+    with pytest.raises(settings.SettingsError, match="load its current labels"):
+        settings.save_settings(tmp_path, form)
+    assert connection.current(tmp_path).enabled is True
+
+    settings.save_gmail_label_catalog(seat.directory, {
+        "Coach Review": "L1",
+        "Coach Processed": "L2",
+        "Coach Scheduling": "L3",
+        "Coach Other": "L4",
+    })
+    updated = settings.save_settings(tmp_path, form)
+    assert updated.enabled is True
+    pending = json.loads(
+        (seat.directory / settings.PENDING_LABEL_SETUP).read_text()
+    )
+    assert pending["mode"] == settings.EXISTING_LABELS_ONLY
+    assert pending["labels"] == [
+        "Coach Other", "Coach Processed", "Coach Review", "Coach Scheduling",
+    ]
+    config = json.loads((seat.directory / "account.json").read_text())
+    assert config["system_labels"] == {
+        "needs_review": "Coach Review", "processed": "Coach Processed",
+    }
+
+
+def test_existing_labels_only_rejects_a_missing_exact_name(tmp_path):
+    seat = connection.connect(tmp_path, A)
+    settings.save_gmail_label_catalog(seat.directory, {
+        "Scheduling": "L1", "Other": "L2", "Needs Review": "L3",
+        "Processed": "L4",
+    })
+    with pytest.raises(settings.SettingsError, match="Finance"):
+        settings.save_settings(
+            tmp_path,
+            _form(label_setup_mode=settings.EXISTING_LABELS_ONLY),
+        )
+    assert connection.current(tmp_path).enabled is True
+    assert not (seat.directory / settings.PENDING_LABEL_SETUP).exists()

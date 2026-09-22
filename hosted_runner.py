@@ -219,10 +219,17 @@ def _pending_label_plan(active, occupant):
         return None
 
     pending = _read_json_object(pending_path, "pending label setup")
-    if set(pending) != {"version", "account_config_digest", "labels"}:
+    current_fields = {"version", "account_config_digest", "labels", "mode"}
+    legacy_fields = {"version", "account_config_digest", "labels"}
+    if frozenset(pending) not in {
+        frozenset(current_fields), frozenset(legacy_fields)
+    }:
         raise HostedRunnerError("pending label setup has unsupported fields")
     if pending.get("version") != 1:
         raise HostedRunnerError("pending label setup has an unsupported version")
+    mode = pending.get("mode", hosted_settings.CREATE_MISSING_LABELS)
+    if mode not in hosted_settings.LABEL_SETUP_MODES:
+        raise HostedRunnerError("pending label setup has an unsupported mode")
 
     config_path = Path(active) / CONFIG_FILE
     config_document = _read_json_object(config_path, "account configuration")
@@ -240,12 +247,12 @@ def _pending_label_plan(active, occupant):
     expected = sorted(config.all_names)
     if pending.get("labels") != expected:
         raise HostedRunnerError("pending label setup does not match reviewed labels")
-    return pending_path, profile, config
+    return pending_path, profile, config, mode
 
 
 def _apply_pending_label_plan(service, prepared):
     """Create only exact reviewed names after live Gmail identity checking."""
-    pending_path, profile, config = prepared
+    pending_path, profile, config, mode = prepared
     actual = normalize_address(
         gmail_execute(service.users().getProfile(userId="me")).get(
             "emailAddress", ""
@@ -260,7 +267,18 @@ def _apply_pending_label_plan(service, prepared):
 
     existing = fetch_account_labels(service)
     try:
+        hosted_settings.save_gmail_label_catalog(pending_path.parent, existing)
+    except OSError as exc:
+        raise HostedRunnerError(
+            f"Gmail label list could not be saved ({type(exc).__name__})"
+        ) from exc
+    try:
         plan = setup_labels.plan_label_setup(existing, config)
+        if (mode == hosted_settings.EXISTING_LABELS_ONLY
+                and plan["create"]):
+            raise HostedRunnerError(
+                "one or more configured Gmail labels do not already exist"
+            )
         _created, failures = setup_labels.apply_label_setup(
             service, config, plan, dry_run=False
         )

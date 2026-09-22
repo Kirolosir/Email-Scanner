@@ -366,6 +366,10 @@ def test_connected_owner_can_open_and_save_settings(tmp_path):
     assert 'name="organization"' in page["body"]
     assert 'value="America/New_York"' in page["body"]
     assert 'value="America/Los_Angeles"' in page["body"]
+    assert "server even when this page" in page["body"]
+    assert "use existing labels only" in page["body"]
+    assert 'name="needs_review_label"' in page["body"]
+    assert 'name="processed_label"' in page["body"]
     assert "Nothing is auto-sent" not in page["body"]
     assert "Responses must stay unsent" in page["body"]
 
@@ -382,6 +386,12 @@ def test_connected_owner_can_open_and_save_settings(tmp_path):
     profile = json.loads((seat.directory / "account.json").read_text())
     assert profile["ai_drafting"]["role"] == "Head Coach"
     assert profile["ai_drafting"]["organization"] == "Example College"
+
+
+def test_dashboard_explains_daily_run_does_not_need_an_open_browser(tmp_path):
+    connection.connect(tmp_path, "owner@example.test")
+    response = _call(_app(tmp_path), cookie=_login(_app(tmp_path)))
+    assert "website and your browser are closed" in response["body"]
 
 
 def test_settings_save_requires_csrf_and_draft_confirmation(tmp_path):

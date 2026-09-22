@@ -549,6 +549,46 @@ def test_successful_pending_setup_uses_reviewed_plan_then_clears_marker(
     assert not (seat.directory / runner.PENDING_LABEL_SETUP).exists()
 
 
+def test_existing_only_pending_setup_never_creates_a_missing_label(
+        tmp_path, monkeypatch):
+    root, _client, env = _environment(tmp_path, monkeypatch)
+    seat = connection.connect(root, A, timezone="UTC", run_at="18:00")
+    hosted_settings.save_gmail_label_catalog(seat.directory, {
+        "Scheduling": "L1", "Finance": "L2", "Other": "L3",
+        "Needs Review": "L4", "Processed": "L5",
+    })
+    hosted_settings.save_settings(root, {
+        **_settings_form(),
+        "label_setup_mode": hosted_settings.EXISTING_LABELS_ONLY,
+    })
+    marker_service = _ProfileService()
+    service_builder = _stub_connected_service(monkeypatch, marker_service)
+    monkeypatch.setattr(
+        runner, "gmail_execute", lambda _request: {"emailAddress": A}
+    )
+    monkeypatch.setattr(
+        runner, "fetch_account_labels",
+        lambda _service: {
+            "Scheduling": "L1", "Other": "L3",
+            "Needs Review": "L4", "Processed": "L5",
+        },
+    )
+    monkeypatch.setattr(
+        runner.setup_labels, "apply_label_setup",
+        lambda *_a, **_k: pytest.fail("a missing label was created"),
+    )
+
+    code = runner.run_if_due(
+        env, now=dt.datetime(2026, 9, 8, 17, 0, tzinfo=UTC),
+        service_builder=service_builder,
+    )
+
+    assert code == 2
+    assert (seat.directory / runner.PENDING_LABEL_SETUP).is_file()
+    status = json.loads((seat.directory / runner.STATUS_FILE).read_text())
+    assert status["last_run"]["safe_error_codes"] == ["label_setup_failed"]
+
+
 def test_the_timer_checks_often_but_the_runner_owns_due_decisions():
     timer = Path("hosted-triage.timer.example").read_text(encoding="utf-8")
     assert "OnCalendar=*:0/1" in timer

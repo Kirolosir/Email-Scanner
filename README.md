@@ -1,4 +1,4 @@
-# AI-Assisted Email Triage & Drafting Platform
+# Email Triage & Drafting Platform
 
 [![Tests](https://github.com/Kirolosir/Email-Scanner/actions/workflows/tests.yml/badge.svg)](https://github.com/Kirolosir/Email-Scanner/actions/workflows/tests.yml)
 
@@ -23,6 +23,8 @@ Python, Gmail API, Gemini API, Google OAuth 2.0, Google Cloud KMS, pytest
 - Encrypts stored credentials and rotating backups with Google Cloud KMS.
 - Uses idempotent message and draft journals to prevent duplicate work across interrupted or repeated runs.
 - Supports resumable background jobs, bounded retries, and per-message failure isolation for large inbox scans.
+- Runs daily scans from a server timer, so the dashboard and browser do not need to remain open.
+- Can reuse exact existing Gmail labels without creating new ones, or create only explicitly reviewed missing labels.
 - Reconciles saved processing state with Gmail so deleted program-created drafts can be safely rebuilt.
 - Provides guarded rollback that removes only the drafts and label changes created by the selected run.
 - Publishes content-free reliability and usage metrics without exposing message bodies or personal data.

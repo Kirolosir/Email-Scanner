@@ -1364,7 +1364,8 @@ class HostedDashboardApp:
                 <h2>{_escape(next_run)}</h2>
                 <p>Up to {_escape(state.get("limits", {}).get("max_scan"))}
                 recent messages per run. Every eligible message in the batch
-                is labeled and drafted.</p>
+                is labeled and drafted. This runs on the server even when the
+                website and your browser are closed.</p>
               </article>
               <article class="panel health">
                 <p class="eyebrow">Gmail connection</p>
@@ -1472,6 +1473,10 @@ class HostedDashboardApp:
                 lines.append(f"{display} | {label}")
         ai = document.get("ai_drafting")
         ai = ai if isinstance(ai, dict) else {}
+        system_labels = document.get("system_labels")
+        system_labels = (
+            system_labels if isinstance(system_labels, dict) else {}
+        )
         return {
             "labels": "\n".join(lines) or (
                 "Action needed | Action Needed\n"
@@ -1494,6 +1499,17 @@ class HostedDashboardApp:
             "max_scan": str(occupant.max_scan),
             "limit": str(occupant.limit),
             "max_drafts": str(occupant.max_drafts),
+            "needs_review_label": str(
+                system_labels.get("needs_review")
+                or hosted_settings.DEFAULT_SYSTEM_LABELS["needs_review"]
+            ),
+            "processed_label": str(
+                system_labels.get("processed")
+                or hosted_settings.DEFAULT_SYSTEM_LABELS["processed"]
+            ),
+            "label_setup_mode": hosted_settings.load_label_setup_mode(
+                occupant.directory
+            ),
         }
 
     def _settings_page(self, occupant, form=None, error=""):
@@ -1502,9 +1518,38 @@ class HostedDashboardApp:
             key: html.escape(str(values.get(key, ""))) for key in (
                 "labels", "timezone", "run_at", "display_name", "signature",
                 "role", "organization", "draft_guidance", "max_scan", "limit",
-                "max_drafts",
+                "max_drafts", "needs_review_label", "processed_label",
             )
         }
+        mode = str(values.get(
+            "label_setup_mode", hosted_settings.CREATE_MISSING_LABELS
+        ))
+        if mode not in hosted_settings.LABEL_SETUP_MODES:
+            mode = hosted_settings.CREATE_MISSING_LABELS
+        existing_selected = (
+            " selected" if mode == hosted_settings.EXISTING_LABELS_ONLY else ""
+        )
+        create_selected = (
+            " selected" if mode == hosted_settings.CREATE_MISSING_LABELS else ""
+        )
+        try:
+            catalog = hosted_settings.load_gmail_label_catalog(
+                occupant.directory
+            ) or ()
+        except hosted_settings.SettingsError:
+            catalog = ()
+        catalog_options = "".join(
+            f'<option value="{html.escape(name, quote=True)}"></option>'
+            for name in catalog
+        )
+        catalog_items = "".join(
+            f'<li>{html.escape(name)}</li>' for name in catalog
+        )
+        catalog_summary = (
+            f"{len(catalog)} current Gmail labels loaded. Use their exact names."
+            if catalog else
+            "Current Gmail labels have not been loaded yet. Reconnect Google once to refresh them."
+        )
         error_notice = (
             f'<p class="notice bad">{html.escape(str(error))}</p>' if error else ""
         )
@@ -1534,12 +1579,40 @@ class HostedDashboardApp:
                 <div><label for="labels">Labels, up to 12</label>
                   <textarea id="labels" name="labels" rows="8" required
                     spellcheck="false">{fields['labels']}</textarea>
-                  <p class="field-note">Example: Scheduling | Scheduling</p></div>
+                  <p class="field-note">Example: Scheduling | Scheduling</p>
+                  <label for="label_setup_mode">If a configured label is missing</label>
+                  <select id="label_setup_mode" name="label_setup_mode" required>
+                    <option value="{hosted_settings.EXISTING_LABELS_ONLY}"{existing_selected}>
+                      Stop safely — use existing labels only
+                    </option>
+                    <option value="{hosted_settings.CREATE_MISSING_LABELS}"{create_selected}>
+                      Create the missing reviewed label
+                    </option>
+                  </select>
+                  <p class="field-note">{html.escape(catalog_summary)}</p>
+                  {(
+                      '<details class="label-catalog"><summary>View current Gmail labels</summary>'
+                      f'<ul>{catalog_items}</ul></details>'
+                      if catalog else ''
+                  )}
+                  <div class="field-grid coach-fields">
+                    <div><label for="needs_review_label">Needs-review label</label>
+                      <input id="needs_review_label" name="needs_review_label"
+                        value="{fields['needs_review_label']}" required
+                        list="gmail-label-options" autocomplete="off"></div>
+                    <div><label for="processed_label">Processed label</label>
+                      <input id="processed_label" name="processed_label"
+                        value="{fields['processed_label']}" required
+                        list="gmail-label-options" autocomplete="off"></div>
+                  </div>
+                  <datalist id="gmail-label-options">{catalog_options}</datalist>
+                </div>
               </section>
               <section class="panel form-section">
                 <div class="form-copy"><p class="eyebrow">2 · Schedule</p>
                   <h2>Daily run</h2><p>This local time controls when the
-                  assistant checks eligible inbox mail.</p></div>
+                  service checks eligible inbox mail. Runs happen on the
+                  server even when this page and your browser are closed.</p></div>
                 <div class="field-grid">
                   <div><label for="run_at">Start time</label><input id="run_at"
                     name="run_at" type="time" value="{fields['run_at']}" required></div>

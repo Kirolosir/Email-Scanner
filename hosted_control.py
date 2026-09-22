@@ -26,7 +26,9 @@ import connection_tokens
 from connect_account import build_provider, connect_token_document
 from gmail_auth import SCOPES
 from gmail_common import normalize_address
+from gmail_labeler import fetch_account_labels
 from gmail_retry import gmail_execute
+import hosted_settings
 
 
 OAUTH_TTL_SECONDS = 600
@@ -210,9 +212,21 @@ class HostedControl:
             token_document = json.loads(credentials.to_json())
             stage = "credential_storage_failed"
             provider = self._provider_builder(self.config.kms_key)
-            return connect_token_document(
+            summary = connect_token_document(
                 self.config.state_root, actual, token_document, provider
             )
+            try:
+                occupant = connection.current(self.config.state_root)
+                if occupant is not None:
+                    hosted_settings.save_gmail_label_catalog(
+                        occupant.directory, fetch_account_labels(service)
+                    )
+            except Exception as exc:  # label suggestions are non-critical
+                logger.warning(
+                    "Gmail label suggestions could not be saved (%s)",
+                    type(exc).__name__,
+                )
+            return summary
         except HostedControlError:
             raise
         except connection.ConnectionOccupied as exc:
