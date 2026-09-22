@@ -329,12 +329,31 @@ def test_normal_scan_analysis_runs_concurrently_and_keeps_order(monkeypatch):
         return {"message": email["message"]}
 
     monkeypatch.setattr(gemini_client, "analyze_and_draft", analyze)
+    progress = []
     results = gemini_client.analyze_many(
-        [{"message": index} for index in range(3)], max_workers=3
+        [{"message": index} for index in range(3)], max_workers=3,
+        progress_callback=lambda current, total: progress.append((current, total)),
     )
 
     assert peak == 3
     assert [result["message"] for result in results] == [0, 1, 2]
+    assert progress == [(1, 3), (2, 3), (3, 3)]
+
+
+def test_single_message_analysis_reports_completion(monkeypatch):
+    monkeypatch.setattr(
+        gemini_client, "analyze_and_draft",
+        lambda email, profile=None: {"message": email["message"]},
+    )
+    progress = []
+
+    results = gemini_client.analyze_many(
+        [{"message": 1}],
+        progress_callback=lambda current, total: progress.append((current, total)),
+    )
+
+    assert results == [{"message": 1}]
+    assert progress == [(1, 1)]
 
 
 def test_large_backfill_runs_bounded_batch_groups_concurrently(monkeypatch):

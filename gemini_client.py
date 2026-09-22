@@ -716,7 +716,8 @@ def analyze_and_draft(email, profile=None, max_retries=3, model=None):
     raise RuntimeError("Combined Gemini response failed validation") from last_error
 
 
-def analyze_many(emails, profile=None, max_workers=None):
+def analyze_many(emails, profile=None, max_workers=None,
+                 progress_callback=None):
     """Analyze a normal-sized scan concurrently while preserving result order."""
     if not emails:
         return []
@@ -724,7 +725,10 @@ def analyze_many(emails, profile=None, max_workers=None):
         raise ValueError("normal concurrent analysis is limited to 100 messages")
     workers = min(len(emails), max_workers or MAX_PARALLEL_REQUESTS)
     if workers == 1:
-        return [analyze_and_draft(emails[0], profile=profile)]
+        result = analyze_and_draft(emails[0], profile=profile)
+        if progress_callback is not None:
+            progress_callback(1, 1)
+        return [result]
     results = [None] * len(emails)
     parent_context = contextvars.copy_context()
     with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -734,6 +738,7 @@ def analyze_many(emails, profile=None, max_workers=None):
             ): index
             for index, email in enumerate(emails)
         }
+        completed = 0
         for future in as_completed(futures):
             index = futures[future]
             try:
@@ -743,6 +748,9 @@ def analyze_many(emails, profile=None, max_workers=None):
                     "Concurrent analysis failed at item %d (%s); it will use "
                     "the resumable fallback", index, type(exc).__name__,
                 )
+            completed += 1
+            if progress_callback is not None:
+                progress_callback(completed, len(emails))
     return results
 
 

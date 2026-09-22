@@ -1135,7 +1135,13 @@ def _run_locked(args, classifier, config, templates, state, status,
             "Analyzing emails concurrently", counts,
             current=0, total=len(generation_emails),
         )
-        analyzed = analyze_many(generation_emails, profile=args.profile)
+        analyzed = analyze_many(
+            generation_emails, profile=args.profile,
+            progress_callback=lambda current, total: status.progress(
+                "Analyzing emails concurrently", counts,
+                current=current, total=total,
+            ),
+        )
         for index, result in zip(generation_indices, analyzed):
             combined_results[index] = result
 
