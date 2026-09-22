@@ -130,7 +130,7 @@ def test_login_cookie_opens_the_dashboard(tmp_path):
     app = _app(tmp_path)
     response = _call(app, cookie=_login(app))
     assert response["status"].startswith("200")
-    assert "No Gmail account connected" in response["body"]
+    assert "No Gmail account is connected" in response["body"]
 
 
 def test_visiting_login_while_already_signed_in_goes_straight_to_the_dashboard(
@@ -265,7 +265,7 @@ def test_signout_confirmation_disconnects_gmail_and_clears_session(tmp_path):
     assert connection.current(tmp_path) is None
 
     page = _call(app, "/login", query="signed_out=1")
-    assert "account slot is ready for a different Gmail account" in page["body"]
+    assert "can now connect a different Gmail account" in page["body"]
 
 
 def test_signout_refuses_wrong_address_without_clearing_session(tmp_path):
@@ -294,7 +294,7 @@ def test_signout_refuses_wrong_address_without_clearing_session(tmp_path):
         _login(app),
     )
     assert response["status"].startswith("400")
-    assert "type the connected Gmail address exactly" in response["body"]
+    assert "Type the connected Gmail address exactly" in response["body"]
     assert "Set-Cookie" not in response["headers"]
     assert connection.current(tmp_path).account == address
 
@@ -360,18 +360,18 @@ def test_connected_owner_can_open_and_save_settings(tmp_path):
 
     page = _call(app, "/settings", cookie=cookie)
     assert page["status"].startswith("200")
-    assert "Shape your daily assistant" in page["body"]
+    assert "Set up your inbox workflow" in page["body"]
     assert "Your voice and program" in page["body"]
     assert 'name="role"' in page["body"]
     assert 'name="organization"' in page["body"]
     assert 'value="America/New_York"' in page["body"]
     assert 'value="America/Los_Angeles"' in page["body"]
-    assert "server even when this page" in page["body"]
+    assert "server runs daily" in page["body"]
     assert "use existing labels only" in page["body"]
     assert 'name="needs_review_label"' in page["body"]
     assert 'name="processed_label"' in page["body"]
     assert "Nothing is auto-sent" not in page["body"]
-    assert "Responses must stay unsent" in page["body"]
+    assert "Responses will remain in Gmail as drafts" in page["body"]
 
     response = _call(
         app, "/settings", "POST", _settings_form(app), cookie
@@ -764,8 +764,11 @@ def test_undo_button_previews_and_queues_latest_recorded_run(tmp_path):
     dashboard = _call(app, cookie=cookie)
     assert "Undo drafts and labels" in dashboard["body"]
     assert "There is no item" in dashboard["body"]
+    assert "1 created draft" in dashboard["body"]
+    assert "2 label changes" in dashboard["body"]
     preview = _call(app, "/undo", cookie=cookie)
     assert "Type UNDO to continue" in preview["body"]
+    assert "1 draft to" in preview["body"]
     response = _call(
         app, "/undo", "POST",
         urlencode({
@@ -876,7 +879,7 @@ def test_oauth_callback_explains_a_different_account_without_leaking_it(tmp_path
 def test_login_explains_any_gmail_is_allowed_but_only_one_at_a_time(tmp_path):
     page = _call(_app(tmp_path, control=object()), "/login")
     assert "Connect any Gmail account" in page["body"]
-    assert "supports one account at a time" in page["body"]
+    assert "connect one" in page["body"] and "account at a time" in page["body"]
 
 
 def test_disconnect_requires_csrf_and_passes_typed_address(tmp_path):
@@ -925,7 +928,7 @@ def test_disconnect_shows_the_real_mismatch_message(tmp_path):
         _login(app),
     )
     assert response["status"].startswith("400")
-    assert "type the connected Gmail address exactly" in response["body"]
+    assert "Type the connected Gmail address exactly" in response["body"]
     assert connection.current(tmp_path).account == address
 
 

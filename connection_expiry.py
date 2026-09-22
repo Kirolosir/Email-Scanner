@@ -74,7 +74,7 @@ def expected_expiry(connection):
 
 def _describe(days):
     if days < 0:
-        return "Connection expired - reconnect required"
+        return "Connection expired — reconnect required"
     if days < 1:
         return "Connection expected to expire in under a day"
     whole = int(days)
@@ -101,7 +101,7 @@ def expiry_state(connection, now, last_successful_run=None):
             "basis": BASIS,
             "last_successful_run": evidence_iso,
             "evidence_overrides_prediction": False,
-            "summary": "Connection age unknown - reconnect to establish it",
+            "summary": "Connection age unknown — reconnect to establish it",
         }
 
     days = (expiry - now).total_seconds() / 86400.0
@@ -113,7 +113,7 @@ def expiry_state(connection, now, last_successful_run=None):
     if overridden:
         state = HEALTHY
         summary = (
-            "Past the expected window, but a run succeeded since - "
+            "Past the expected window, but a run succeeded afterward — "
             "the estimate was wrong, not the connection"
         )
     elif days < 0:

@@ -94,8 +94,8 @@ HTML_HEADERS = [
 
 CONNECT_ERROR_MESSAGES = {
     "account_mismatch": (
-        "One Gmail account is already connected. Continue with that account, "
-        "then choose Sign out & disconnect before linking a different account."
+        "One Gmail account is already connected. To use a different account, "
+        "sign out and disconnect the current account first."
     ),
     "consent_cancelled": (
         "Google access was cancelled or declined. Try again and approve the "
@@ -105,19 +105,20 @@ CONNECT_ERROR_MESSAGES = {
         "That Google sign-in expired. Start again and finish within ten minutes."
     ),
     "token_exchange_failed": (
-        "Google could not finish issuing access. Start again in Chrome or Safari."
+        "Google could not complete the authorization. Start again in Chrome "
+        "or Safari."
     ),
     "gmail_profile_failed": (
-        "Google connected, but Gmail could not confirm the account. Make sure "
-        "Gmail is available for the account you choose."
+        "Google sign-in completed, but Gmail could not confirm the account. "
+        "Make sure Gmail is available for the account you choose."
     ),
     "credential_storage_failed": (
         "Google approved access, but the secure connection could not be saved. "
         "Nothing was replaced; try again shortly."
     ),
     "configuration_failed": (
-        "Google linking is temporarily unavailable because the site setup is "
-        "incomplete."
+        "Google sign-in is temporarily unavailable because the server "
+        "configuration is incomplete."
     ),
     "start_failed": "Google sign-in could not start. Try again shortly.",
     "callback_invalid": "Google returned an incomplete sign-in. Start again.",
@@ -133,6 +134,20 @@ def _connect_error_code(error, fallback="connect_failed"):
 def _escape(value, fallback="—"):
     value = str(value or "").strip()
     return html.escape(value[:300] if value else fallback)
+
+
+def _count_phrase(value, singular, plural=None):
+    count = value if isinstance(value, int) and not isinstance(value, bool) else 0
+    noun = singular if count == 1 else (plural or f"{singular}s")
+    return f"{count} {noun}"
+
+
+def _sentence_text(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = text[0].upper() + text[1:]
+    return text if text.endswith((".", "!", "?")) else text + "."
 
 
 def _read_json(path):
@@ -268,7 +283,7 @@ def _run_feedback(occupant, now, run_state="", requested_epoch=None):
     """Return human feedback and whether the page should refresh again."""
     if run_state == "invalid-count":
         return (
-            '<p class="notice bad">Choose a whole number from 1 to '
+            '<p class="notice bad">Choose a whole number between 1 and '
             f'{hosted_run_request.MAX_HISTORY_MESSAGES} for the history scan.'
             '</p>', False,
         )
@@ -280,14 +295,14 @@ def _run_feedback(occupant, now, run_state="", requested_epoch=None):
         )
     if run_state == "not-ready":
         return (
-            '<p class="notice bad">The number is valid, but this inbox is not '
-            'ready to scan yet. <a href="/settings">Finish inbox settings</a> '
+            '<p class="notice bad">This inbox is not ready to scan yet. '
+            '<a href="/settings">Finish the inbox settings</a> '
             'first, then run the history scan again.</p>', False,
         )
     if run_state == "failed":
         return (
-            '<p class="notice bad">The run could not be requested. Nothing '
-            'was changed; try again shortly.</p>', False,
+            '<p class="notice bad">The scan could not be started. Nothing '
+            'changed; try again shortly.</p>', False,
         )
     if run_state == "cancel-failed":
         return (
@@ -308,7 +323,7 @@ def _run_feedback(occupant, now, run_state="", requested_epoch=None):
     if auth_error_is_current:
         return (
             '<p class="notice bad"><strong>Google needs to be reconnected.</strong> '
-            'Use Link Google account, then press Run now again.</p>', False,
+            'Select Link Google account, then select Scan new mail again.</p>', False,
         )
 
     if run_state == "cancel-requested":
@@ -321,7 +336,7 @@ def _run_feedback(occupant, now, run_state="", requested_epoch=None):
         if details["outcome"] == "cancelled":
             return (
                 '<p class="notice good"><strong>Run cancelled.</strong> '
-                'Completed drafts and labels were kept.</p>', False,
+                'Drafts and labels already created were kept.</p>', False,
             )
     if run_state not in {"requested", "checking", "cancel-requested"} \
             or requested_epoch is None:
@@ -348,7 +363,7 @@ def _run_feedback(occupant, now, run_state="", requested_epoch=None):
     if is_current_run and details["outcome"] == "failed":
         return (
             '<p class="notice bad"><strong>The run stopped safely.</strong> '
-            'No email was sent. Reconnect Google or review your settings, then '
+            'No emails were sent. Reconnect Google or review your settings, then '
             'try again.</p>', False,
         )
     if is_current_run and details["outcome"] == "cancelled":
@@ -371,7 +386,7 @@ def _run_feedback(occupant, now, run_state="", requested_epoch=None):
         )
     return (
         '<p class="notice bad"><strong>The run is taking longer than expected.'
-        '</strong> Reconnect Google, then try Run now again.</p>', False,
+        '</strong> Reconnect Google, then select Scan new mail again.</p>', False,
     )
 
 
@@ -461,7 +476,7 @@ def _render_failure_alert(details):
       <section class="failure-alert" role="alert">
         <div><p class="eyebrow">Run needs attention</p>
           <h2>The last scan stopped safely</h2>
-          <p>{html.escape(action)} No email was sent.</p></div>
+          <p>{html.escape(action)} No emails were sent.</p></div>
         <a class="secondary" href="/settings">Review settings</a>
       </section>"""
 
@@ -1110,9 +1125,9 @@ class HostedDashboardApp:
         )
         if signed_out:
             connect_notice = (
-                '<p class="notice good">Signed out. Google access was revoked '
-                'when available, the stored Gmail credential was removed, and '
-                'the account slot is ready for a different Gmail account.</p>'
+                '<p class="notice good">Signed out. The stored Gmail credential '
+                'was removed, and Google access was revoked when possible. You '
+                'can now connect a different Gmail account.</p>'
             )
         google_link = ""
         if self.control is not None:
@@ -1136,13 +1151,13 @@ class HostedDashboardApp:
               <div class="mark">ES</div>
               <p class="eyebrow">Email Scanner</p>
               <h1>Continue with Google</h1>
-              <p class="lede">Connect any Gmail account. This installation
-              supports one account at a time.</p>
+              <p class="lede">Connect any Gmail account. You can connect one
+              account at a time.</p>
               {connect_notice}
               {google_link}
-              <p class="browser-note">Google returns you to the dashboard in
-              this same browser. If this page is inside another app, open it
-              in Chrome or Safari first.</p>
+              <p class="browser-note">After you sign in, Google will return you
+              to the dashboard in this browser. If you opened this page inside
+              another app, continue in Chrome or Safari.</p>
             </section>
           </main>
         """)
@@ -1159,7 +1174,7 @@ class HostedDashboardApp:
             occupant = None
 
         if occupant is None:
-            account = "No Gmail account connected"
+            account = "No Gmail account is connected"
             next_run = "—"
             labels = []
             counts = {}
@@ -1183,7 +1198,15 @@ class HostedDashboardApp:
         last = public.get("last_run") or {}
         connected = state.get("state") == "connected"
         status_tone = "good" if connected else "warn"
-        status_text = "Active" if connected else state.get("state", "Vacant")
+        status_text = "Active" if connected else str(
+            state.get("state", "Vacant")
+        ).replace("_", " ").title()
+        last_outcome = {
+            "success": "Completed",
+            "failed": "Stopped safely",
+            "running": "Running",
+            "cancelled": "Cancelled",
+        }.get(str(last.get("outcome") or ""), "Not run yet")
         cancel_form = (
             '<form method="post" action="/cancel-run">'
             f'<input type="hidden" name="csrf" value="{self._csrf_value()}">'
@@ -1267,8 +1290,8 @@ class HostedDashboardApp:
         ) or '<li class="empty">Label setup is not finished yet.</li>'
 
         saved_notice = (
-            '<p class="notice good">Settings saved. The reviewed Gmail labels '
-            'will be prepared before the next daily run.</p>' if saved else ""
+            '<p class="notice good">Settings saved. Gmail labels will be '
+            'checked before the next daily run.</p>' if saved else ""
         )
         connection_notice = ""
         if just_connected:
@@ -1306,11 +1329,11 @@ class HostedDashboardApp:
             <div><p class="eyebrow">Inbox catch-up</p>
               <h2>Start background backfill</h2>
               <p>Scan previous emails in the background. Choose how many of
-              the newest eligible messages to check.
+              the most recent eligible messages to scan.
               Every message with a usable reply address ends with one unsent
-              draft. Existing drafts are kept, and deleted program drafts are
-              rebuilt instead of being silently skipped.
-              Large backfills run in resumable groups while new-mail scans keep
+              draft. Existing drafts are preserved, and drafts created by this
+              app are rebuilt if they were deleted.
+              Large backfills run in resumable groups, while new-mail scans take
               priority between groups. You can close this page and return later.</p></div>
             <form method="post" action="/run-history">
               <input type="hidden" name="csrf" value="{self._csrf_value()}">
@@ -1326,9 +1349,10 @@ class HostedDashboardApp:
           <section class="panel undo-run">
             <div><p class="eyebrow">Previous run</p>
               <h2>Undo drafts and labels</h2>
-              <p>Undo {_escape(rollback_summary.get('drafts'))} created drafts
-              and {_escape(rollback_summary.get('labels'))} label changes across
-              {_escape(rollback_summary.get('messages'))} emails. You will review
+              <p>Undo {_count_phrase(rollback_summary.get('drafts'), 'created draft')}
+              and {_count_phrase(rollback_summary.get('labels'), 'label change')}
+              across {_count_phrase(rollback_summary.get('messages'), 'email')}.
+              You will review
               the impact and confirm before anything changes. There is no item
               limit.</p></div>
             <a class="secondary danger-link" href="/undo">Review undo</a>
@@ -1350,7 +1374,7 @@ class HostedDashboardApp:
                 <p class="eyebrow">Connected inbox</p>
                 <h1>{_escape(account)}</h1>
                 <p class="lede">Gemini organizes eligible mail and prepares
-                unsent Gmail drafts for review. Nothing is auto-sent.</p>
+                unsent Gmail drafts for review. Nothing is sent automatically.</p>
               </div>
               <div class="hero-actions"><span class="status {status_tone}"><i></i>{_escape(status_text)}</span>
                 {connect_form}{run_form}</div>
@@ -1364,17 +1388,17 @@ class HostedDashboardApp:
                 <h2>{_escape(next_run)}</h2>
                 <p>Up to {_escape(state.get("limits", {}).get("max_scan"))}
                 recent messages per run. Every eligible message in the batch
-                is labeled and drafted. This runs on the server even when the
+                is labeled and drafted. The server runs this scan even when the
                 website and your browser are closed.</p>
               </article>
               <article class="panel health">
                 <p class="eyebrow">Gmail connection</p>
                 <h2>{_escape(expiry.get("summary"), "Waiting for connection")}</h2>
-                <p>Last authorized {_escape(state.get("last_authorized_at"))}</p>
+                <p>Last authorized: {_escape(state.get("last_authorized_at"))}</p>
               </article>
               <article class="panel last-run">
                 <p class="eyebrow">Last run</p>
-                <h2>{_escape(last.get("outcome"), "Not run yet")}</h2>
+                <h2>{_escape(last_outcome)}</h2>
                 <p>{_escape(last.get("finished_at"), "No completed run yet")}</p>
               </article>
             </section>
@@ -1440,11 +1464,11 @@ class HostedDashboardApp:
             <section class="panel danger-zone undo-confirm">
               <div><p class="eyebrow">Confirm rollback</p>
                 <h1>Undo the previous run?</h1>
-                <p>This will remove {_escape(summary.get('labels'))} labels added
-                by that run and move {_escape(summary.get('drafts'))} drafts to
+                <p>This will remove {_count_phrase(summary.get('labels'), 'label')}
+                added by that run and move {_count_phrase(summary.get('drafts'), 'draft')} to
                 Gmail Trash. If you edited one of those drafts, your edits will
                 move to Trash with it. The whole run is included, regardless of
-                size. No email will be sent.</p></div>
+                size. No emails will be sent.</p></div>
               <form method="post" action="/undo">
                 <input type="hidden" name="csrf" value="{self._csrf_value()}">
                 <input type="hidden" name="group_id"
@@ -1546,12 +1570,13 @@ class HostedDashboardApp:
             f'<li>{html.escape(name)}</li>' for name in catalog
         )
         catalog_summary = (
-            f"{len(catalog)} current Gmail labels loaded. Use their exact names."
+            f"Loaded {len(catalog)} labels from Gmail. Use the exact names shown below."
             if catalog else
-            "Current Gmail labels have not been loaded yet. Reconnect Google once to refresh them."
+            "Gmail labels have not been loaded yet. Reconnect Google to refresh them."
         )
         error_notice = (
-            f'<p class="notice bad">{html.escape(str(error))}</p>' if error else ""
+            f'<p class="notice bad">{html.escape(_sentence_text(error))}</p>'
+            if error else ""
         )
         return self._page("Settings", f"""
           <header class="topbar">
@@ -1564,7 +1589,7 @@ class HostedDashboardApp:
           <main class="workspace settings-shell">
             <section class="account-hero compact">
               <div><p class="eyebrow">Inbox settings</p>
-                <h1>Shape your daily assistant</h1>
+                <h1>Set up your inbox workflow</h1>
                 <p class="lede">Choose the labels, schedule, and batch size
                 for {_escape(occupant.account)}.</p></div>
             </section>
@@ -1576,7 +1601,7 @@ class HostedDashboardApp:
                   <h2>Gmail labels</h2><p>Enter one label per line. Use
                   <strong>Display name | Gmail label</strong>. “Other” is added
                   automatically if omitted.</p></div>
-                <div><label for="labels">Labels, up to 12</label>
+                <div><label for="labels">Labels (up to 12)</label>
                   <textarea id="labels" name="labels" rows="8" required
                     spellcheck="false">{fields['labels']}</textarea>
                   <p class="field-note">Example: Scheduling | Scheduling</p>
@@ -1611,8 +1636,8 @@ class HostedDashboardApp:
               <section class="panel form-section">
                 <div class="form-copy"><p class="eyebrow">2 · Schedule</p>
                   <h2>Daily run</h2><p>This local time controls when the
-                  service checks eligible inbox mail. Runs happen on the
-                  server even when this page and your browser are closed.</p></div>
+                  service checks eligible inbox mail. The server runs daily
+                  scans even when this page and your browser are closed.</p></div>
                 <div class="field-grid">
                   <div><label for="run_at">Start time</label><input id="run_at"
                     name="run_at" type="time" value="{fields['run_at']}" required></div>
@@ -1629,7 +1654,7 @@ class HostedDashboardApp:
                       <option value="America/Los_Angeles">Pacific</option>
                       <option value="UTC">UTC</option>
                     </datalist></div>
-                  <div><label for="max_scan">Messages scanned</label><input
+                  <div><label for="max_scan">Messages per daily scan</label><input
                     id="max_scan" name="max_scan" type="number" min="1"
                     max="{hosted_settings.MAX_MESSAGES_PER_RUN}"
                     value="{fields['max_scan']}" required>
@@ -1668,17 +1693,18 @@ class HostedDashboardApp:
               <section class="panel confirmation">
                 <label class="check-row"><input type="checkbox"
                   name="confirm_unsent_drafts" value="yes" required>
-                  <span><strong>I approve these labels and generated drafts.</strong>
-                  Responses must stay unsent in Gmail until I review and send
-                  them myself.</span></label>
+                  <span><strong>I approve these labels and the creation of unsent drafts.</strong>
+                  Responses will remain in Gmail as drafts until I review and
+                  send them myself.</span></label>
                 <div class="save-row"><a href="/">Cancel</a>
-                  <button type="submit">Save and prepare labels</button></div>
+                  <button type="submit">Save settings</button></div>
               </section>
             </form>
             <section class="panel danger-zone">
               <div><p class="eyebrow">Disconnect</p><h2>Remove this Gmail account</h2>
-                <p>This revokes Google access when available, destroys the local
-                credential, stops daily runs, and archives prior settings and history.</p></div>
+                <p>This revokes Google access when possible, removes the stored
+                Gmail credential, stops daily runs, and archives previous settings
+                and run history.</p></div>
               <form method="post" action="/disconnect">
                 <input type="hidden" name="csrf" value="{self._csrf_value()}">
                 <label for="confirmation">Type {_escape(occupant.account)} to confirm</label>
@@ -1692,7 +1718,8 @@ class HostedDashboardApp:
 
     def _signout_page(self, occupant, error=""):
         error_notice = (
-            f'<p class="notice bad">{html.escape(str(error))}</p>' if error else ""
+            f'<p class="notice bad">{html.escape(_sentence_text(error))}</p>'
+            if error else ""
         )
         if occupant is None:
             confirmation = ""
@@ -1705,9 +1732,10 @@ class HostedDashboardApp:
         else:
             confirmation = _escape(occupant.account)
             copy = (
-                "This revokes Google access when available, removes the encrypted "
-                "Gmail credential, stops future runs, and frees the one-account "
-                "slot. Existing Gmail labels and drafts stay in the mailbox."
+                "This revokes Google access when possible, removes the encrypted "
+                "Gmail credential, and stops future runs. You can then connect "
+                "a different Gmail account. Existing Gmail labels and drafts "
+                "will remain in the mailbox."
             )
             field = f"""
               <label for="confirmation">Type {confirmation} to confirm</label>
